@@ -60,6 +60,8 @@ export interface Config {
   authBaseUrlMode: AuthBaseUrlMode;
   authPublicBaseUrl: string | undefined;
   authDisableSignUp: boolean;
+  googleClientId: string | undefined;
+  googleClientSecret: string | undefined;
   databaseMode: DatabaseMode;
   databaseUrl: string | undefined;
   databaseMigrationUrl: string | undefined;
@@ -213,6 +215,10 @@ export function loadConfig(): Config {
     disableSignUpFromEnv !== undefined
       ? disableSignUpFromEnv === "true"
       : (fileConfig?.auth?.disableSignUp ?? false);
+  const googleClientId =
+    (process.env.PAPERCLIP_GOOGLE_CLIENT_ID ?? process.env.GOOGLE_CLIENT_ID)?.trim() || undefined;
+  const googleClientSecret =
+    (process.env.PAPERCLIP_GOOGLE_CLIENT_SECRET ?? process.env.GOOGLE_CLIENT_SECRET)?.trim() || undefined;
   const allowedHostnamesFromEnvRaw = process.env.PAPERCLIP_ALLOWED_HOSTNAMES;
   const allowedHostnamesFromEnv = allowedHostnamesFromEnvRaw
     ? allowedHostnamesFromEnvRaw
@@ -296,6 +302,8 @@ export function loadConfig(): Config {
     authBaseUrlMode,
     authPublicBaseUrl,
     authDisableSignUp,
+    googleClientId,
+    googleClientSecret,
     databaseMode: fileDatabaseMode,
     databaseUrl: process.env.DATABASE_URL ?? fileDbUrl,
     databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL,
