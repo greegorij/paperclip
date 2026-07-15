@@ -698,6 +698,8 @@ export async function startServer(): Promise<StartedServer> {
     betterAuthHandler,
     resolveSession,
     pluginWorkerManager,
+    googleClientId: config.googleClientId,
+    googleClientSecret: config.googleClientSecret,
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
 

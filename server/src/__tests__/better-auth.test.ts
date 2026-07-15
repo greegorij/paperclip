@@ -1,22 +1,41 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BetterAuthOptions } from "better-auth";
 import { getCookies } from "better-auth/cookies";
 import {
   buildBetterAuthAdvancedOptions,
   buildBetterAuthRateLimitOptions,
+  createBetterAuthInstance,
   deriveAuthCookiePrefix,
   deriveAuthTrustedOrigins,
   shouldDisableSecureAuthCookies,
 } from "../auth/better-auth.js";
+import type { Config } from "../config.js";
+
+const betterAuthMock = vi.hoisted(() => vi.fn((config: unknown) => ({
+  handler: vi.fn(),
+  api: {},
+})));
+
+vi.mock("better-auth", () => ({
+  betterAuth: betterAuthMock,
+}));
+
+vi.mock("better-auth/adapters/drizzle", () => ({
+  drizzleAdapter: vi.fn(() => ({})),
+}));
 
 const ORIGINAL_INSTANCE_ID = process.env.PAPERCLIP_INSTANCE_ID;
 const ORIGINAL_PUBLIC_URL = process.env.PAPERCLIP_PUBLIC_URL;
+const ORIGINAL_BETTER_AUTH_SECRET = process.env.BETTER_AUTH_SECRET;
 
 afterEach(() => {
   if (ORIGINAL_INSTANCE_ID === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
   else process.env.PAPERCLIP_INSTANCE_ID = ORIGINAL_INSTANCE_ID;
   if (ORIGINAL_PUBLIC_URL === undefined) delete process.env.PAPERCLIP_PUBLIC_URL;
   else process.env.PAPERCLIP_PUBLIC_URL = ORIGINAL_PUBLIC_URL;
+  if (ORIGINAL_BETTER_AUTH_SECRET === undefined) delete process.env.BETTER_AUTH_SECRET;
+  else process.env.BETTER_AUTH_SECRET = ORIGINAL_BETTER_AUTH_SECRET;
+  betterAuthMock.mockClear();
 });
 
 describe("Better Auth cookie scoping", () => {
@@ -211,5 +230,66 @@ describe("Better Auth cookie scoping", () => {
     ]));
     expect(trustedOrigins).not.toContain("https://board.example.test:3100");
     expect(trustedOrigins).not.toContain("http://board.example.test:3100");
+  });
+});
+
+describe("Better Auth Google social provider", () => {
+  const baseConfig = {
+    deploymentMode: "authenticated",
+    deploymentExposure: "private",
+    authBaseUrlMode: "auto",
+    authPublicBaseUrl: undefined,
+    authDisableSignUp: false,
+    allowedHostnames: [],
+    port: 3100,
+  } as Config;
+
+  beforeEach(() => {
+    process.env.BETTER_AUTH_SECRET = "test-secret";
+  });
+
+  it("enables Google social provider only when both client id and secret are set", () => {
+    createBetterAuthInstance({} as never, {
+      ...baseConfig,
+      googleClientId: "google-client-id",
+      googleClientSecret: "google-client-secret",
+    }, []);
+
+    expect(betterAuthMock).toHaveBeenCalledWith(expect.objectContaining({
+      socialProviders: {
+        google: {
+          clientId: "google-client-id",
+          clientSecret: "google-client-secret",
+        },
+      },
+      account: {
+        accountLinking: {
+          enabled: true,
+          trustedProviders: ["google"],
+        },
+      },
+    }));
+  });
+
+  it("omits Google social provider and account linking when only one credential is set", () => {
+    createBetterAuthInstance({} as never, {
+      ...baseConfig,
+      googleClientId: "google-client-id",
+      googleClientSecret: undefined,
+    }, []);
+    const configWithIdOnly = betterAuthMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(configWithIdOnly).not.toHaveProperty("socialProviders");
+    expect(configWithIdOnly).not.toHaveProperty("account");
+
+    betterAuthMock.mockClear();
+
+    createBetterAuthInstance({} as never, {
+      ...baseConfig,
+      googleClientId: undefined,
+      googleClientSecret: "google-client-secret",
+    }, []);
+    const configWithSecretOnly = betterAuthMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(configWithSecretOnly).not.toHaveProperty("socialProviders");
+    expect(configWithSecretOnly).not.toHaveProperty("account");
   });
 });

@@ -185,6 +185,22 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
       deploymentExposure: config.deploymentExposure,
       override: process.env.PAPERCLIP_AUTH_RATE_LIMIT_ENABLED,
     }),
+    ...(config.googleClientId && config.googleClientSecret
+      ? {
+          socialProviders: {
+            google: {
+              clientId: config.googleClientId,
+              clientSecret: config.googleClientSecret,
+            },
+          },
+          account: {
+            accountLinking: {
+              enabled: true,
+              trustedProviders: ["google"],
+            },
+          },
+        }
+      : {}),
     advanced: buildBetterAuthAdvancedOptions({ disableSecureCookies }),
   };
 

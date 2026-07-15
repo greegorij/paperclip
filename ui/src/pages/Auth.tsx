@@ -31,6 +31,12 @@ export function AuthPage() {
     queryFn: () => authApi.getSession(),
     retry: false,
   });
+  const { data: authMethods } = useQuery({
+    queryKey: queryKeys.auth.methods,
+    queryFn: () => authApi.authMethods(),
+    retry: false,
+  });
+  const [socialPending, setSocialPending] = useState(false);
 
   useEffect(() => {
     if (session) {
@@ -97,8 +103,36 @@ export function AuthPage() {
               : "Create an account for this instance. Email confirmation is not required in v1."}
           </p>
 
+          {mode === "sign_in" && authMethods?.google && (
+            <div className="mt-6 space-y-4">
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                disabled={socialPending}
+                onClick={async () => {
+                  setError(null);
+                  setSocialPending(true);
+                  try {
+                    await authApi.signInSocial("google");
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : "Authentication failed");
+                    setSocialPending(false);
+                  }
+                }}
+              >
+                {socialPending ? "Working…" : "Continue with Google"}
+              </Button>
+              <div className="flex items-center gap-3">
+                <div className="h-px flex-1 bg-border" />
+                <span className="text-xs text-muted-foreground">or</span>
+                <div className="h-px flex-1 bg-border" />
+              </div>
+            </div>
+          )}
+
           <form
-            className="mt-6 space-y-4"
+            className={`space-y-4 ${mode === "sign_in" && authMethods?.google ? "mt-4" : "mt-6"}`}
             method="post"
             action={mode === "sign_up" ? "/api/auth/sign-up/email" : "/api/auth/sign-in/email"}
             onSubmit={(event) => {

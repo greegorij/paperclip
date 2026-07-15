@@ -11,12 +11,14 @@ import { AuthPage } from "./Auth";
 const getSessionMock = vi.hoisted(() => vi.fn());
 const signInEmailMock = vi.hoisted(() => vi.fn());
 const signUpEmailMock = vi.hoisted(() => vi.fn());
+const authMethodsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../api/auth", () => ({
   authApi: {
     getSession: () => getSessionMock(),
     signInEmail: (input: unknown) => signInEmailMock(input),
     signUpEmail: (input: unknown) => signUpEmailMock(input),
+    authMethods: () => authMethodsMock(),
   },
 }));
 
@@ -88,6 +90,7 @@ describe("AuthPage", () => {
     getSessionMock.mockResolvedValue(null);
     signInEmailMock.mockResolvedValue(undefined);
     signUpEmailMock.mockResolvedValue(undefined);
+    authMethodsMock.mockResolvedValue({ emailAndPassword: true, google: false });
   });
 
   afterEach(() => {
@@ -251,6 +254,34 @@ describe("AuthPage", () => {
 
     await act(async () => {
       root.unmount();
+    });
+  });
+
+  it("renders the Google sign-in button only when Google auth is enabled", async () => {
+    authMethodsMock.mockResolvedValue({ emailAndPassword: true, google: false });
+    const { root: rootWithoutGoogle } = await mount();
+
+    expect(
+      Array.from(container.querySelectorAll("button")).some(
+        (button) => button.textContent === "Continue with Google",
+      ),
+    ).toBe(false);
+
+    await act(async () => {
+      rootWithoutGoogle.unmount();
+    });
+
+    authMethodsMock.mockResolvedValue({ emailAndPassword: true, google: true });
+    const { root: rootWithGoogle } = await mount();
+
+    expect(
+      Array.from(container.querySelectorAll("button")).some(
+        (button) => button.textContent === "Continue with Google",
+      ),
+    ).toBe(true);
+
+    await act(async () => {
+      rootWithGoogle.unmount();
     });
   });
 });

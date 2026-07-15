@@ -183,4 +183,26 @@ export const authApi = {
   signOut: async () => {
     await authPost("/sign-out", {});
   },
+
+  signInSocial: async (provider: "google") => {
+    const res = await fetch("/api/auth/sign-in/social", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ provider, callbackURL: window.location.origin + "/" }),
+    });
+    const payload = await res.json().catch(() => null);
+    if (!res.ok) {
+      throw extractAuthError(payload as AuthErrorBody, res.status);
+    }
+    const data = payload as { url?: string; redirect?: boolean } | null;
+    if (data?.url) window.location.href = data.url;
+  },
+
+  authMethods: async () => {
+    const res = await fetch("/api/auth-methods", { credentials: "include" });
+    return res.ok
+      ? (res.json() as Promise<{ emailAndPassword: boolean; google: boolean }>)
+      : { emailAndPassword: true, google: false };
+  },
 };

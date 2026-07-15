@@ -166,6 +166,8 @@ export async function createApp(
     pluginWorkerManager?: PluginWorkerManager;
     betterAuthHandler?: express.RequestHandler;
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
+    googleClientId?: string;
+    googleClientSecret?: string;
   },
 ) {
   const app = express();
@@ -210,6 +212,12 @@ export async function createApp(
       resolveSession: opts.resolveSession,
     }),
   );
+  app.get("/api/auth-methods", (_req, res) => {
+    res.json({
+      emailAndPassword: true,
+      google: Boolean(opts.googleClientId && opts.googleClientSecret),
+    });
+  });
   app.use("/api/auth", authRoutes(db));
   if (opts.betterAuthHandler) {
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
