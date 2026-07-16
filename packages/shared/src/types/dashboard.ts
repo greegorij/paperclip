@@ -44,6 +44,8 @@ export interface DashboardSummary {
     monthUtilizationPercent: number;
   };
   pendingApprovals: number;
+  /** Fork layer: pending request_confirmation decision cards across issue threads. */
+  pendingDecisionCards?: number;
   budgets: {
     activeIncidents: number;
     pendingApprovals: number;
