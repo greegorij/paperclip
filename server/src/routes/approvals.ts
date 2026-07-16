@@ -1,6 +1,6 @@
 import { Router, type Request } from "express";
-import { eq } from "drizzle-orm";
-import { heartbeatRuns, type Db } from "@paperclipai/db";
+import { and, desc, eq } from "drizzle-orm";
+import { heartbeatRuns, issueThreadInteractions, issues, type Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
   createApprovalSchema,
@@ -111,6 +111,52 @@ export function approvalRoutes(
     const status = req.query.status as string | undefined;
     const result = await svc.list(companyId, status);
     res.json(result.map((approval) => redactApprovalPayload(approval)));
+  });
+
+  // Fork layer: agents ask humans for decisions via request_confirmation cards in
+  // issue threads, not via the formal approvals table (which they have no tool to
+  // create). Those cards had no company-wide listing, so pending decisions were
+  // only discoverable by opening issues one by one. Read-only; resolving still
+  // happens in the issue thread.
+  router.get("/companies/:companyId/decision-cards", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    if (!(await assertApprovalAccessAllowed(req, res, companyId))) return;
+    const rows = await db
+      .select({
+        id: issueThreadInteractions.id,
+        issueId: issueThreadInteractions.issueId,
+        status: issueThreadInteractions.status,
+        payload: issueThreadInteractions.payload,
+        createdAt: issueThreadInteractions.createdAt,
+        createdByAgentId: issueThreadInteractions.createdByAgentId,
+        issueIdentifier: issues.identifier,
+        issueTitle: issues.title,
+      })
+      .from(issueThreadInteractions)
+      .innerJoin(issues, and(
+        eq(issues.id, issueThreadInteractions.issueId),
+        // Defence in depth: scope the joined issue to the same company, so a
+        // cross-company issueId could never leak an identifier/title through.
+        eq(issues.companyId, companyId),
+      ))
+      .where(and(
+        eq(issueThreadInteractions.companyId, companyId),
+        eq(issueThreadInteractions.kind, "request_confirmation"),
+        eq(issueThreadInteractions.status, "pending"),
+      ))
+      .orderBy(desc(issueThreadInteractions.createdAt));
+    res.json(rows.map((row) => ({
+      id: row.id,
+      issueId: row.issueId,
+      issueIdentifier: row.issueIdentifier,
+      issueTitle: row.issueTitle,
+      prompt: typeof (row.payload as { prompt?: unknown } | null)?.prompt === "string"
+        ? ((row.payload as { prompt: string }).prompt)
+        : null,
+      createdByAgentId: row.createdByAgentId,
+      createdAt: row.createdAt,
+    })));
   });
 
   router.get("/approvals/:id", async (req, res) => {

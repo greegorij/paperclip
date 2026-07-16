@@ -891,6 +891,7 @@ export type {
   Goal,
   Approval,
   ApprovalComment,
+  DecisionCard,
   BudgetPolicy,
   BudgetPolicySummary,
   BudgetIncident,

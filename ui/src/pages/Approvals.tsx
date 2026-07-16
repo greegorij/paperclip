@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useLocation } from "@/lib/router";
+import { useNavigate, useLocation, Link } from "@/lib/router";
+import { timeAgo } from "../lib/timeAgo";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { approvalsApi } from "../api/approvals";
 import { agentsApi } from "../api/agents";
@@ -39,6 +40,12 @@ export function Approvals() {
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
     queryFn: () => agentsApi.list(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+  });
+
+  const { data: decisionCards } = useQuery({
+    queryKey: [...queryKeys.approvals.list(selectedCompanyId!), "decision-cards"] as const,
+    queryFn: () => approvalsApi.listDecisionCards(selectedCompanyId!),
     enabled: !!selectedCompanyId,
   });
 
@@ -104,11 +111,45 @@ export function Approvals() {
       {error && <p className="text-sm text-destructive">{error.message}</p>}
       {actionError && <p className="text-sm text-destructive">{actionError}</p>}
 
+      {statusFilter === "pending" && (decisionCards?.length ?? 0) > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-medium">Decision cards</h2>
+            <Badge variant="ghost" className="bg-yellow-500/20 text-yellow-500 px-1.5 text-(length:--text-nano)">
+              {decisionCards!.length}
+            </Badge>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Agents asked for a decision in an issue thread. Open the issue to answer.
+          </p>
+          <div className="grid gap-2">
+            {decisionCards!.map((card) => (
+              <Link
+                key={card.id}
+                to={`/issues/${card.issueId}`}
+                className="block rounded-md border border-border p-3 hover:bg-muted/50"
+              >
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span className="font-mono">{card.issueIdentifier ?? card.issueId.slice(0, 8)}</span>
+                  <span>·</span>
+                  <span>{timeAgo(card.createdAt)}</span>
+                </div>
+                <p className="text-sm mt-1">{card.prompt ?? card.issueTitle}</p>
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
+
       {filtered.length === 0 && (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <ShieldCheck className="h-8 w-8 text-muted-foreground/30 mb-3" />
           <p className="text-sm text-muted-foreground">
-            {statusFilter === "pending" ? "No pending approvals." : "No approvals yet."}
+            {statusFilter === "pending"
+              ? (decisionCards?.length ?? 0) > 0
+                ? "No formal approvals — see decision cards above."
+                : "No pending approvals."
+              : "No approvals yet."}
           </p>
         </div>
       )}

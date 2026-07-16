@@ -1,4 +1,4 @@
-import type { Approval, ApprovalComment, Issue } from "@paperclipai/shared";
+import type { Approval, ApprovalComment, DecisionCard, Issue } from "@paperclipai/shared";
 import { api } from "./client";
 
 export const approvalsApi = {
@@ -6,6 +6,9 @@ export const approvalsApi = {
     api.get<Approval[]>(
       `/companies/${companyId}/approvals${status ? `?status=${encodeURIComponent(status)}` : ""}`,
     ),
+  /** Fork layer: pending request_confirmation cards awaiting a human decision. */
+  listDecisionCards: (companyId: string) =>
+    api.get<DecisionCard[]>(`/companies/${companyId}/decision-cards`),
   create: (companyId: string, data: Record<string, unknown>) =>
     api.post<Approval>(`/companies/${companyId}/approvals`, data),
   get: (id: string) => api.get<Approval>(`/approvals/${id}`),

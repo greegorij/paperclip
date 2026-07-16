@@ -25,3 +25,18 @@ export interface ApprovalComment {
   createdAt: Date;
   updatedAt: Date;
 }
+
+/**
+ * Fork layer: a pending `request_confirmation` interaction awaiting a human
+ * decision. This is the mechanism agents actually use to ask a human, as
+ * opposed to the formal `approvals` table. Resolved in the issue thread.
+ */
+export interface DecisionCard {
+  id: string;
+  issueId: string;
+  issueIdentifier: string | null;
+  issueTitle: string;
+  prompt: string | null;
+  createdByAgentId: string | null;
+  createdAt: Date;
+}
