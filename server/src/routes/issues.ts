@@ -150,6 +150,7 @@ import {
   buildIssueBlockersResolvedWakeIdempotencyKey,
   findExistingIssueBlockerStrandedWake,
   findExistingIssueBlockersResolvedWake,
+  releaseDependentFromDeadBlocker,
 } from "../services/issue-dependency-wakeups.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
@@ -8735,11 +8736,34 @@ export function issueRoutes(
       if (becameCancelled) {
         const dependents = await svc.listAssignedDependentsBlockedBy(issue.id);
         for (const dependent of dependents) {
+          let blockerIssueIds = dependent.blockerIssueIds;
+          try {
+            const released = await releaseDependentFromDeadBlocker(
+              db,
+              (id, data) => svc.update(id, data),
+              {
+                companyId: issue.companyId,
+                dependentIssueId: dependent.id,
+                deadBlockerIssueId: issue.id,
+                blockerIssueIds: dependent.blockerIssueIds,
+              },
+            );
+            blockerIssueIds = released.remainingBlockerIssueIds;
+          } catch (err) {
+            logger.warn(
+              {
+                err,
+                blockerIssueId: issue.id,
+                dependentIssueId: dependent.id,
+              },
+              "failed to release dependent from cancelled blocker before stranded wake",
+            );
+          }
           await addDependencyStrandedWakeup({
             agentId: dependent.assigneeAgentId,
             dependentIssueId: dependent.id,
             deadBlockerIssueId: issue.id,
-            blockerIssueIds: dependent.blockerIssueIds,
+            blockerIssueIds,
             blockerFate: "cancelled",
           });
         }

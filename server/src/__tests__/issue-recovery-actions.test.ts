@@ -328,7 +328,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
   });
 
-  it("wakes blocked dependents with blockerFate stranded when escalateStrandedAssignedIssue permanently strands", async () => {
+  it("unblocks dependents to todo and wakes assignee when escalateStrandedAssignedIssue permanently strands", async () => {
     const { companyId, managerId, coderId, sourceIssue, prefix } = await seedCompany();
     const dependentIssueId = randomUUID();
     await db.insert(issues).values({
@@ -366,6 +366,21 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       latestRun,
       comment: "No live execution path.",
     });
+
+    // Sedno: zależny musi RUSZYĆ (todo), nie tylko dostać wake przy status=blocked.
+    const [dependent] = await db.select().from(issues).where(eq(issues.id, dependentIssueId));
+    expect(dependent.status).toBe("todo");
+    const remainingBlockers = await db
+      .select()
+      .from(issueRelations)
+      .where(
+        and(
+          eq(issueRelations.relatedIssueId, dependentIssueId),
+          eq(issueRelations.type, "blocks"),
+        ),
+      );
+    expect(remainingBlockers.map((row) => row.issueId)).not.toContain(sourceIssue.id);
+    expect(remainingBlockers).toHaveLength(0);
 
     expect(enqueueWakeup).toHaveBeenCalledWith(
       managerId,

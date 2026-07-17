@@ -49,6 +49,7 @@ import {
   addDependencyStrandedWakeup,
   buildIssueBlockersResolvedWakeIdempotencyKey,
   findExistingIssueBlockersResolvedWakeForAnyKey,
+  releaseDependentFromDeadBlocker,
 } from "../issue-dependency-wakeups.js";
 import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
 import { getRunLogStore } from "../run-log-store.js";
@@ -3194,13 +3195,36 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
 
     const strandedDependents = await issuesSvc.listAssignedDependentsBlockedBy(updated.id);
     for (const dependent of strandedDependents) {
+      let blockerIssueIds = dependent.blockerIssueIds;
+      try {
+        const released = await releaseDependentFromDeadBlocker(
+          db,
+          (id, data) => issuesSvc.update(id, data),
+          {
+            companyId: updated.companyId,
+            dependentIssueId: dependent.id,
+            deadBlockerIssueId: updated.id,
+            blockerIssueIds: dependent.blockerIssueIds,
+          },
+        );
+        blockerIssueIds = released.remainingBlockerIssueIds;
+      } catch (err) {
+        logger.warn(
+          {
+            err,
+            blockerIssueId: updated.id,
+            dependentIssueId: dependent.id,
+          },
+          "failed to release dependent from stranded blocker before stranded wake",
+        );
+      }
       try {
         await addDependencyStrandedWakeup(db, deps.enqueueWakeup, {
           companyId: updated.companyId,
           agentId: dependent.assigneeAgentId,
           dependentIssueId: dependent.id,
           deadBlockerIssueId: updated.id,
-          blockerIssueIds: dependent.blockerIssueIds,
+          blockerIssueIds,
           blockerFate: "stranded",
           requestedByActorType: "system",
           requestedByActorId: null,

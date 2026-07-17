@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -120,7 +121,6 @@ vi.mock("../services/issue-dependency-wakeups.js", async () => {
     findExistingIssueBlockerStrandedWake: mockFindExistingIssueBlockerStrandedWake,
   };
 });
-
 async function createApp(db: ReturnType<typeof createDb> | Record<string, never> = {}) {
   const [{ issueRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
@@ -641,7 +641,7 @@ describeEmbeddedPostgres("issue cancelled-blocker dependency wakeups (integratio
     });
   }
 
-  it("wakes blocked dependents with blockerFate cancelled when blocker is cancelled via PATCH", async () => {
+  it("unblocks dependents to todo and wakes assignee when blocker is cancelled via PATCH", async () => {
     const { companyId, managerId, blockerIssueId, prefix } = await seedCompany();
     const dependentIssueId = randomUUID();
     await db.insert(issues).values({
@@ -671,6 +671,22 @@ describeEmbeddedPostgres("issue cancelled-blocker dependency wakeups (integratio
       .send({ status: "cancelled" });
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("cancelled");
+    // Side-effects run in a void async IIFE after the HTTP response — wait for outcome.
+    await vi.waitFor(async () => {
+      const [dependent] = await db.select().from(issues).where(eq(issues.id, dependentIssueId));
+      expect(dependent.status).toBe("todo");
+    });
+    const remainingBlockers = await db
+      .select()
+      .from(issueRelations)
+      .where(
+        and(
+          eq(issueRelations.relatedIssueId, dependentIssueId),
+          eq(issueRelations.type, "blocks"),
+        ),
+      );
+    expect(remainingBlockers.map((row) => row.issueId)).not.toContain(blockerIssueId);
+    expect(remainingBlockers).toHaveLength(0);
 
     await vi.waitFor(() => {
       expect(mockWakeup).toHaveBeenCalledWith(
@@ -688,6 +704,87 @@ describeEmbeddedPostgres("issue cancelled-blocker dependency wakeups (integratio
             wakeReason: "issue_blocker_stranded",
             blockerFate: "cancelled",
             deadBlockerIssueId: blockerIssueId,
+          }),
+        }),
+      );
+    });
+  });
+
+  it("keeps dependent blocked when another live blocker remains after cancel", async () => {
+    const { companyId, managerId, coderId, blockerIssueId, prefix } = await seedCompany();
+    const liveBlockerId = randomUUID();
+    const dependentIssueId = randomUUID();
+    await db.insert(issues).values([
+      {
+        id: liveBlockerId,
+        companyId,
+        title: "Still-live blocker",
+        status: "in_progress",
+        priority: "medium",
+        assigneeAgentId: coderId,
+        issueNumber: 2,
+        identifier: `${prefix}-2`,
+      },
+      {
+        id: dependentIssueId,
+        companyId,
+        title: "Waiting on two blockers",
+        status: "blocked",
+        priority: "medium",
+        assigneeAgentId: managerId,
+        issueNumber: 3,
+        identifier: `${prefix}-3`,
+      },
+    ]);
+    await db.insert(issueRelations).values([
+      {
+        companyId,
+        issueId: blockerIssueId,
+        relatedIssueId: dependentIssueId,
+        type: "blocks",
+      },
+      {
+        companyId,
+        issueId: liveBlockerId,
+        relatedIssueId: dependentIssueId,
+        type: "blocks",
+      },
+    ]);
+
+    vi.clearAllMocks();
+    mockFindExistingIssueBlockersResolvedWake.mockResolvedValue(null);
+    mockFindExistingIssueBlockerStrandedWake.mockResolvedValue(null);
+    await wireRealIssueService();
+
+    const res = await request(await createApp(db))
+      .patch(`/api/issues/${blockerIssueId}`)
+      .send({ status: "cancelled" });
+    expect(res.status).toBe(200);
+
+    await vi.waitFor(async () => {
+      const remainingBlockers = await db
+        .select()
+        .from(issueRelations)
+        .where(
+          and(
+            eq(issueRelations.relatedIssueId, dependentIssueId),
+            eq(issueRelations.type, "blocks"),
+          ),
+        );
+      expect(remainingBlockers.map((row) => row.issueId)).toEqual([liveBlockerId]);
+    });
+    const [dependent] = await db.select().from(issues).where(eq(issues.id, dependentIssueId));
+    expect(dependent.status).toBe("blocked");
+
+    await vi.waitFor(() => {
+      expect(mockWakeup).toHaveBeenCalledWith(
+        managerId,
+        expect.objectContaining({
+          reason: "issue_blocker_stranded",
+          payload: expect.objectContaining({
+            dependentIssueId,
+            deadBlockerIssueId: blockerIssueId,
+            blockerIssueIds: [liveBlockerId],
           }),
         }),
       );

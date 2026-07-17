@@ -1,6 +1,6 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, notInArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests } from "@paperclipai/db";
+import { agentWakeupRequests, issues } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
 
 export const ISSUE_BLOCKERS_RESOLVED_WAKE_REASON = "issue_blockers_resolved";
@@ -94,6 +94,71 @@ type StrandedWakeEnqueue = (
   agentId: string,
   opts: ReturnType<typeof buildIssueBlockerStrandedWakeRequest>["wakeup"],
 ) => Promise<unknown>;
+
+/**
+ * Active (still-blocking) blockers: same predicate as recovery
+ * `existingUnresolvedBlockerIssueIds` — status not in done/cancelled.
+ * Cancelled and done do not keep a dependent blocked after a dead blocker is removed.
+ */
+export async function listActiveBlockerIssueIds(
+  db: Db,
+  companyId: string,
+  blockerIssueIds: string[],
+): Promise<string[]> {
+  const uniqueIds = [...new Set(blockerIssueIds.filter(Boolean))];
+  if (uniqueIds.length === 0) return [];
+  return db
+    .select({ id: issues.id })
+    .from(issues)
+    .where(
+      and(
+        eq(issues.companyId, companyId),
+        inArray(issues.id, uniqueIds),
+        notInArray(issues.status, ["done", "cancelled"]),
+      ),
+    )
+    .then((rows) => rows.map((row) => row.id));
+}
+
+type ReleaseDeadBlockerUpdate = (
+  id: string,
+  data: { blockedByIssueIds: string[]; status?: "todo" },
+) => Promise<unknown>;
+
+/**
+ * After a blocker dies (cancelled / recovery-stranded), remove it from the
+ * dependent's blockedByIssueIds. If the dependent was `blocked` and no other
+ * active blockers remain, move it to `todo` so planners can actually run it
+ * after the stranded wake (isDependencyReady requires blocker.status==='done').
+ */
+export async function releaseDependentFromDeadBlocker(
+  db: Db,
+  updateIssue: ReleaseDeadBlockerUpdate,
+  input: {
+    companyId: string;
+    dependentIssueId: string;
+    deadBlockerIssueId: string;
+    blockerIssueIds: string[];
+  },
+): Promise<{ remainingBlockerIssueIds: string[]; releasedToTodo: boolean }> {
+  const remainingBlockerIssueIds = input.blockerIssueIds.filter(
+    (id) => id !== input.deadBlockerIssueId,
+  );
+  const [dependent, liveBlockerIds] = await Promise.all([
+    db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(and(eq(issues.id, input.dependentIssueId), eq(issues.companyId, input.companyId)))
+      .then((rows) => rows[0] ?? null),
+    listActiveBlockerIssueIds(db, input.companyId, remainingBlockerIssueIds),
+  ]);
+  const releasedToTodo = dependent?.status === "blocked" && liveBlockerIds.length === 0;
+  await updateIssue(input.dependentIssueId, {
+    blockedByIssueIds: remainingBlockerIssueIds,
+    ...(releasedToTodo ? { status: "todo" as const } : {}),
+  });
+  return { remainingBlockerIssueIds, releasedToTodo };
+}
 
 /** Idempotent stranded-blocker wake shared by issue routes and recovery escalation. */
 export async function addDependencyStrandedWakeup(
