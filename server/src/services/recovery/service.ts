@@ -46,6 +46,7 @@ import {
 } from "../issue-execution-policy.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+  addDependencyStrandedWakeup,
   buildIssueBlockersResolvedWakeIdempotencyKey,
   findExistingIssueBlockersResolvedWakeForAnyKey,
 } from "../issue-dependency-wakeups.js";
@@ -3186,7 +3187,36 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       assigneeAgentId: recoveryAction.ownerAgentId ?? input.issue.assigneeAgentId,
     });
     if (!updated) return null;
+    // Provider-quota wait keeps a monitor that retries after reset; the blocker
+    // may still reach done. Do not wake dependents (false alarm). Permanent
+    // stranding continues below and wakes dependents with blockerFate:stranded.
     if (isProviderQuotaWait) return updated;
+
+    const strandedDependents = await issuesSvc.listAssignedDependentsBlockedBy(updated.id);
+    for (const dependent of strandedDependents) {
+      try {
+        await addDependencyStrandedWakeup(db, deps.enqueueWakeup, {
+          companyId: updated.companyId,
+          agentId: dependent.assigneeAgentId,
+          dependentIssueId: dependent.id,
+          deadBlockerIssueId: updated.id,
+          blockerIssueIds: dependent.blockerIssueIds,
+          blockerFate: "stranded",
+          requestedByActorType: "system",
+          requestedByActorId: null,
+        });
+      } catch (err) {
+        logger.warn(
+          {
+            err,
+            blockerIssueId: updated.id,
+            dependentIssueId: dependent.id,
+            agentId: dependent.assigneeAgentId,
+          },
+          "failed to enqueue stranded-blocker wake for dependent after recovery escalation",
+        );
+      }
+    }
 
     const prefix = await getCompanyIssuePrefix(input.issue.companyId);
     const recoveryOwner = recoveryAction.ownerAgentId ? await getAgent(recoveryAction.ownerAgentId) : null;

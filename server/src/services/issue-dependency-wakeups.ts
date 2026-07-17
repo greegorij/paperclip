@@ -1,8 +1,14 @@
 import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests } from "@paperclipai/db";
+import { logger } from "../middleware/logger.js";
 
 export const ISSUE_BLOCKERS_RESOLVED_WAKE_REASON = "issue_blockers_resolved";
+
+/** Wake dependents when a blocker dies (cancelled / stranded) rather than resolving to done. */
+export const ISSUE_BLOCKER_STRANDED_WAKE_REASON = "issue_blocker_stranded";
+
+export type IssueBlockerFate = "cancelled" | "stranded";
 
 const IDEMPOTENT_DEPENDENCY_WAKE_STATUSES = [
   "queued",
@@ -20,6 +26,104 @@ export function buildIssueBlockersResolvedWakeIdempotencyKey(input: {
     input.dependentIssueId,
     input.resolvedBlockerIssueId,
   ].join(":");
+}
+
+export function buildIssueBlockerStrandedWakeIdempotencyKey(input: {
+  dependentIssueId: string;
+  deadBlockerIssueId: string;
+}) {
+  return [
+    ISSUE_BLOCKER_STRANDED_WAKE_REASON,
+    input.dependentIssueId,
+    input.deadBlockerIssueId,
+  ].join(":");
+}
+
+export function buildIssueBlockerStrandedWakeMessage(blockerFate: IssueBlockerFate) {
+  if (blockerFate === "cancelled") {
+    return "Your blocker will not reach done (it was cancelled). Decide whether to re-escalate, proceed without it, or call your boss.";
+  }
+  return "Your blocker will not reach done (recovery stranded it with no live execution path). Decide whether to re-escalate, proceed without it, or call your boss.";
+}
+
+export function buildIssueBlockerStrandedWakeRequest(input: {
+  dependentIssueId: string;
+  deadBlockerIssueId: string;
+  blockerIssueIds: string[];
+  blockerFate: IssueBlockerFate;
+  requestedByActorType: "user" | "agent" | "system";
+  requestedByActorId: string | null;
+}) {
+  const idempotencyKey = buildIssueBlockerStrandedWakeIdempotencyKey({
+    dependentIssueId: input.dependentIssueId,
+    deadBlockerIssueId: input.deadBlockerIssueId,
+  });
+  return {
+    idempotencyKey,
+    wakeup: {
+      source: "automation" as const,
+      triggerDetail: "system" as const,
+      reason: ISSUE_BLOCKER_STRANDED_WAKE_REASON,
+      payload: {
+        issueId: input.dependentIssueId,
+        dependentIssueId: input.dependentIssueId,
+        deadBlockerIssueId: input.deadBlockerIssueId,
+        blockerFate: input.blockerFate,
+        blockerIssueIds: input.blockerIssueIds,
+        mutation: input.blockerFate === "cancelled" ? "blocker_cancelled" : "blocker_stranded",
+        message: buildIssueBlockerStrandedWakeMessage(input.blockerFate),
+      },
+      idempotencyKey,
+      requestedByActorType: input.requestedByActorType,
+      requestedByActorId: input.requestedByActorId,
+      contextSnapshot: {
+        issueId: input.dependentIssueId,
+        taskId: input.dependentIssueId,
+        wakeReason: ISSUE_BLOCKER_STRANDED_WAKE_REASON,
+        source: "issue.blocker_stranded",
+        dependentIssueId: input.dependentIssueId,
+        deadBlockerIssueId: input.deadBlockerIssueId,
+        blockerFate: input.blockerFate,
+        blockerIssueIds: input.blockerIssueIds,
+      },
+    },
+  };
+}
+
+type StrandedWakeEnqueue = (
+  agentId: string,
+  opts: ReturnType<typeof buildIssueBlockerStrandedWakeRequest>["wakeup"],
+) => Promise<unknown>;
+
+/** Idempotent stranded-blocker wake shared by issue routes and recovery escalation. */
+export async function addDependencyStrandedWakeup(
+  db: Db,
+  enqueueWakeup: StrandedWakeEnqueue,
+  input: {
+    companyId: string;
+    agentId: string;
+    dependentIssueId: string;
+    deadBlockerIssueId: string;
+    blockerIssueIds: string[];
+    blockerFate: IssueBlockerFate;
+    requestedByActorType: "user" | "agent" | "system";
+    requestedByActorId: string | null;
+  },
+) {
+  const { idempotencyKey, wakeup } = buildIssueBlockerStrandedWakeRequest(input);
+  try {
+    const existingWake = await findExistingIssueBlockerStrandedWake(db, {
+      companyId: input.companyId,
+      idempotencyKey,
+    });
+    if (existingWake) return;
+  } catch (err) {
+    logger.warn(
+      { err, issueId: input.dependentIssueId, idempotencyKey },
+      "failed to check existing stranded-blocker wake before enqueue",
+    );
+  }
+  await enqueueWakeup(input.agentId, wakeup);
 }
 
 export async function findExistingIssueBlockersResolvedWake(
@@ -41,6 +145,17 @@ export async function findExistingIssueBlockersResolvedWake(
     )
     .limit(1)
     .then((rows) => rows[0] ?? null);
+}
+
+/** Same idempotency lookup as resolved wakes; shared statuses apply to stranded wakes too. */
+export async function findExistingIssueBlockerStrandedWake(
+  db: Db,
+  input: {
+    companyId: string;
+    idempotencyKey: string;
+  },
+) {
+  return findExistingIssueBlockersResolvedWake(db, input);
 }
 
 export async function findExistingIssueBlockersResolvedWakeForAnyKey(
