@@ -1,0 +1,40 @@
+# Changelog — warstwa forka Jarvisa
+
+> Historia **naszej warstwy** nad `paperclipai/paperclip`. Upstream ma własne wersjonowanie kalendarzowe (`YYYY.MDD.P`) i publikuje do npm — my **nie publikujemy**, hostujemy własną instancję na VPS. Ten plik dokumentuje wyłącznie to, co dokładamy ponad upstream, oraz nasze cutovery.
+>
+> Format: [Keep a Changelog](https://keepachangelog.com/pl/). Tagi: `fork-vX.Y.Z` na `greegorij/paperclip-legacy`, **nigdy pushowane do upstreamu**.
+
+## [0.1.0] — 2026-07-17
+
+Pierwsze formalne wydanie warstwy forka. Wcześniejsze zmiany (logowanie Google, adnotacje, karty decyzyjne) istniały bez wersjonowania i historii — to wydanie je obejmuje.
+
+### Dodane
+- **Narzędzie odczytu kart decyzyjnych** (`paperclipListIssueInteractions`). Agent miał cztery narzędzia do **wystawiania** kart i ani jednego do **czytania odpowiedzi** człowieka. Opis wymienia pola per rodzaj karty — bo odpowiedź żyje w innym polu dla każdego rodzaju.
+- **Ostrzeżenia w opisach** `paperclipListIssueApprovals` i `paperclipListApprovals`: nie zawierają kart decyzyjnych, a pusta lista **nie oznacza braku uwag**. Bez tego kolejny agent powtórzyłby błąd — stare narzędzie nadal wygląda na właściwe.
+- Logowanie Google (`better-auth`: `socialProviders`, `accountLinking`) + zmienne konfiguracyjne.
+- Narzędzia adnotacji dokumentów + `includeAnnotationComments`.
+- Karty decyzyjne w widoku zatwierdzeń i licznik na pulpicie.
+
+### Naprawione
+- Osierocone adnotacje dokumentów są pokazywane zamiast ukrywane.
+
+### Zsynchronizowane z upstreamem
+- 20 commitów (16–17.07), **6 migracji bazy** (0172–0177) zastosowanych czysto.
+- Motyw przewodni: trzy zmiany naprawiające **pętle odzyskiwania po padzie dostawcy modelu** — `#9648` (zapobieganie zduplikowanym zadaniom i pętlom odzyskiwania), `#9635` (czekanie na reset limitów dostawcy), `#9651` (dławienie powtórek). Dokładnie ten problem diagnozowaliśmy 17.07: przebieg czujki padał na przeciążeniu dostawcy, platforma odpalała tryb awaryjny bez prawa zapisu dokumentów, agent tworzył podzadanie → trzy przebiegi zamiast jednego.
+- `#9658` — polityki dostępu agentów do archiwizacji skrzynek. **Na obserwacji:** nowy mechanizm uprawnień floty.
+
+### Bezpieczeństwo
+- **Rotacja klucza podpisu agentów.** Wartość wyciekła do wyjścia podagenta (`cat` na pliku kopii zapasowej env). Porównanie potwierdziło, że wyciekły klucz był **aktywny**. Po rotacji: zero ostrzeżeń o braku klucza, tożsamość agentów potwierdzona podpisem na zapisanym dokumencie.
+
+### Znane, świadomie nienaprawione
+- **Odczyt interakcji wymaga UUID** — identyfikator zadania (np. `GG-132`) nie działa. Trasa `GET /issues/:id/interactions` przekazuje surowy parametr do serwisu porównującego go z kolumną UUID, podczas gdy ścieżka **zapisu** rozwiązuje zadanie poprawnie. Błąd upstreamu; naprawa dotykałaby ich pliku i rosłaby powierzchnię konfliktu przy każdej synchronizacji. Opis narzędzia jawnie wymaga UUID. Pada głośno (błąd + status), nie cicho pustą listą.
+- **Brak stronicowania** w liście interakcji — na długim zadaniu może zalać kontekst agenta.
+- **`.parse()` zamiast `.safeParse()`** przy hydratacji — jeden felerny wiersz zatruje cały odczyt zadania.
+- Trzy testy upstreamu czerwone **przed i po** synchronizacji (dziedziczony dług, nie regresja): adopcja żywej usługi po resecie stanu, rozbieżność gałęzi ×2. Czwarty (`wakes a cross-agent review participant`) to flak równoległości — osobno przechodzi.
+- **Warstwa forka nieudokumentowana** w `doc/` — dług do spłaty.
+
+### Odwrót
+- Kod: tag `pre-upstream-sync-20260717` → `735f88b`
+- Baza: kopia katalogu `/home/ccuser/backups/db-przed-sync-20260717` (119 MB, zrobiona przy zatrzymanej usłudze — `pg_dump` nie istnieje w tej dystrybucji)
+- Klucz: `/home/ccuser/.config/paperclip-agent-env.bak-przed-rotacja-20260717`
+- 🔴 Migracji **nie da się cofnąć** inaczej niż przywróceniem kopii bazy — `PAPERCLIP_MIGRATION_AUTO_APPLY=true` odpala je automatycznie przy starcie.
