@@ -137,9 +137,11 @@ import {
 } from "./workspace-command-authz.js";
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
 import {
+  GENERIC_ATTACHMENT_CONTENT_TYPES,
   isInlineAttachmentContentType,
   normalizeIssueAttachmentMaxBytes,
   normalizeContentType,
+  normalizeUploadAttachmentContentType,
   SVG_CONTENT_TYPE,
 } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
@@ -154,6 +156,7 @@ import {
 } from "../services/issue-dependency-wakeups.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
+import { decisionTrainingService } from "../services/decision-training.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import {
@@ -354,11 +357,7 @@ function buildAttachmentContentPath(attachmentId: string): string {
   return `/api/attachments/${attachmentId}/content`;
 }
 
-const GENERIC_ATTACHMENT_CONTENT_TYPES = new Set([
-  "application/octet-stream",
-  "binary/octet-stream",
-  "application/x-binary",
-]);
+const GENERIC_RESPONSE_ATTACHMENT_CONTENT_TYPES = new Set(GENERIC_ATTACHMENT_CONTENT_TYPES);
 
 function inferVideoContentTypeFromFilename(filename: string | null | undefined): string | null {
   const lower = (filename ?? "").toLowerCase();
@@ -374,7 +373,7 @@ function resolveAttachmentResponseContentType(input: {
   originalFilename?: string | null;
 }) {
   const storedContentType = normalizeContentType(input.storedContentType || input.objectContentType);
-  if (!GENERIC_ATTACHMENT_CONTENT_TYPES.has(storedContentType)) return storedContentType;
+  if (!GENERIC_RESPONSE_ATTACHMENT_CONTENT_TYPES.has(storedContentType)) return storedContentType;
   return inferVideoContentTypeFromFilename(input.originalFilename) ?? storedContentType;
 }
 
@@ -2606,6 +2605,7 @@ export function issueRoutes(
   const documentsSvc = documentService(db);
   const companySkillsSvc = companySkillService(db);
   const documentAnnotationsSvc = documentAnnotationService(db);
+  const decisionTrainingSvc = decisionTrainingService(db);
   const issueReferencesSvc = issueReferenceService(db);
   const issueThreadInteractionsSvc = issueThreadInteractionService(db);
   const taskWatchdogFactory: TaskWatchdogServiceFactory | undefined = Object.prototype.hasOwnProperty.call(
@@ -9649,6 +9649,12 @@ export function issueRoutes(
               ])
             ),
           );
+          await decisionTrainingSvc.scrubDeletedComments({
+            companyId: issue.companyId,
+            issueId: issue.id,
+            commentIds: [deletedComment.id, ...annotationCleanup.deletedCommentIds],
+            deletedAt: deletedComment.deletedAt ?? new Date(),
+          }, tx);
         },
       },
     );
@@ -10532,7 +10538,10 @@ export function issueRoutes(
       res.status(400).json({ error: "Missing file field 'file'" });
       return;
     }
-    const contentType = normalizeContentType(file.mimetype);
+    const contentType = normalizeUploadAttachmentContentType({
+      contentType: file.mimetype,
+      originalFilename: file.originalname,
+    });
     if (file.buffer.length <= 0) {
       res.status(422).json({ error: "Attachment is empty" });
       return;

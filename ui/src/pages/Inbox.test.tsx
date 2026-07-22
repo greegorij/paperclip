@@ -7,6 +7,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Issue } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CompanyJoinRequest } from "../api/access";
+import {
+  clearLocalInboxArchive,
+  getLocalInboxArchiveIssueIds,
+} from "../lib/inboxArchiveCache";
 
 const routerMock = vi.hoisted(() => ({
   location: { pathname: "/", search: "", hash: "" },
@@ -289,6 +293,9 @@ describe("Inbox toolbar", () => {
   });
 
   afterEach(() => {
+    for (const issueId of getLocalInboxArchiveIssueIds("company-1")) {
+      clearLocalInboxArchive("company-1", issueId);
+    }
     container.remove();
   });
 
@@ -439,7 +446,7 @@ describe("Inbox toolbar", () => {
     });
   });
 
-  it("does not double-indent unread rows: the mark-read dot replaces the leading spacer", async () => {
+  it("does not indent unread rows: the mark-read dot sits in a reserved leading slot present on every row", async () => {
     routerMock.location.pathname = "/inbox/mine";
     // Two sibling leaf rows, one unread and one read, so their leading columns
     // are directly comparable.
@@ -477,23 +484,36 @@ describe("Inbox toolbar", () => {
     const rows = Array.from(container.querySelectorAll("[data-inbox-item]"));
     const rowFor = (text: string) => rows.find((row) => row.textContent?.includes(text));
     const linkOf = (row: Element) => row.querySelector<HTMLAnchorElement>("a[data-inbox-issue-link]");
-    const hasMarkReadDot = (row: Element) => !!row.querySelector('button[aria-label="Mark as read"]');
-    // The empty spacer that reserves the chevron column on read rows. Excludes
-    // the tree-guide span (`.self-stretch`), which only renders on nested rows.
+    const markReadButton = (row: Element) => row.querySelector('button[aria-label="Mark as read"]');
+    // The empty spacer that reserves the chevron column on every leaf row.
+    // Excludes the tree-guide span (`.self-stretch`), which only renders on
+    // nested rows.
     const hasLeadingSpacer = (row: Element) =>
       !!linkOf(row)?.querySelector("span.hidden.w-4.shrink-0.sm\\:block:not(.self-stretch)");
+    // The reserved leading dot slot, present on read AND unread rows.
+    const dotSlot = (row: Element) =>
+      linkOf(row)?.querySelector('[data-testid="issue-row-unread-slot"]') ?? null;
 
     const unreadRow = rowFor("Unread inbox row")!;
     const readRow = rowFor("Read inbox row")!;
 
-    // Unread rows carry the mark-read dot in the chevron column; rendering the
-    // spacer too would push the status icon + title one column further right
-    // than read rows (the bug this fix addresses).
-    expect(hasMarkReadDot(unreadRow)).toBe(true);
-    expect(hasLeadingSpacer(unreadRow)).toBe(false);
+    // The dot lives in a fixed leading slot that is reserved on every inbox row
+    // (in flow, NOT an absolute overlay). Because read and unread rows both
+    // reserve it — and both keep the chevron spacer — their status icon + title
+    // land at the same x (the bug this fix addresses: an unread-only dot column
+    // used to push unread rows right).
+    const unreadSlot = dotSlot(unreadRow);
+    const readSlot = dotSlot(readRow);
+    expect(unreadSlot).not.toBeNull();
+    expect(readSlot).not.toBeNull();
+    // In flow, not an absolute overlay.
+    expect(unreadSlot?.className).not.toContain("absolute");
+    // Only the unread row carries the dot button; the read slot is empty.
+    expect(markReadButton(unreadSlot!)).not.toBeNull();
+    expect(readSlot?.querySelector('button[aria-label="Mark as read"]')).toBeNull();
+    expect(hasLeadingSpacer(unreadRow)).toBe(true);
 
-    // Read rows have no dot, so they keep the spacer to hold that same column.
-    expect(hasMarkReadDot(readRow)).toBe(false);
+    // Read rows keep the same spacer, so both rows line up.
     expect(hasLeadingSpacer(readRow)).toBe(true);
 
     act(() => {
@@ -630,6 +650,106 @@ describe("Inbox toolbar", () => {
     act(() => {
       root.unmount();
     });
+  });
+
+  it("keeps a successful archive hidden when stale query data arrives", async () => {
+    routerMock.location.pathname = "/inbox/mine";
+    const archivedIssue = createIssue({
+      id: "issue-a",
+      identifier: "PAP-1001",
+      title: "Archived inbox row",
+    });
+    apiMocks.issuesList.mockResolvedValue([archivedIssue]);
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 0, gcTime: 0 } },
+    });
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Inbox />
+        </QueryClientProvider>,
+      );
+    });
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain("Archived inbox row");
+    });
+
+    const archiveButton = container.querySelector<HTMLButtonElement>('button[aria-label="Archive"]');
+    expect(archiveButton).not.toBeNull();
+
+    await act(async () => {
+      archiveButton!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    await vi.waitFor(() => {
+      expect(apiMocks.archiveFromInbox).toHaveBeenCalledWith("issue-a");
+      expect(container.textContent).not.toContain("Archived inbox row");
+    });
+
+    await act(async () => {
+      queryClient.setQueriesData<Issue[]>(
+        { queryKey: ["issues", "company-1", "mine-by-me"] },
+        [archivedIssue],
+      );
+    });
+
+    expect(container.textContent).not.toContain("Archived inbox row");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("restores a locally hidden archive when undo is pressed", async () => {
+    generalSettingsMock.keyboardShortcutsEnabled = true;
+    routerMock.location.pathname = "/inbox/mine";
+    const archivedIssue = createIssue({
+      id: "issue-a",
+      identifier: "PAP-1001",
+      title: "Undoable inbox row",
+    });
+    apiMocks.issuesList.mockResolvedValue([archivedIssue]);
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 0, gcTime: 0 } },
+    });
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(
+          <QueryClientProvider client={queryClient}>
+            <Inbox />
+          </QueryClientProvider>,
+        );
+      });
+      await vi.waitFor(() => {
+        expect(container.textContent).toContain("Undoable inbox row");
+      });
+
+      const archiveButton = container.querySelector<HTMLButtonElement>('button[aria-label="Archive"]');
+      expect(archiveButton).not.toBeNull();
+      await act(async () => {
+        archiveButton!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      });
+      await vi.waitFor(() => {
+        expect(container.textContent).not.toContain("Undoable inbox row");
+        expect(queryClient.isMutating()).toBe(0);
+      });
+
+      await act(async () => {
+        document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "u", bubbles: true }));
+      });
+      await vi.waitFor(() => {
+        expect(apiMocks.unarchiveFromInbox).toHaveBeenCalledWith("issue-a");
+        expect(container.textContent).toContain("Undoable inbox row");
+      });
+    } finally {
+      generalSettingsMock.keyboardShortcutsEnabled = false;
+      act(() => root.unmount());
+    }
   });
 });
 

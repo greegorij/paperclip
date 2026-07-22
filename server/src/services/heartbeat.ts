@@ -1431,10 +1431,10 @@ function isConfigurationIncompleteFailure(error: unknown): error is Configuratio
   return error instanceof ConfigurationIncompleteFailure;
 }
 
-function isConfigurationIncompleteFailedRun(
+export function isConfigurationIncompleteFailedRun(
   run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode"> | null | undefined,
 ) {
-  return run?.errorCode === CONFIGURATION_INCOMPLETE_FAILURE_CODE;
+  return run?.errorCode === CONFIGURATION_INCOMPLETE_FAILURE_CODE || run?.errorCode === "model_not_found";
 }
 
 async function hasGitMetadata(cwd: string | null | undefined) {
@@ -2167,14 +2167,14 @@ export async function buildPaperclipRuntimeMcpServers(input: {
       ))
     : [];
   const permittedNotInstalledConnections = permittedConnections
-    .filter((connection) => connection.transport === "remote_http" && !installedConnectionIds.has(connection.id))
+    .filter((connection) => connection.transport === "mcp_remote" && !installedConnectionIds.has(connection.id))
     .map(({ id, name }) => ({ id, name }))
     .sort((a, b) => a.name.localeCompare(b.name));
   const uniqueConnections = effective.installedConnections.filter((connection) =>
     permittedConnectionIds.has(connection.id)
     && connection.status === "active"
     && connection.enabled
-    && connection.transport === "remote_http"
+    && connection.transport === "mcp_remote"
   );
   const service = createToolGatewayService(input.db);
   if (uniqueConnections.length === 0) {
@@ -12356,7 +12356,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const sessionConfigFreshness = resolveTaskSessionConfigFreshness({
       hasTaskSession: taskSession != null,
       configuredModel,
-      taskSessionParams: taskSessionDecodedParams,
+      taskSessionParams: taskSession?.sessionParamsJson ?? taskSessionDecodedParams,
       configMetadata: sessionConfigMetadata,
       wakeResetReason: wakeSessionResetReason,
       preserveLegacySessionWithoutConfigMetadata: acceptedPlanContinuationWake && !acceptedPlanWakeRoutingDecision,

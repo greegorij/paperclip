@@ -1228,7 +1228,7 @@
       "breakpoints": true
     },
     {
-      "idx": 177,
+      "idx": 178,
       "version": "7",
       "when": 1784241826832,
       "tag": "0177_activity_log_responsible_user",
@@ -1237,8 +1237,50 @@
     {
       "idx": 178,
       "version": "7",
-      "when": 1784328226832,
-      "tag": "0182_backfill_built_in_bundles_responsible_user",
+      "when": 1784241827832,
+      "tag": "0178_summary_slots",
+      "breakpoints": true
+    },
+    {
+      "idx": 179,
+      "version": "7",
+      "when": 1784241828832,
+      "tag": "0179_summary_slot_failure_reason",
+      "breakpoints": true
+    },
+    {
+      "idx": 180,
+      "version": "7",
+      "when": 1784216720808,
+      "tag": "0180_decision_training_examples",
+      "breakpoints": true
+    },
+    {
+      "idx": 181,
+      "version": "7",
+      "when": 1784231633059,
+      "tag": "0181_decision_training_retention_policy",
+      "breakpoints": true
+    },
+    {
+      "idx": 182,
+      "version": "7",
+      "when": 1784592000000,
+      "tag": "0182_connections_v3_schema_core",
+      "breakpoints": true
+    },
+    {
+      "idx": 183,
+      "version": "7",
+      "when": 1784653200000,
+      "tag": "0183_connection_user_authorization_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 184,
+      "version": "7",
+      "when": 1784653201000,
+      "tag": "0184_backfill_built_in_bundles_responsible_user",
       "breakpoints": true
     }
   ]
