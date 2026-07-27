@@ -1,5 +1,5 @@
 import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck } from "lucide-react";
-import { formatCents } from "../lib/utils";
+import { formatCents, formatTokens } from "../lib/utils";
 
 export const typeLabel: Record<string, string> = {
   hire_agent: "Hire Agent",
@@ -128,6 +128,10 @@ export function CeoStrategyPayload({ payload }: { payload: Record<string, unknow
   );
 }
 
+function formatBudgetOverrideAmount(metric: unknown, amount: number) {
+  return metric === "total_tokens" ? formatTokens(amount) : formatCents(amount);
+}
+
 export function BudgetOverridePayload({ payload }: { payload: Record<string, unknown> }) {
   const budgetAmount = typeof payload.budgetAmount === "number" ? payload.budgetAmount : null;
   const observedAmount = typeof payload.observedAmount === "number" ? payload.observedAmount : null;
@@ -138,7 +142,8 @@ export function BudgetOverridePayload({ payload }: { payload: Record<string, unk
       <PayloadField label="Metric" value={payload.metric} />
       {(budgetAmount !== null || observedAmount !== null) ? (
         <div className="rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-          Limit {budgetAmount !== null ? formatCents(budgetAmount) : "—"} · Observed {observedAmount !== null ? formatCents(observedAmount) : "—"}
+          Limit {budgetAmount !== null ? formatBudgetOverrideAmount(payload.metric, budgetAmount) : "—"} · Observed{" "}
+          {observedAmount !== null ? formatBudgetOverrideAmount(payload.metric, observedAmount) : "—"}
         </div>
       ) : null}
       {!!payload.guidance && (

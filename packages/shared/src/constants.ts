@@ -796,7 +796,13 @@ export type FinanceUnit = (typeof FINANCE_UNITS)[number];
 export const BUDGET_SCOPE_TYPES = ["company", "agent", "project"] as const;
 export type BudgetScopeType = (typeof BUDGET_SCOPE_TYPES)[number];
 
-export const BUDGET_METRICS = ["billed_cents"] as const;
+/**
+ * Budget policy metrics.
+ * - billed_cents: sum of cost_events.cost_cents (API money billing)
+ * - total_tokens: sum of input_tokens + output_tokens (excludes cached_input_tokens;
+ *   cache reads can dwarf billable generation and do not map 1:1 to subscription burn)
+ */
+export const BUDGET_METRICS = ["billed_cents", "total_tokens"] as const;
 export type BudgetMetric = (typeof BUDGET_METRICS)[number];
 
 export const BUDGET_WINDOW_KINDS = ["calendar_month_utc", "lifetime"] as const;
