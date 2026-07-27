@@ -1286,15 +1286,12 @@ export function builtInAgentService(db: Db) {
 
   async function createOrResetRoutine(agent: Agent, definition: BuiltInAgentDefinition, existing: Routine | null, mode: "reconcile" | "reset") {
     const routine = definition.bundle!.routine;
-    // "built-in-bundles" is a system marker, not a real user account. Passing it as
-    // userId becomes the routine's responsibleUserId and propagates onto every task
-    // the routine creates. assertCompanyAccess then looks up an active membership for
-    // that "user", finds none, and denies company_access — so an agent working a
-    // built-in-routine task loses access to the entire company, not just the task.
-    // Leaving userId empty lets resolveRoutineResponsibleUserId fall back to
-    // companies.defaultResponsibleUserId, which is the intended path for
-    // system-originated work.
-    const actor = { agentId: null, userId: null };
+    // Pass the system marker as actor userId. resolveRoutineResponsibleUserId
+    // substitutes a real company user when one exists; if the company is still
+    // empty (fresh autoProvisionBundledAgents), it soft-degrades back to the
+    // marker so routine creation can succeed — same as upstream. Leaving
+    // userId null instead would trip "Routine requires a responsible user".
+    const actor = { agentId: null, userId: "built-in-bundles" };
     const nextRoutine = existing
       ? await routineSvc.update(existing.id, {
         title: routine.title,
