@@ -23,6 +23,7 @@ import type {
   BudgetWindowKind,
 } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
+import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 
 type ScopeRecord = {
@@ -140,11 +141,24 @@ async function resolveScopeRecord(db: Db, scopeType: BudgetScopeType, scopeId: s
   };
 }
 
+function observedAmountExpression(metric: string) {
+  if (metric === "total_tokens") {
+    // Exclude cached_input_tokens: cache reads can inflate totals by orders of magnitude
+    // without reflecting subscription-quota burn the same way as fresh input/output.
+    return sql<number>`coalesce(sum(${costEvents.inputTokens} + ${costEvents.outputTokens}), 0)::double precision`;
+  }
+  if (metric === "billed_cents") {
+    return sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`;
+  }
+  return null;
+}
+
 async function computeObservedAmount(
   db: Db,
   policy: Pick<PolicyRow, "companyId" | "scopeType" | "scopeId" | "windowKind" | "metric">,
 ) {
-  if (policy.metric !== "billed_cents") return 0;
+  const totalExpr = observedAmountExpression(policy.metric);
+  if (!totalExpr) return 0;
 
   const conditions = [eq(costEvents.companyId, policy.companyId)];
   if (policy.scopeType === "agent") conditions.push(eq(costEvents.agentId, policy.scopeId));
@@ -157,12 +171,61 @@ async function computeObservedAmount(
 
   const [row] = await db
     .select({
-      total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
+      total: totalExpr,
     })
     .from(costEvents)
     .where(and(...conditions));
 
   return Number(row?.total ?? 0);
+}
+
+function isSupportedBudgetMetric(metric: string): metric is BudgetMetric {
+  return metric === "billed_cents" || metric === "total_tokens";
+}
+
+type BudgetPolicySkipReason = "unsupported_metric" | "non_positive_amount";
+
+/**
+ * Dedupes skip warnings for the process lifetime.
+ * Cost events can fire many times per minute; logging once per (policy, reason)
+ * keeps the service log searchable without flooding on every evaluation.
+ */
+const warnedBudgetPolicySkips = new Set<string>();
+
+/** @internal test-only — clears process-lifetime skip-warning dedupe. */
+export function clearBudgetPolicySkipWarningsForTests() {
+  warnedBudgetPolicySkips.clear();
+}
+
+function warnBudgetPolicySkipped(policy: Pick<PolicyRow, "id" | "scopeType" | "scopeId" | "metric" | "amount">, reason: BudgetPolicySkipReason) {
+  const key = `${policy.id}:${reason}`;
+  if (warnedBudgetPolicySkips.has(key)) return;
+  warnedBudgetPolicySkips.add(key);
+  logger.warn(
+    {
+      budgetPolicySkip: true,
+      reason,
+      policyId: policy.id,
+      scopeType: policy.scopeType,
+      scopeId: policy.scopeId,
+      metric: policy.metric,
+      amount: policy.amount,
+    },
+    "budget_policy_skipped_unenforcable: active budget policy cannot be enforced",
+  );
+}
+
+/** Returns true when the policy must be skipped (and emits a one-shot warning). */
+function skipUnenforceableBudgetPolicy(policy: Pick<PolicyRow, "id" | "scopeType" | "scopeId" | "metric" | "amount">): boolean {
+  if (!isSupportedBudgetMetric(policy.metric)) {
+    warnBudgetPolicySkipped(policy, "unsupported_metric");
+    return true;
+  }
+  if (policy.amount <= 0) {
+    warnBudgetPolicySkipped(policy, "non_positive_amount");
+    return true;
+  }
+  return false;
 }
 
 function buildApprovalPayload(input: {
@@ -568,7 +631,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           .returning()
           .then((rows) => rows[0]);
 
-      if (input.scopeType === "company" && windowKind === "calendar_month_utc") {
+      if (input.scopeType === "company" && windowKind === "calendar_month_utc" && metric === "billed_cents") {
         await db
           .update(companies)
           .set({
@@ -578,7 +641,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           .where(eq(companies.id, input.scopeId));
       }
 
-      if (input.scopeType === "agent" && windowKind === "calendar_month_utc") {
+      if (input.scopeType === "agent" && windowKind === "calendar_month_utc" && metric === "billed_cents") {
         await db
           .update(agents)
           .set({
@@ -666,7 +729,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       });
 
       for (const policy of relevantPolicies) {
-        if (policy.metric !== "billed_cents" || policy.amount <= 0) continue;
+        if (skipUnenforceableBudgetPolicy(policy)) continue;
         const observedAmount = await computeObservedAmount(db, policy);
         const softThreshold = Math.ceil((policy.amount * policy.warnPercent) / 100);
 
@@ -683,6 +746,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
               details: {
                 scopeType: policy.scopeType,
                 scopeId: policy.scopeId,
+                metric: policy.metric,
                 amountObserved: observedAmount,
                 amountLimit: policy.amount,
               },
@@ -705,6 +769,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
               details: {
                 scopeType: policy.scopeType,
                 scopeId: policy.scopeId,
+                metric: policy.metric,
                 amountObserved: observedAmount,
                 amountLimit: policy.amount,
                 approvalId: hardIncident.incident.approvalId ?? null,
@@ -754,7 +819,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         };
       }
 
-      const companyPolicy = await db
+      const companyPolicies = await db
         .select()
         .from(budgetPolicies)
         .where(
@@ -763,11 +828,11 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             eq(budgetPolicies.scopeType, "company"),
             eq(budgetPolicies.scopeId, companyId),
             eq(budgetPolicies.isActive, true),
-            eq(budgetPolicies.metric, "billed_cents"),
           ),
-        )
-        .then((rows) => rows[0] ?? null);
-      if (companyPolicy && companyPolicy.hardStopEnabled && companyPolicy.amount > 0) {
+        );
+      for (const companyPolicy of companyPolicies) {
+        if (!companyPolicy.hardStopEnabled) continue;
+        if (skipUnenforceableBudgetPolicy(companyPolicy)) continue;
         const observed = await computeObservedAmount(db, companyPolicy);
         if (observed >= companyPolicy.amount) {
           return {
@@ -788,7 +853,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         };
       }
 
-      const agentPolicy = await db
+      const agentPolicies = await db
         .select()
         .from(budgetPolicies)
         .where(
@@ -797,11 +862,11 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             eq(budgetPolicies.scopeType, "agent"),
             eq(budgetPolicies.scopeId, agentId),
             eq(budgetPolicies.isActive, true),
-            eq(budgetPolicies.metric, "billed_cents"),
           ),
-        )
-        .then((rows) => rows[0] ?? null);
-      if (agentPolicy && agentPolicy.hardStopEnabled && agentPolicy.amount > 0) {
+        );
+      for (const agentPolicy of agentPolicies) {
+        if (!agentPolicy.hardStopEnabled) continue;
+        if (skipUnenforceableBudgetPolicy(agentPolicy)) continue;
         const observed = await computeObservedAmount(db, agentPolicy);
         if (observed >= agentPolicy.amount) {
           return {
@@ -829,7 +894,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         .then((rows) => rows[0] ?? null);
 
       if (!project || project.companyId !== companyId) return null;
-      const projectPolicy = await db
+      const projectPolicies = await db
         .select()
         .from(budgetPolicies)
         .where(
@@ -838,11 +903,11 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             eq(budgetPolicies.scopeType, "project"),
             eq(budgetPolicies.scopeId, project.id),
             eq(budgetPolicies.isActive, true),
-            eq(budgetPolicies.metric, "billed_cents"),
           ),
-        )
-        .then((rows) => rows[0] ?? null);
-      if (projectPolicy && projectPolicy.hardStopEnabled && projectPolicy.amount > 0) {
+        );
+      for (const projectPolicy of projectPolicies) {
+        if (!projectPolicy.hardStopEnabled) continue;
+        if (skipUnenforceableBudgetPolicy(projectPolicy)) continue;
         const observed = await computeObservedAmount(db, projectPolicy);
         if (observed >= projectPolicy.amount) {
           return {
@@ -896,14 +961,14 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           })
           .where(eq(budgetPolicies.id, policy.id));
 
-        if (policy.scopeType === "company" && policy.windowKind === "calendar_month_utc") {
+        if (policy.scopeType === "company" && policy.windowKind === "calendar_month_utc" && policy.metric === "billed_cents") {
           await db
             .update(companies)
             .set({ budgetMonthlyCents: nextAmount, updatedAt: now })
             .where(eq(companies.id, policy.scopeId));
         }
 
-        if (policy.scopeType === "agent" && policy.windowKind === "calendar_month_utc") {
+        if (policy.scopeType === "agent" && policy.windowKind === "calendar_month_utc" && policy.metric === "billed_cents") {
           await db
             .update(agents)
             .set({ budgetMonthlyCents: nextAmount, updatedAt: now })

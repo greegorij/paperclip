@@ -213,12 +213,14 @@ export function Costs() {
       scopeId: string;
       amount: number;
       windowKind: BudgetPolicySummary["windowKind"];
+      metric: BudgetPolicySummary["metric"];
     }) =>
       budgetsApi.upsertPolicy(companyId, {
         scopeType: input.scopeType,
         scopeId: input.scopeId,
         amount: input.amount,
         windowKind: input.windowKind,
+        metric: input.metric,
       }),
     onSuccess: invalidateBudgetViews,
   });
@@ -929,6 +931,7 @@ export function Costs() {
                                 scopeId: summary.scopeId,
                                 amount,
                                 windowKind: summary.windowKind,
+                                metric: summary.metric,
                               })}
                           />
                         ))}
