@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agents,
   agentRuntimeState,
@@ -17,7 +17,10 @@ import {
   issues,
   projects,
 } from "@paperclipai/db";
-import { PROVIDER_QUOTA_RESET_MARGIN_MS } from "@paperclipai/adapter-utils";
+import {
+  PROVIDER_QUOTA_DEFAULT_BACKOFF_MS,
+  PROVIDER_QUOTA_RESET_MARGIN_MS,
+} from "@paperclipai/adapter-utils";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -33,6 +36,15 @@ const ACPX_SESSION_LIMIT_ADAPTER = "acpx_session_limit_incident";
 const INCIDENT_ERROR =
   "Internal error: You've hit your session limit · resets 11:50am (UTC)";
 
+/** Same family of message, but without a parseable reset clock. */
+const INCIDENT_ERROR_WITHOUT_RESET = "You've hit your session limit.";
+
+/** Frozen wall clock: morning of the incident, before the stated 11:50am UTC reset. */
+const FROZEN_NOW = new Date("2026-07-27T10:00:00.000Z");
+const EXPECTED_RESET_WITH_MARGIN_MS =
+  Date.parse("2026-07-27T11:50:00.000Z") + PROVIDER_QUOTA_RESET_MARGIN_MS;
+const EXPECTED_DEFAULT_BACKOFF_MS = FROZEN_NOW.getTime() + PROVIDER_QUOTA_DEFAULT_BACKOFF_MS;
+
 if (!embeddedPostgresSupport.supported) {
   console.warn(
     `Skipping embedded Postgres provider-quota session-limit tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
@@ -44,8 +56,9 @@ async function waitForRunToFinish(
   runId: string,
   timeoutMs = 5_000,
 ) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  // Use performance.now() so fake Date timers do not disable the wait deadline.
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
     const run = await heartbeat.getRun(runId);
     if (run && !["queued", "running"].includes(run.status)) return run;
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -57,6 +70,7 @@ describeEmbeddedPostgres("heartbeat provider quota session-limit incident", () =
   let db!: ReturnType<typeof createDb>;
   let heartbeat!: ReturnType<typeof heartbeatService>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  let adapterErrorMessage = INCIDENT_ERROR;
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-provider-quota-session-limit-");
@@ -70,11 +84,11 @@ describeEmbeddedPostgres("heartbeat provider quota session-limit incident", () =
         exitCode: 1,
         signal: null,
         timedOut: false,
-        errorMessage: INCIDENT_ERROR,
+        errorMessage: adapterErrorMessage,
         errorCode: "acpx_turn_failed",
         resultJson: {
           status: "failed",
-          stopReason: INCIDENT_ERROR,
+          stopReason: adapterErrorMessage,
         },
       }),
       testEnvironment: async () => ({
@@ -86,7 +100,15 @@ describeEmbeddedPostgres("heartbeat provider quota session-limit incident", () =
     });
   }, 20_000);
 
+  beforeEach(() => {
+    adapterErrorMessage = INCIDENT_ERROR;
+    // Freeze only Date so setTimeout / expect.poll keep real timers for async waits.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(FROZEN_NOW);
+  });
+
   afterEach(async () => {
+    vi.useRealTimers();
     for (let attempt = 0; attempt < 5; attempt += 1) {
       try {
         await db.delete(activityLog);
@@ -116,7 +138,7 @@ describeEmbeddedPostgres("heartbeat provider quota session-limit incident", () =
     await tempDb?.cleanup();
   });
 
-  it("schedules a reset-time retry for automation runs that hit the session limit", async () => {
+  async function seedAutomationAgent() {
     const companyId = randomUUID();
     const agentId = randomUUID();
 
@@ -145,17 +167,17 @@ describeEmbeddedPostgres("heartbeat provider quota session-limit incident", () =
       permissions: {},
     });
 
-    // Freeze "now" relative to the incident reset clock by invoking around 10:00 UTC.
-    // The adapter message says resets 11:50am (UTC); classifier adds a small margin.
-    const expectedResetMs = Date.parse("2026-07-27T11:50:00.000Z") + PROVIDER_QUOTA_RESET_MARGIN_MS;
+    return { companyId, agentId };
+  }
 
+  async function invokeUntilScheduledRetry(agentId: string, companyId: string, expectedError: string) {
     const run = await heartbeat.invoke(agentId, "automation", {}, "system");
     expect(run).not.toBeNull();
     expect(run?.invocationSource).toBe("automation");
 
     const failedRun = await waitForRunToFinish(heartbeat, run!.id, 10_000);
     expect(failedRun?.status).toBe("failed");
-    expect(failedRun?.error).toBe(INCIDENT_ERROR);
+    expect(failedRun?.error).toBe(expectedError);
     // Control plane must upgrade the ACPX-shaped failure into provider_quota.
     expect(failedRun?.errorCode).toBe("provider_quota");
     expect((failedRun?.resultJson as Record<string, unknown> | null)?.errorFamily).toBe("provider_quota");
@@ -193,35 +215,89 @@ describeEmbeddedPostgres("heartbeat provider quota session-limit incident", () =
     expect(retryRun?.scheduledRetryReason).toBe("transient_failure");
     expect(retryRun?.scheduledRetryAt).not.toBeNull();
 
-    const dueMs = retryRun!.scheduledRetryAt!.getTime();
-    // Must wait until (or after) the provider reset — never bounce immediately.
-    expect(dueMs).toBeGreaterThanOrEqual(Date.parse("2026-07-27T11:50:00.000Z"));
-    // When the wall clock happens to be after the reset during the test run,
-    // the classifier falls back to a same-day-next or default backoff; assert
-    // at least that we scheduled something and recorded the wait in events.
-    if (Date.now() < expectedResetMs) {
-      expect(dueMs).toBe(expectedResetMs);
-    } else {
-      expect(dueMs).toBeGreaterThan(Date.now());
-    }
+    return { run: run!, retryRun: retryRun! };
+  }
 
-    const waitEvent = await db
-      .select({
-        message: heartbeatRunEvents.message,
-        payload: heartbeatRunEvents.payload,
-      })
-      .from(heartbeatRunEvents)
-      .where(eq(heartbeatRunEvents.runId, run!.id))
-      .then((rows) => rows.find((row) => row.message?.includes("Waiting for provider quota reset")) ?? null);
+  it("schedules a reset-time retry for automation runs that hit the session limit", async () => {
+    const { companyId, agentId } = await seedAutomationAgent();
+    const { run, retryRun } = await invokeUntilScheduledRetry(agentId, companyId, INCIDENT_ERROR);
 
-    expect(waitEvent?.message).toContain("Waiting for provider quota reset until");
-    expect(waitEvent?.payload).toMatchObject({
-      errorFamily: "provider_quota",
-      scheduledRetryAttempt: 1,
-    });
-    expect((waitEvent?.payload as Record<string, unknown> | null)?.scheduledRetryAt).toBe(
-      retryRun!.scheduledRetryAt!.toISOString(),
+    // Exact due time: stated reset clock + margin. No wall-clock branching.
+    expect(retryRun.scheduledRetryAt!.getTime()).toBe(EXPECTED_RESET_WITH_MARGIN_MS);
+
+    await expect
+      .poll(
+        () =>
+          db
+            .select({
+              message: heartbeatRunEvents.message,
+              payload: heartbeatRunEvents.payload,
+            })
+            .from(heartbeatRunEvents)
+            .where(eq(heartbeatRunEvents.runId, run.id))
+            .then(
+              (rows) =>
+                rows.find((row) => row.message?.includes("Waiting for provider quota reset")) ?? null,
+            ),
+        { timeout: 5_000, interval: 50 },
+      )
+      .toMatchObject({
+        message: expect.stringContaining("Waiting for provider quota reset until"),
+        payload: expect.objectContaining({
+          errorFamily: "provider_quota",
+          scheduledRetryAttempt: 1,
+          scheduledRetryAt: retryRun.scheduledRetryAt!.toISOString(),
+        }),
+      });
+
+    await expect
+      .poll(
+        () =>
+          db
+            .select({ status: agents.status, errorReason: agents.errorReason })
+            .from(agents)
+            .where(eq(agents.id, agentId))
+            .then((rows) => rows[0] ?? null),
+        { timeout: 5_000, interval: 50 },
+      )
+      .toEqual({ status: "idle", errorReason: null });
+  });
+
+  it("schedules the default one-hour backoff when the session-limit message has no readable reset clock", async () => {
+    adapterErrorMessage = INCIDENT_ERROR_WITHOUT_RESET;
+    const { companyId, agentId } = await seedAutomationAgent();
+    const { run, retryRun } = await invokeUntilScheduledRetry(
+      agentId,
+      companyId,
+      INCIDENT_ERROR_WITHOUT_RESET,
     );
+
+    expect(retryRun.scheduledRetryAt!.getTime()).toBe(EXPECTED_DEFAULT_BACKOFF_MS);
+
+    await expect
+      .poll(
+        () =>
+          db
+            .select({
+              message: heartbeatRunEvents.message,
+              payload: heartbeatRunEvents.payload,
+            })
+            .from(heartbeatRunEvents)
+            .where(eq(heartbeatRunEvents.runId, run.id))
+            .then(
+              (rows) =>
+                rows.find((row) => row.message?.includes("Waiting for provider quota reset")) ?? null,
+            ),
+        { timeout: 5_000, interval: 50 },
+      )
+      .toMatchObject({
+        message: expect.stringContaining("Waiting for provider quota reset until"),
+        payload: expect.objectContaining({
+          errorFamily: "provider_quota",
+          scheduledRetryAttempt: 1,
+          scheduledRetryAt: retryRun.scheduledRetryAt!.toISOString(),
+        }),
+      });
 
     await expect
       .poll(
