@@ -236,6 +236,11 @@ import { redactEventPayload, redactSensitiveText } from "../redaction.js";
 import {
   hasSessionCompactionThresholds,
   resolveSessionCompactionPolicy,
+  classifyProviderQuotaFailure,
+  extractProviderQuotaRetryNotBefore,
+  isProviderQuotaErrorMessage,
+  PROVIDER_QUOTA_DEFAULT_BACKOFF_MS,
+  PROVIDER_QUOTA_RESET_MARGIN_MS,
   type RuntimeStatusUpdate,
   type SessionCompactionPolicy,
 } from "@paperclipai/adapter-utils";
@@ -430,7 +435,7 @@ function resolveCodexTransientFallbackMode(attempt: number): CodexTransientFallb
 }
 
 function readHeartbeatRunErrorFamily(
-  run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode" | "resultJson">,
 ) {
   const resultJson = parseObject(run.resultJson);
   const persistedFamily = readNonEmptyString(resultJson.errorFamily);
@@ -446,6 +451,12 @@ function readHeartbeatRunErrorFamily(
   ) {
     return "transient_upstream";
   }
+  // Safety net: adapters such as ACPX historically returned acpx_turn_failed for
+  // session-limit exhaustion without tagging provider_quota. Detect from the
+  // human-readable error so scheduled retry still engages.
+  if (isProviderQuotaErrorMessage(run.error)) {
+    return "provider_quota";
+  }
   return null;
 }
 
@@ -459,18 +470,18 @@ function isMaxTurnExhaustionRun(
   );
 }
 
-function readTransientRetryNotBeforeFromRun(run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson">) {
+function readTransientRetryNotBeforeFromRun(run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "resultJson">) {
   const resultJson = parseObject(run.resultJson);
-  const value = resultJson.retryNotBefore ?? resultJson.transientRetryNotBefore;
-  if (!(typeof value === "string" || typeof value === "number" || value instanceof Date)) {
-    return null;
+  const value = resultJson.retryNotBefore ?? resultJson.transientRetryNotBefore ?? resultJson.providerQuotaRetryNotBefore;
+  if (typeof value === "string" || typeof value === "number" || value instanceof Date) {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
   }
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
+  return extractProviderQuotaRetryNotBefore(run.error);
 }
 
 function readTransientRecoveryContractFromRun(
-  run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode" | "resultJson">,
 ) {
   const errorFamily = readHeartbeatRunErrorFamily(run);
   return errorFamily === "transient_upstream" || errorFamily === "provider_quota"
@@ -9600,6 +9611,46 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return { outcome: "promoted", run: promoted };
   }
 
+  async function resolveProviderQuotaRetryNotBefore(input: {
+    run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "resultJson">;
+    agent: Pick<typeof agents.$inferSelect, "adapterType">;
+    now: Date;
+    existing?: Date | null;
+  }): Promise<Date> {
+    const existing = input.existing;
+    if (existing && existing.getTime() > input.now.getTime()) return existing;
+
+    const fromMessage = extractProviderQuotaRetryNotBefore(input.run.error, input.now);
+    if (fromMessage && fromMessage.getTime() > input.now.getTime()) return fromMessage;
+
+    try {
+      const adapter = getServerAdapter(input.agent.adapterType);
+      if (adapter.getQuotaWindows) {
+        const quota = await adapter.getQuotaWindows();
+        if (quota.ok) {
+          const resets = quota.windows
+            .map((window) => {
+              if (!window.resetsAt) return null;
+              const parsed = new Date(window.resetsAt);
+              return Number.isNaN(parsed.getTime()) ? null : parsed;
+            })
+            .filter((value): value is Date => value != null && value.getTime() > input.now.getTime())
+            .sort((a, b) => a.getTime() - b.getTime());
+          if (resets[0]) {
+            return new Date(resets[0].getTime() + PROVIDER_QUOTA_RESET_MARGIN_MS);
+          }
+        }
+      }
+    } catch (err) {
+      logger.warn(
+        { err, adapterType: input.agent.adapterType },
+        "failed to read provider quota windows while scheduling quota wait",
+      );
+    }
+
+    return new Date(input.now.getTime() + PROVIDER_QUOTA_DEFAULT_BACKOFF_MS);
+  }
+
   async function scheduleBoundedRetryForRun(
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
@@ -9639,7 +9690,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       agent.adapterType === "codex_local" && transientRecovery?.errorFamily === "transient_upstream"
         ? resolveCodexTransientFallbackMode(nextAttempt)
         : null;
-    const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
+    let transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
+    if (
+      transientRecovery?.errorFamily === "provider_quota" &&
+      (!transientRetryNotBefore || transientRetryNotBefore.getTime() <= now.getTime())
+    ) {
+      transientRetryNotBefore = await resolveProviderQuotaRetryNotBefore({
+        run,
+        agent,
+        now,
+        existing: transientRetryNotBefore,
+      });
+    }
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
 
@@ -10222,7 +10284,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       eventType: "lifecycle",
       stream: "system",
       level: "warn",
-      message: `Scheduled bounded retry ${schedule.attempt}/${schedule.maxAttempts} for ${schedule.dueAt.toISOString()}`,
+      message:
+        transientRecovery?.errorFamily === "provider_quota"
+          ? `Waiting for provider quota reset until ${schedule.dueAt.toISOString()}; scheduled bounded retry ${schedule.attempt}/${schedule.maxAttempts}`
+          : `Scheduled bounded retry ${schedule.attempt}/${schedule.maxAttempts} for ${schedule.dueAt.toISOString()}`,
       payload: {
         retryRunId: retryRun.id,
         retryReason,
@@ -13855,13 +13920,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               );
       const recordedResponsibleUserDenialCode =
         normalizeResponsibleUserDenialCode(latestRun?.errorCode);
+      const providerQuotaFromMessage =
+        outcome === "failed" &&
+        adapterResult.errorFamily !== "provider_quota" &&
+        adapterResult.errorCode !== "provider_quota"
+          ? classifyProviderQuotaFailure(runErrorMessage)
+          : null;
+      const effectiveErrorFamily = adapterResult.errorFamily ?? providerQuotaFromMessage?.errorFamily ?? null;
+      const effectiveRetryNotBefore =
+        adapterResult.retryNotBefore ?? providerQuotaFromMessage?.retryNotBefore ?? null;
       const runErrorCode =
         outcome === "timed_out"
           ? "timeout"
           : outcome === "cancelled"
             ? (latestRun?.errorCode ?? "cancelled")
             : outcome === "failed"
-              ? (adapterResult.errorCode ?? recordedResponsibleUserDenialCode ?? "adapter_failed")
+              ? (providerQuotaFromMessage?.errorCode
+                ?? adapterResult.errorCode
+                ?? recordedResponsibleUserDenialCode
+                ?? "adapter_failed")
               : null;
 
       let logSummary: { bytes: number; sha256?: string; compressed: boolean } | null = null;
@@ -13928,8 +14005,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 ...parseObject(adapterResult.resultJson),
                 configFreshness: configFreshnessResultMetadata,
               },
-              errorFamily: adapterResult.errorFamily ?? null,
-              retryNotBefore: adapterResult.retryNotBefore ?? null,
+              errorFamily: effectiveErrorFamily,
+              retryNotBefore: effectiveRetryNotBefore,
             }),
             modelProfileApplication,
           ),

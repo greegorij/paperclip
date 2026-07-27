@@ -65,6 +65,14 @@ export {
   redactCommandText,
 } from "./command-redaction.js";
 export { buildSandboxNpmInstallCommand } from "./sandbox-install-command.js";
+export {
+  PROVIDER_QUOTA_DEFAULT_BACKOFF_MS,
+  PROVIDER_QUOTA_RESET_MARGIN_MS,
+  classifyProviderQuotaFailure,
+  extractProviderQuotaRetryNotBefore,
+  isProviderQuotaErrorMessage,
+} from "./provider-quota.js";
+export type { ProviderQuotaClassification } from "./provider-quota.js";
 export { createRuntimeProgressReporter } from "./runtime-progress.js";
 export type {
   RuntimeProgressSink,
