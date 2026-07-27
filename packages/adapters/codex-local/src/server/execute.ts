@@ -1238,11 +1238,27 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         };
       }
       if (attempt.proc.timedOut) {
+        const timedOutUsage = attempt.parsed.usage;
+        const hasTimedOutUsage =
+          timedOutUsage.inputTokens > 0 ||
+          timedOutUsage.cachedInputTokens > 0 ||
+          timedOutUsage.outputTokens > 0;
         return {
           exitCode: attempt.proc.exitCode,
           signal: attempt.proc.signal,
           timedOut: true,
           errorMessage: `Timed out after ${timeoutSec}s`,
+          ...(hasTimedOutUsage
+            ? {
+                usage: timedOutUsage,
+                usageBasis: attempt.parsed.usageBasis,
+                provider: "openai",
+                biller: resolveCodexBiller(effectiveEnv, billingType),
+                model,
+                billingType,
+                costUsd: null,
+              }
+            : {}),
           clearSession: clearSessionOnMissingSession,
         };
       }

@@ -11,8 +11,42 @@ export interface CostDateRange {
   to?: Date;
 }
 
+/** Result of createEvent — `created` is false when a concurrent writer won the unique race. */
+export type CreateCostEventResult = {
+  event: typeof costEvents.$inferSelect;
+  created: boolean;
+};
+
 const METERED_BILLING_TYPE = "metered_api";
 const SUBSCRIPTION_BILLING_TYPES = ["subscription_included", "subscription_overage"] as const;
+const COST_EVENTS_HEARTBEAT_RUN_UNIQUE = "cost_events_company_heartbeat_run_uq";
+
+function isCostEventHeartbeatRunUniqueViolation(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (typeof current === "object" && current !== null && !seen.has(current)) {
+    seen.add(current);
+    const maybe = current as {
+      code?: string;
+      constraint?: string;
+      constraint_name?: string;
+      cause?: unknown;
+    };
+    const constraint = maybe.constraint ?? maybe.constraint_name;
+    if (maybe.code === "23505" && constraint === COST_EVENTS_HEARTBEAT_RUN_UNIQUE) return true;
+    // Drizzle / drivers sometimes omit constraint name; still recognize unique_violation text.
+    if (
+      maybe.code === "23505" &&
+      typeof (current as { message?: unknown }).message === "string" &&
+      ((current as { message: string }).message.includes(COST_EVENTS_HEARTBEAT_RUN_UNIQUE) ||
+        (current as { message: string }).message.includes("cost_events_company_heartbeat_run"))
+    ) {
+      return true;
+    }
+    current = maybe.cause;
+  }
+  return false;
+}
 
 function sumAsNumber(column: typeof costEvents.costCents | typeof costEvents.inputTokens | typeof costEvents.cachedInputTokens | typeof costEvents.outputTokens) {
   return sql<number>`coalesce(sum(${column}), 0)::double precision`;
@@ -52,7 +86,10 @@ async function getMonthlySpendTotal(
 export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
   const budgets = budgetService(db, budgetHooks);
   return {
-    createEvent: async (companyId: string, data: Omit<typeof costEvents.$inferInsert, "companyId">) => {
+    createEvent: async (
+      companyId: string,
+      data: Omit<typeof costEvents.$inferInsert, "companyId">,
+    ): Promise<CreateCostEventResult> => {
       const agent = await db
         .select()
         .from(agents)
@@ -64,17 +101,40 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         throw unprocessable("Agent does not belong to company");
       }
 
-      const event = await db
-        .insert(costEvents)
-        .values({
-          ...data,
-          companyId,
-          biller: data.biller ?? data.provider,
-          billingType: data.billingType ?? "unknown",
-          cachedInputTokens: data.cachedInputTokens ?? 0,
-        })
-        .returning()
-        .then((rows) => rows[0]);
+      const findExistingForRun = async () => {
+        if (!data.heartbeatRunId) return null;
+        return db
+          .select()
+          .from(costEvents)
+          .where(and(eq(costEvents.companyId, companyId), eq(costEvents.heartbeatRunId, data.heartbeatRunId)))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+      };
+
+      // Cheap fast path — DB unique index is still the authority under concurrency.
+      const existing = await findExistingForRun();
+      if (existing) return { event: existing, created: false };
+
+      let event: typeof costEvents.$inferSelect;
+      try {
+        event = await db
+          .insert(costEvents)
+          .values({
+            ...data,
+            companyId,
+            biller: data.biller ?? data.provider,
+            billingType: data.billingType ?? "unknown",
+            cachedInputTokens: data.cachedInputTokens ?? 0,
+          })
+          .returning()
+          .then((rows) => rows[0]);
+      } catch (error) {
+        if (data.heartbeatRunId && isCostEventHeartbeatRunUniqueViolation(error)) {
+          const winner = await findExistingForRun();
+          if (winner) return { event: winner, created: false };
+        }
+        throw error;
+      }
 
       const [agentMonthSpend, companyMonthSpend] = await Promise.all([
         getMonthlySpendTotal(db, { companyId, agentId: event.agentId }),
@@ -99,7 +159,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
 
       await budgets.evaluateCostEvent(event);
 
-      return event;
+      return { event, created: true };
     },
 
     summary: async (companyId: string, range?: CostDateRange) => {

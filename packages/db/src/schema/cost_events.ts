@@ -1,4 +1,5 @@
-import { pgTable, uuid, text, timestamp, integer, index } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { pgTable, uuid, text, timestamp, integer, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { issues } from "./issues.js";
@@ -46,9 +47,9 @@ export const costEvents = pgTable(
       table.biller,
       table.occurredAt,
     ),
-    companyHeartbeatRunIdx: index("cost_events_company_heartbeat_run_idx").on(
-      table.companyId,
-      table.heartbeatRunId,
-    ),
+    // Partial unique: one ledger row per run; null heartbeat_run_id stays multi-insertable.
+    companyHeartbeatRunUq: uniqueIndex("cost_events_company_heartbeat_run_uq")
+      .on(table.companyId, table.heartbeatRunId)
+      .where(sql`${table.heartbeatRunId} is not null`),
   }),
 );

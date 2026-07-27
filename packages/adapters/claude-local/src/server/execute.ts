@@ -956,6 +956,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         : undefined;
 
     if (proc.timedOut) {
+      const timedOutUsage =
+        parsedStream.usage ??
+        (parsed ? claudeModelUsageTotals(parsed.modelUsage) : null) ??
+        (parsed
+          ? (() => {
+              const usageObj = parseObject(parsed.usage);
+              const usage = {
+                inputTokens: asNumber(usageObj.input_tokens, 0),
+                cachedInputTokens: asNumber(usageObj.cache_read_input_tokens, 0),
+                outputTokens: asNumber(usageObj.output_tokens, 0),
+              };
+              return usage.inputTokens > 0 || usage.cachedInputTokens > 0 || usage.outputTokens > 0
+                ? usage
+                : null;
+            })()
+          : null);
       return {
         exitCode: proc.exitCode,
         signal: proc.signal,
@@ -963,6 +979,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         errorMessage: `Timed out after ${timeoutSec}s`,
         errorCode: "timeout",
         errorMeta,
+        ...(timedOutUsage
+          ? {
+              usage: timedOutUsage,
+              usageBasis: parsedStream.usageBasis ?? ("per_run" as const),
+              ...(parsedStream.costUsd != null ? { costUsd: parsedStream.costUsd } : {}),
+              provider: "anthropic",
+              biller: isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic",
+              model: parsedStream.model || (parsed ? asString(parsed.model, model) : model),
+              billingType,
+            }
+          : {}),
         clearSession: Boolean(opts.clearSessionOnMissingSession),
       };
     }
@@ -1011,6 +1038,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ? "claude_transient_upstream"
         : null;
       const errorFamily = providerQuota ? "provider_quota" : transientUpstream ? "transient_upstream" : null;
+      const orphanUsage = parsedStream.usage;
       return {
         exitCode: proc.exitCode,
         signal: proc.signal,
@@ -1020,6 +1048,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         errorFamily,
         retryNotBefore: transientRetryNotBefore ? transientRetryNotBefore.toISOString() : null,
         errorMeta,
+        ...(orphanUsage
+          ? {
+              usage: orphanUsage,
+              ...(parsedStream.usageBasis ? { usageBasis: parsedStream.usageBasis } : {}),
+              ...(parsedStream.costUsd != null ? { costUsd: parsedStream.costUsd } : {}),
+              provider: "anthropic",
+              biller: isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic",
+              model: parsedStream.model || model,
+              billingType,
+            }
+          : {}),
         resultJson: {
           stdout: proc.stdout,
           stderr: proc.stderr,

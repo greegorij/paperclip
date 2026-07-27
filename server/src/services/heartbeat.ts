@@ -2810,11 +2810,48 @@ export function buildExplicitResumeSessionOverride(input: {
 
 function normalizeUsageTotals(usage: UsageSummary | null | undefined): UsageTotals | null {
   if (!usage) return null;
+  const record = usage as unknown as Record<string, unknown>;
+  const inputTokens = Math.max(
+    0,
+    Math.floor(asNumber(usage.inputTokens, asNumber(record.input_tokens, 0))),
+  );
+  const cachedInputTokens = Math.max(
+    0,
+    Math.floor(
+      asNumber(
+        usage.cachedInputTokens,
+        asNumber(record.cached_input_tokens, asNumber(record.cache_read_input_tokens, 0)),
+      ),
+    ),
+  );
+  const outputTokens = Math.max(
+    0,
+    Math.floor(asNumber(usage.outputTokens, asNumber(record.output_tokens, 0))),
+  );
+  if (inputTokens <= 0 && cachedInputTokens <= 0 && outputTokens <= 0) {
+    return null;
+  }
   return {
-    inputTokens: Math.max(0, Math.floor(asNumber(usage.inputTokens, 0))),
-    cachedInputTokens: Math.max(0, Math.floor(asNumber(usage.cachedInputTokens, 0))),
-    outputTokens: Math.max(0, Math.floor(asNumber(usage.outputTokens, 0))),
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
   };
+}
+
+/** True when a run left billable/token work that belongs in cost_events. */
+export function hasLedgerUsage(input: {
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  costUsd?: number | null;
+  billingType?: string | null;
+}): boolean {
+  const inputTokens = Math.max(0, Math.floor(asNumber(input.inputTokens, 0)));
+  const cachedInputTokens = Math.max(0, Math.floor(asNumber(input.cachedInputTokens, 0)));
+  const outputTokens = Math.max(0, Math.floor(asNumber(input.outputTokens, 0)));
+  const billingType = normalizeLedgerBillingType(input.billingType);
+  const additionalCostCents = normalizeBilledCostCents(input.costUsd, billingType);
+  return additionalCostCents > 0 || inputTokens > 0 || cachedInputTokens > 0 || outputTokens > 0;
 }
 
 function readRawUsageTotals(usageJson: unknown): UsageTotals | null {
@@ -11730,25 +11767,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const biller = resolveLedgerBiller(result);
     const ledgerScope = await resolveLedgerScopeForRun(db, agent.companyId, run);
 
-    await db
-      .update(agentRuntimeState)
-      .set({
-        adapterType: agent.adapterType,
-        sessionId: session.legacySessionId,
-        lastRunId: run.id,
-        lastRunStatus: run.status,
-        lastError: result.errorMessage ?? null,
-        totalInputTokens: sql`${agentRuntimeState.totalInputTokens} + ${inputTokens}`,
-        totalOutputTokens: sql`${agentRuntimeState.totalOutputTokens} + ${outputTokens}`,
-        totalCachedInputTokens: sql`${agentRuntimeState.totalCachedInputTokens} + ${cachedInputTokens}`,
-        totalCostCents: sql`${agentRuntimeState.totalCostCents} + ${additionalCostCents}`,
-        updatedAt: new Date(),
-      })
-      .where(eq(agentRuntimeState.agentId, agent.id));
-
+    // Claim the ledger row first (DB unique index is the race authority). Only the
+    // winner bumps agent_runtime_state totals — losers update last-run metadata only.
+    let shouldBumpTotals = false;
     if (additionalCostCents > 0 || hasTokenUsage) {
       const costs = costService(db, budgetHooks);
-      await costs.createEvent(agent.companyId, {
+      const { created } = await costs.createEvent(agent.companyId, {
         heartbeatRunId: run.id,
         agentId: agent.id,
         issueId: ledgerScope.issueId,
@@ -11765,7 +11789,28 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         costCents: additionalCostCents,
         occurredAt: new Date(),
       });
+      shouldBumpTotals = created;
     }
+
+    await db
+      .update(agentRuntimeState)
+      .set({
+        adapterType: agent.adapterType,
+        sessionId: session.legacySessionId,
+        lastRunId: run.id,
+        lastRunStatus: run.status,
+        lastError: result.errorMessage ?? null,
+        ...(shouldBumpTotals
+          ? {
+              totalInputTokens: sql`${agentRuntimeState.totalInputTokens} + ${inputTokens}`,
+              totalOutputTokens: sql`${agentRuntimeState.totalOutputTokens} + ${outputTokens}`,
+              totalCachedInputTokens: sql`${agentRuntimeState.totalCachedInputTokens} + ${cachedInputTokens}`,
+              totalCostCents: sql`${agentRuntimeState.totalCostCents} + ${additionalCostCents}`,
+            }
+          : {}),
+        updatedAt: new Date(),
+      })
+      .where(eq(agentRuntimeState.agentId, agent.id));
   }
 
   async function startNextQueuedRunForAgent(agentId: string) {
@@ -13963,6 +14008,31 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           },
           "skipping late run finalization because the run already left running state",
         );
+        // Cancel / process-loss may have terminalized the run before execute
+        // returned. Still attribute any usage the adapter reported so failed/
+        // cancelled spend is not invisible in cost_events.
+        const alreadyTerminalRun = persistedRunWrite.run ?? (await getRun(run.id));
+        if (
+          alreadyTerminalRun &&
+          (normalizedUsage || adapterResult.costUsd != null || normalizeUsageTotals(adapterResult.usage))
+        ) {
+          if (!alreadyTerminalRun.usageJson && usageJson) {
+            await db
+              .update(heartbeatRuns)
+              .set({ usageJson, updatedAt: new Date() })
+              .where(eq(heartbeatRuns.id, alreadyTerminalRun.id));
+          }
+          try {
+            await updateRuntimeState(agent, alreadyTerminalRun, adapterResult, {
+              legacySessionId: nextSessionState.legacySessionId,
+            }, normalizedUsage);
+          } catch (ledgerErr) {
+            logger.warn(
+              { err: ledgerErr, runId: run.id },
+              "failed to record cost ledger for already-terminal run",
+            );
+          }
+        }
         return;
       }
 
@@ -17209,5 +17279,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .limit(1);
       return run ?? null;
     },
+
+    /**
+     * Applies cost ledger + runtime totals for a finished run.
+     * Exposed for concurrent late-finalization race tests (cancel vs execute return).
+     */
+    updateRuntimeState,
   };
 }
