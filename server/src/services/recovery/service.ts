@@ -174,8 +174,10 @@ function readRecoveryRunErrorFamily(latestRun: LatestIssueRun) {
 function isProviderQuotaRecovery(latestRun: LatestIssueRun) {
   if (latestRun?.errorCode === "provider_quota") return true;
   if (readRecoveryRunErrorFamily(latestRun) === "provider_quota") return true;
-  if (latestRun?.errorCode !== "adapter_failed") return false;
-  return /(?:usage|rate|quota) limit|quota (?:exceeded|reset)|try again after/i.test(latestRun.error ?? "");
+  if (latestRun?.errorCode !== "adapter_failed" && latestRun?.errorCode !== "acpx_turn_failed") return false;
+  return /(?:usage|rate|quota|session) limit|quota (?:exceeded|reset)|try again after|resets?\s+(?:at\s+)?/i.test(
+    latestRun.error ?? "",
+  );
 }
 
 function resolveStrandedRecoveryCause(
@@ -304,7 +306,7 @@ const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS = 60_000;
 export const PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
 
 const PROVIDER_QUOTA_ERROR_RE =
-  /(?:you(?:'|’)ve hit your usage limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|model (?:is )?at capacity)/i;
+  /(?:you(?:'|’)ve hit your (?:session|usage) limit|session limit(?: reached| exceeded)?|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|model (?:is )?at capacity)/i;
 const CONFIGURATION_INCOMPLETE_ERROR_RE =
   /(?:model_not_found|model [^\n]{0,120} not found|missing (?:api )?(?:key|credentials?)|credentials? (?:are |is )?missing|no (?:api )?(?:key|credentials?) (?:was |were )?(?:found|configured|provided)|api key (?:is )?(?:not set|unavailable))/i;
 
@@ -314,9 +316,13 @@ export type AdapterFailureRecoveryClassification =
   | null;
 
 function parseProviderQuotaClockReset(error: string, now: Date) {
-  const match = error.match(
+  const resetsMatch = error.match(
+    /\bresets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?(?:\s*\(([^)]+)\))?/i,
+  );
+  const tryAgainMatch = error.match(
     /try again at\s+(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i,
   );
+  const match = resetsMatch ?? tryAgainMatch;
   if (!match) return null;
 
   const hourValue = Number.parseInt(match[1] ?? "", 10);
@@ -388,6 +394,7 @@ export function classifyAdapterFailureForRecovery(
   if (
     latestRun.errorCode !== "adapter_failed" &&
     latestRun.errorCode !== "provider_quota" &&
+    latestRun.errorCode !== "acpx_turn_failed" &&
     latestRun.errorCode !== "configuration_incomplete"
   ) {
     return null;

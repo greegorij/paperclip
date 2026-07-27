@@ -83,6 +83,7 @@ import {
   DEFAULT_ACP_ENGINE_WARM_HANDLE_IDLE_MS,
 } from "./constants.js";
 import { measureStartupStep } from "./startup-timing.js";
+import { classifyProviderQuotaFailure } from "../provider-quota.js";
 
 const defaultModuleDir = path.dirname(fileURLToPath(import.meta.url));
 const PAPERCLIP_MANAGED_CODEX_SKILLS_MANIFEST = ".paperclip-managed-skills.json";
@@ -2215,11 +2216,52 @@ function describeErrorDiagnostics(err: unknown): {
   return { errorName, acpCode, causeMessage, retryable, stackPreview };
 }
 
+function withProviderQuotaClassification(
+  result: AdapterExecutionResult,
+  now = new Date(),
+): AdapterExecutionResult {
+  if ((result.exitCode ?? 0) === 0 || result.timedOut) return result;
+  if (result.errorFamily === "provider_quota" || result.errorCode === "provider_quota") {
+    return result;
+  }
+  const classified = classifyProviderQuotaFailure(result.errorMessage, now);
+  if (!classified) return result;
+  const resultJson = {
+    ...(parseObject(result.resultJson) ?? {}),
+    errorFamily: classified.errorFamily,
+    ...(classified.retryNotBefore
+      ? {
+          retryNotBefore: classified.retryNotBefore,
+          transientRetryNotBefore: classified.retryNotBefore,
+          providerQuotaRetryNotBefore: classified.retryNotBefore,
+        }
+      : {}),
+  };
+  return {
+    ...result,
+    errorCode: classified.errorCode,
+    errorFamily: classified.errorFamily,
+    retryNotBefore: classified.retryNotBefore,
+    resultJson,
+  };
+}
+
 function classifyError(
   err: unknown,
   phase?: AcpxExecutionPhase,
 ): Pick<AdapterExecutionResult, "errorCode" | "errorMeta"> {
   const message = err instanceof Error ? err.message : String(err);
+  const providerQuota = classifyProviderQuotaFailure(message);
+  if (providerQuota) {
+    return {
+      errorCode: providerQuota.errorCode,
+      errorMeta: {
+        category: "provider_quota",
+        errorFamily: providerQuota.errorFamily,
+        ...(providerQuota.retryNotBefore ? { retryNotBefore: providerQuota.retryNotBefore } : {}),
+      },
+    };
+  }
   const diagnostics = describeErrorDiagnostics(err);
   const { acpCode, errorName, causeMessage, retryable, stackPreview } = diagnostics;
   const baseMeta: Record<string, unknown> = {
@@ -2904,7 +2946,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       });
       await cleanupRemoteBridges(prepared);
       flushChildStderr(childStderrState);
-      return {
+      return withProviderQuotaClassification({
         exitCode: terminal.status === "completed" ? 0 : 1,
         signal: timedOut ? "SIGTERM" : null,
         timedOut,
@@ -2932,7 +2974,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         },
         summary: textParts.join("").trim() || terminalStopReason || terminal.status,
         clearSession,
-      };
+      });
     } catch (err) {
       if (timeout) clearTimeout(timeout);
       const messageOverride = timedOut
@@ -2962,19 +3004,24 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       });
       await cleanupRemoteBridges(prepared);
       flushChildStderr(childStderrState);
-      return {
+      const providerQuota = !timedOut
+        ? classifyProviderQuotaFailure(message)
+        : null;
+      return withProviderQuotaClassification({
         exitCode: 1,
         signal: timedOut ? "SIGTERM" : null,
         timedOut,
         errorMessage: message,
         errorCode: timedOut ? "acpx_timeout" : classified.errorCode,
+        errorFamily: providerQuota?.errorFamily ?? null,
+        retryNotBefore: providerQuota?.retryNotBefore ?? null,
         errorMeta: classified.errorMeta,
         ...billingFields,
         model: prepared.requestedModel || null,
         clearSession: clearSession || timedOut,
         resultJson: { phase: "turn" },
         summary: message,
-      };
+      });
     }
   };
 }
