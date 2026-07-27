@@ -120,7 +120,7 @@ export function costRoutes(
       return;
     }
 
-    const event = await costs.createEvent(companyId, {
+    const { event } = await costs.createEvent(companyId, {
       ...req.body,
       occurredAt: new Date(req.body.occurredAt),
     });

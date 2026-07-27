@@ -456,7 +456,7 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
       permissions: {},
     });
 
-    const event = await costs.createEvent(companyId, {
+    const { event } = await costs.createEvent(companyId, {
       agentId,
       provider: "openai",
       biller: "chatgpt",
