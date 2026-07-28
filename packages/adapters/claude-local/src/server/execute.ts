@@ -519,13 +519,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     agent.companyId,
     agent.id,
   );
+  const sharedClaudeConfigDir = resolveSharedClaudeConfigDir(effectiveEnv);
   const localMcpConfigPath = await writePaperclipClaudeMcpConfig({
     stateDir: claudeRuntimeStateDir,
     runId,
     servers: runtimeMcpServers,
+    // Profile paths/secrets are host-local; do not merge into remote-bound mcp-config.
+    claudeConfigDir: executionTargetIsRemote ? undefined : sharedClaudeConfigDir,
   });
   const localMcpConfigDir = path.dirname(localMcpConfigPath);
-  const sharedClaudeConfigDir = resolveSharedClaudeConfigDir(process.env);
   const networkScope = parseLocalProcessNetworkScope(config.networkScope);
   const filesystemScope = parseLocalProcessFilesystemScope(config.filesystemScope);
   const localProcessSandbox: LocalProcessSandboxOptions | null =

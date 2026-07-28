@@ -146,10 +146,128 @@ export function resolveManagedClaudeRuntimeStateDir(
   return path.join(instanceRoot, "companies", companyId, "agents", agentId, "claude-runtime");
 }
 
+/** Profile MCP servers re-injected under --strict-mcp-config. Default: cockpit only. */
+export const PROFILE_MCP_SERVER_ALLOWLIST: readonly string[] = ["paperclip"];
+
+function isStringMap(value: unknown): value is Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.values(value).every((entry) => typeof entry === "string");
+}
+
+/**
+ * Rewrite an allowlisted profile MCP entry with known fields only.
+ * Rejects network transports and malformed types that would invalidate the whole config file.
+ */
+function sanitizeAllowlistedProfileMcpEntry(entry: unknown): Record<string, unknown> | null {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+  const record = entry as Record<string, unknown>;
+
+  if (typeof record.url === "string") return null;
+  const type = typeof record.type === "string" ? record.type.trim().toLowerCase() : "";
+  if (type === "http" || type === "sse") return null;
+  if (type && type !== "stdio") return null;
+
+  if (typeof record.command !== "string" || record.command.trim().length === 0) return null;
+
+  const sanitized: Record<string, unknown> = { command: record.command };
+  if ("args" in record) {
+    if (!Array.isArray(record.args) || !record.args.every((arg) => typeof arg === "string")) {
+      return null;
+    }
+    sanitized.args = record.args;
+  }
+  if ("env" in record) {
+    if (!isStringMap(record.env)) return null;
+    sanitized.env = record.env;
+  }
+  if ("cwd" in record) {
+    if (typeof record.cwd !== "string") return null;
+    sanitized.cwd = record.cwd;
+  }
+  if (type === "stdio") sanitized.type = "stdio";
+  return sanitized;
+}
+
+/**
+ * Candidate paths for the Claude user profile `.claude.json`, in preference order:
+ * 1. Inside `CLAUDE_CONFIG_DIR` — common when that env var is set explicitly
+ *    (e.g. `~/.claude-jarvis/.claude.json`).
+ * 2. Sibling of `CLAUDE_CONFIG_DIR` — default Claude Code layout
+ *    (`$HOME/.claude` + `$HOME/.claude.json`).
+ */
+function resolveClaudeProfileJsonCandidates(claudeConfigDir: string): string[] {
+  const inside = path.join(claudeConfigDir, ".claude.json");
+  const sibling = path.join(path.dirname(claudeConfigDir), ".claude.json");
+  return inside === sibling ? [inside] : [inside, sibling];
+}
+
+function extractAllowlistedProfileMcpServers(
+  parsed: Record<string, unknown>,
+  allowlist: readonly string[],
+): Record<string, unknown> | null {
+  const mcpServers = parsed.mcpServers;
+  if (!mcpServers || typeof mcpServers !== "object" || Array.isArray(mcpServers)) {
+    return null;
+  }
+  const entries = mcpServers as Record<string, unknown>;
+  if (Object.keys(entries).length === 0) return null;
+
+  const allowSet = new Set(allowlist);
+  const allowed: Record<string, unknown> = {};
+  for (const [name, entry] of Object.entries(entries)) {
+    if (!allowSet.has(name)) continue;
+    const sanitized = sanitizeAllowlistedProfileMcpEntry(entry);
+    if (!sanitized) continue;
+    allowed[name] = sanitized;
+  }
+  // Prefer the first profile that yields ≥1 allowlisted entry after filtering —
+  // a network-only inside profile must not block the sibling that holds cockpit.
+  return Object.keys(allowed).length > 0 ? allowed : null;
+}
+
+async function readAllowlistedMcpServersFromProfile(
+  claudeConfigDir: string,
+  allowlist: readonly string[],
+  readFile: (profilePath: string) => Promise<string> = (profilePath) =>
+    fs.readFile(profilePath, "utf8"),
+): Promise<Record<string, unknown>> {
+  for (const profilePath of resolveClaudeProfileJsonCandidates(claudeConfigDir)) {
+    let raw: string;
+    try {
+      raw = await readFile(profilePath);
+    } catch {
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const allowed = extractAllowlistedProfileMcpServers(
+      parsed as Record<string, unknown>,
+      allowlist,
+    );
+    if (allowed === null) continue;
+    return allowed;
+  }
+  return {};
+}
+
 export async function writePaperclipClaudeMcpConfig(input: {
   stateDir: string;
   runId: string;
   servers: AdapterRuntimeMcpServer[];
+  /**
+   * When set (local runs only), merge allowlisted MCP servers from the Claude profile.
+   * Under --strict-mcp-config the CLI ignores the profile; this re-injects cockpit.
+   */
+  claudeConfigDir?: string;
+  /** Defaults to PROFILE_MCP_SERVER_ALLOWLIST (`["paperclip"]`). */
+  profileMcpServerAllowlist?: readonly string[];
+  /** @internal test seam — override profile file reads. */
+  _readProfileFile?: (profilePath: string) => Promise<string>;
 }): Promise<string> {
   const configDir = path.join(input.stateDir, "runs", input.runId, "mcp");
   const configPath = path.join(configDir, "mcp-config.json");
@@ -170,6 +288,23 @@ export async function writePaperclipClaudeMcpConfig(input: {
       headers: { Authorization: `Bearer ${server.token}` },
     };
   }
+
+  // Profile merge is only useful when --strict-mcp-config is used (servers.length > 0).
+  // Allowlist-only: never copy arbitrary local stdio (e.g. mcp-remote proxies).
+  if (input.claudeConfigDir && input.servers.length > 0) {
+    const allowlist = input.profileMcpServerAllowlist ?? PROFILE_MCP_SERVER_ALLOWLIST;
+    const profileServers = await readAllowlistedMcpServersFromProfile(
+      input.claudeConfigDir,
+      allowlist,
+      input._readProfileFile,
+    );
+    for (const [name, entry] of Object.entries(profileServers)) {
+      if (usedNames.has(name)) continue;
+      usedNames.add(name);
+      mcpServers[name] = entry;
+    }
+  }
+
   await fs.mkdir(configDir, { recursive: true });
   await fs.writeFile(configPath, JSON.stringify({ mcpServers }), { mode: 0o600 });
   return configPath;
