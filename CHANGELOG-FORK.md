@@ -6,11 +6,20 @@
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-29
+
 ### Dodane
 - **Zarządzanie konfiguracją floty Jarvisa** (`ops/fleet/jarvis/`): przenośny pakiet 27 agentów, overlay 2 built-inów i 5 rutyn, CLI `snapshot|validate|diff|apply|verify` (dry-run offline, brama kopii = plik+SHA bez miękkiego potwierdzenia, snapshot/validate fail-closed, minimalny PATCH modelu, fail-fast + GET write-verify, skill keys tylko z `skillLibrary`). Ticket: `docs/tickets/T-202607-001.md`.
+- **Niezależny harness porównania modeli** (`evals/promptfoo/fleet/`): osobna suite Promptfoo poza `evals:smoke`, macierz harnessów (Anthropic API Sonnet 5 / Haiku 4.5, CLI Claude subscription, Codex SDK, Cursor exec, OpenRouter) z opt-in `pnpm evals:fleet:*` — bez przypadkowego kosztu pełnej macierzy przy smoke.
+- **Obsługa Claude Opus 5 i Sonnet 5** w adapterze `claude_local` oraz w desired floty (m.in. Jarvis/Szef Komercyjny → `claude-opus-5`, domyślny Claude local → `claude-sonnet-5`).
 
 ### Naprawione / Wzmocnione
-- **Przegląd i utwardzenie `ops/fleet/jarvis`** (Pass 3): pełne `skillKeys` vs live `desiredSkills` dla wszystkich 27 agentów przenośnych + built-inów w `desired/built-ins.json`; brama `completeness` (29 = 27 + 2, liczniki zgodne z tablicami); weryfikacja built-in model/skills i Summarizera (dokładny `plan.next`/SHA-256); poprawne `partial=true` przy write-ok/verify-fail; brak ścieżek hosta `~/` w pakiecie wersjonowanym. Bez uruchomionego live `--apply`.
+- **Przegląd i utwardzenie `ops/fleet/jarvis`** (Pass 3): pełne `skillKeys` vs live `desiredSkills` dla wszystkich 27 agentów przenośnych + built-inów w `desired/built-ins.json`; brama `completeness` (29 = 27 + 2, liczniki zgodne z tablicami); weryfikacja built-in model/skills i Summarizera (dokładny `plan.next`/SHA-256); poprawne `partial=true` przy write-ok/verify-fail; brak ścieżek hosta `~/` w pakiecie wersjonowanym.
+- **Budżety/koszty i oczekiwanie na limity dostawcy**: telemetryka wydatków (spend) oraz recovery z czekaniem na reset quota zamiast agresywnych powtórek przy limicie — kontynuacja wątku z 0.1.0, wciągnięta dalszym syncem upstreamu.
+- **Utwardzenie CI prywatnej production**: Dependabot `open-pull-requests-limit: 0` (wersje idą syncem z upstreamu), pomijanie privileged `commitperclip-review` na prywatnym repo, `pr.yml` na gałęzi `production`, regresie w `scripts/__tests__/production-bootstrap-policy.test.mjs` (checkout base SHA, `contents: read`, agregat `verify`).
+
+### Zsynchronizowane z upstreamem
+- Istotna synchronizacja z `paperclipai/paperclip` po cutoverze 0.1.0 — w drzewie m.in. późniejsze wydania kalendarzowe (`v2026.720.0`, `v2026.722.0`: skill studio, attention/decisions, quota-aware recovery, spend telemetry, Connections v3).
 
 ## [0.1.0] — 2026-07-17
 
