@@ -190,6 +190,32 @@ describe("openapi routes", () => {
     expect(res.body.paths["/api/companies/{companyId}/folders/items/move"].post.summary).toBe(
       "Move an item into or out of a folder",
     );
+    expect(res.body.paths["/api/companies/{companyId}/decision-cards"].get.summary).toBe(
+      "List pending request_confirmation decision cards in a company",
+    );
+    expect(res.body.paths["/api/companies/{companyId}/decision-cards"].get.responses["200"]).toBeDefined();
+    expect(res.body.paths["/api/companies/{companyId}/decision-cards"].get.responses["403"]).toBeDefined();
+    expect(res.body.components.schemas.DecisionCard).toMatchObject({
+      type: "object",
+      properties: {
+        id: { type: "string", format: "uuid" },
+        issueId: { type: "string", format: "uuid" },
+        issueIdentifier: { type: "string", nullable: true },
+        issueTitle: { type: "string" },
+        prompt: { type: "string", nullable: true },
+        createdByAgentId: { type: "string", format: "uuid", nullable: true },
+        createdAt: { type: "string", format: "date-time" },
+      },
+      required: [
+        "id",
+        "issueId",
+        "issueIdentifier",
+        "issueTitle",
+        "prompt",
+        "createdByAgentId",
+        "createdAt",
+      ],
+    });
     expect(JSON.stringify(res.body.paths["/api/tool-gateway/tools"].get)).not.toContain("sessionToken");
     expect(JSON.stringify(res.body.paths["/api/tool-gateway/tools/call"].post)).not.toContain("sessionToken");
   });

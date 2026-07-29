@@ -443,7 +443,11 @@ jobs:
           specs="$(node ./scripts/e2e-shard.mjs \
             --shard-index ${{ matrix.shard_index }} --shard-count ${{ matrix.shard_count }})"
           echo "shard ${{ matrix.shard_label }} specs: $specs"
-          pnpm run test:e2e -- $specs
+          # Do not insert an extra `--` before $specs. pnpm 9.15.4 forwards a
+          # literal `--` into Playwright's argv, and Playwright then treats it
+          # as a test filter that matches everything — both shards would run
+          # the full suite (including smoke-lab) instead of the computed list.
+          pnpm run test:e2e $specs
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v7

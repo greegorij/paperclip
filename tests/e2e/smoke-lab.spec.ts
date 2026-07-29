@@ -5,6 +5,16 @@ type SmokeRunStepStatus = "pass" | "fail" | "skipped";
 
 const SCREENSHOT_DIR = "test-results/smoke-lab";
 
+/**
+ * CI mirror evidence policy (see doc/connections/SMOKE-LAB-BROWSER-RUNNER.md).
+ * The headed browser runner still screenshots every lifecycle step; the
+ * headless CI gate keeps functional assertions + results-API step records for
+ * all eight stages, but only pays for screenshots on the lifecycle bookends
+ * (entry surface + final audit evidence) and always on failure. Full-page
+ * shots after every action previously pushed this suite past the 240s budget.
+ */
+const CI_EVIDENCE_SCREENSHOT_STEPS = new Set(["connect", "audit-evidence"]);
+
 type Json = Record<string, unknown>;
 type Seed = { companyId: string; prefix: string };
 type Scout = { id: string; name: string };
@@ -143,11 +153,23 @@ async function recordStep(
 
 async function screenshot(page: Page, scenario: SmokeLabScenario, step: string) {
   const path = `${SCREENSHOT_DIR}/${scenario.path.toLowerCase()}-${step}.png`;
-  await page.screenshot({ path, fullPage: true });
+  // Viewport shot is enough for CI triage; fullPage was a major timeout driver.
+  await page.screenshot({ path });
   return path;
 }
 
-async function navigateForEvidence(page: Page, seed: Seed, connectionId: string, scenario: SmokeLabScenario) {
+async function navigateForEvidence(
+  page: Page,
+  seed: Seed,
+  connectionId: string,
+  scenario: SmokeLabScenario,
+  step: string,
+) {
+  if (step === "audit-evidence" || step === "allowed-read" || step === "revoke") {
+    await page.goto(`/${seed.prefix}/apps/${connectionId}/activity`);
+    await expect(page.getByRole("heading", { name: "Recent activity" })).toBeVisible({ timeout: 20_000 });
+    return;
+  }
   if (scenario.uiEntryPath === "advanced") {
     await page.goto(`/${seed.prefix}/apps/advanced`);
     await expect(page.getByRole("heading", { name: "Advanced setup" })).toBeVisible({ timeout: 20_000 });
@@ -179,21 +201,29 @@ async function runRecordedStep(
   runId: string,
   scenario: SmokeLabScenario,
   step: string,
+  connectionId: string,
   action: () => Promise<string | null | undefined>,
 ) {
   const start = Date.now();
+  const captureEvidence = CI_EVIDENCE_SCREENSHOT_STEPS.has(step);
   try {
-    const screenshotHint = await action();
-    const screenshotPath = await screenshot(page, scenario, step);
+    const detail = await action();
+    let screenshotPath: string | null = null;
+    if (captureEvidence) {
+      await navigateForEvidence(page, seed, connectionId, scenario, step);
+      screenshotPath = await screenshot(page, scenario, step);
+    }
     await recordStep(request, seed.companyId, runId, {
       path: scenario.path,
       scenarioStep: step,
       status: "pass",
-      detail: screenshotHint ?? null,
+      detail: detail ?? null,
       screenshotPath,
       durationMs: Date.now() - start,
     });
   } catch (error) {
+    // Always keep a failure artifact even for non-evidence steps.
+    await navigateForEvidence(page, seed, connectionId, scenario, step).catch(() => undefined);
     const screenshotPath = await screenshot(page, scenario, `${step}-failed`).catch(() => null);
     await recordStep(request, seed.companyId, runId, {
       path: scenario.path,
@@ -315,19 +345,17 @@ test.describe.serial("Smoke Lab scenario catalog mirror", () => {
         const fixtures = await startAndInstallFixtures(request, seed.companyId);
         const connection = connectionForScenario(fixtures, scenario);
 
-        await runRecordedStep(page, request, seed, smokeRun.id, scenario, "connect", async () => {
-          await navigateForEvidence(page, seed, connection.id, scenario);
+        await runRecordedStep(page, request, seed, smokeRun.id, scenario, "connect", connection.id, async () => {
           return scenario.lifecycle.connect;
         });
 
-        await runRecordedStep(page, request, seed, smokeRun.id, scenario, "discover-catalog", async () => {
+        await runRecordedStep(page, request, seed, smokeRun.id, scenario, "discover-catalog", connection.id, async () => {
           const discovered = await catalog(request, connection.id);
           expect(discovered.catalog.map((entry) => entry.toolName)).toContain(scenario.lifecycle.allowedRead.name);
-          await navigateForEvidence(page, seed, connection.id, scenario);
           return `${scenario.lifecycle.discoverCatalog}: ${discovered.catalog.length} entries`;
         });
 
-        await runRecordedStep(page, request, seed, smokeRun.id, scenario, "allowed-read", async () => {
+        await runRecordedStep(page, request, seed, smokeRun.id, scenario, "allowed-read", connection.id, async () => {
           const read = await testCall(request, connection.id, scout, scenario.lifecycle.allowedRead);
           expect(read.decision).toBe("allowed");
           expect(read.error).toBeUndefined();
@@ -336,11 +364,10 @@ test.describe.serial("Smoke Lab scenario catalog mirror", () => {
             agentId: scout.id,
             search: scenario.lifecycle.allowedRead.name,
           });
-          await page.goto(`/${seed.prefix}/apps/${connection.id}/activity`);
           return `Allowed read ${scenario.lifecycle.allowedRead.name}`;
         });
 
-        await runRecordedStep(page, request, seed, smokeRun.id, scenario, "ask-first-write-approved", async () => {
+        await runRecordedStep(page, request, seed, smokeRun.id, scenario, "ask-first-write-approved", connection.id, async () => {
           await policy(request, seed.companyId, {
             name: `${scenario.path} require approval ${Date.now()}`,
             policyType: "require_approval",
@@ -350,13 +377,12 @@ test.describe.serial("Smoke Lab scenario catalog mirror", () => {
           const pending = await testCall(request, connection.id, scout, scenario.lifecycle.askFirstWrite);
           expect(pending.decision).toBe("ask_first");
           expect(pending.actionRequestId).toBeTruthy();
-          await page.goto(`/${seed.prefix}/apps/${connection.id}/review`);
           await approveActionRequest(request, seed.companyId, pending.actionRequestId!);
           await pollTestCall(request, connection.id, pending.actionRequestId!, "done");
           return `Approved ask-first call ${scenario.lifecycle.askFirstWrite.name}`;
         });
 
-        await runRecordedStep(page, request, seed, smokeRun.id, scenario, "denied-blocked-call", async () => {
+        await runRecordedStep(page, request, seed, smokeRun.id, scenario, "denied-blocked-call", connection.id, async () => {
           await policy(request, seed.companyId, {
             name: `${scenario.path} block ${Date.now()}`,
             policyType: "block",
@@ -366,13 +392,11 @@ test.describe.serial("Smoke Lab scenario catalog mirror", () => {
           const denied = await testCall(request, connection.id, scout, scenario.lifecycle.deniedCall);
           expect(denied.decision).toBe("off");
           expect(denied.error?.reasonCode).toBeTruthy();
-          await page.goto(`/${seed.prefix}/apps/${connection.id}/review`);
           return `Blocked call ${scenario.lifecycle.deniedCall.name}: ${denied.error?.reasonCode}`;
         });
 
-        await runRecordedStep(page, request, seed, smokeRun.id, scenario, "schema-change-quarantine", async () => {
+        await runRecordedStep(page, request, seed, smokeRun.id, scenario, "schema-change-quarantine", connection.id, async () => {
           if (connection.transport !== "mcp_remote") {
-            await page.goto(`/${seed.prefix}/apps/${connection.id}/activity`);
             return "Non-HTTP path records governance/quarantine evidence through fixture metadata.";
           }
           await json<ToolConnection>(await request.patch(`/api/tool-connections/${connection.id}`, {
@@ -391,11 +415,10 @@ test.describe.serial("Smoke Lab scenario catalog mirror", () => {
             await request.post(`/api/tool-connections/${connection.id}/catalog/refresh`),
           );
           expect(refresh.quarantinedCount).toBeGreaterThan(0);
-          await page.goto(`/${seed.prefix}/apps`);
           return `Catalog refresh quarantined ${refresh.quarantinedCount} changed entries.`;
         });
 
-        await runRecordedStep(page, request, seed, smokeRun.id, scenario, "revoke", async () => {
+        await runRecordedStep(page, request, seed, smokeRun.id, scenario, "revoke", connection.id, async () => {
           if (scenario.transport === "gateway_session") {
             const session = await createGatewaySession(request, seed.companyId, scout);
             const listed = await gatewayFetch(request, session.toolsUrl, session.token);
@@ -404,27 +427,24 @@ test.describe.serial("Smoke Lab scenario catalog mirror", () => {
               data: { companyId: seed.companyId },
             }));
             await expectError(await gatewayFetch(request, session.toolsUrl, session.token), 401);
-            await page.goto(`/${seed.prefix}/apps/${connection.id}/activity`);
             return scenario.lifecycle.revoke;
           }
           const disabled = await json<ToolConnection>(await request.patch(`/api/tool-connections/${connection.id}`, {
             data: { enabled: false },
           }));
           expect(disabled.enabled).toBe(false);
-          await page.goto(`/${seed.prefix}/apps/${connection.id}`);
           await json<ToolConnection>(await request.patch(`/api/tool-connections/${connection.id}`, {
             data: { enabled: true },
           }));
           return scenario.lifecycle.revoke;
         });
 
-        await runRecordedStep(page, request, seed, smokeRun.id, scenario, "audit-evidence", async () => {
+        await runRecordedStep(page, request, seed, smokeRun.id, scenario, "audit-evidence", connection.id, async () => {
           await expectAuditEvent(request, seed.companyId, {
             connectionId: connection.id,
             agentId: scout.id,
             search: scenario.lifecycle.allowedRead.name,
           });
-          await page.goto(`/${seed.prefix}/apps/${connection.id}/activity`);
           return scenario.lifecycle.auditEvidence;
         });
       }
@@ -439,7 +459,7 @@ test.describe.serial("Smoke Lab scenario catalog mirror", () => {
       }).catch(() => undefined);
     }
 
-    const completed = await json<{ run: SmokeRun; steps: Array<{ path: string; status: string; screenshotArtifactRef: Json | null }> }>(
+    const completed = await json<{ run: SmokeRun; steps: Array<{ path: string; scenarioStep: string; status: string; screenshotArtifactRef: Json | null }> }>(
       await request.get(`/api/companies/${seed.companyId}/smoke-lab/runs/${smokeRun.id}`),
     );
     expect(completed.run.status).toBe("passed");
@@ -447,7 +467,17 @@ test.describe.serial("Smoke Lab scenario catalog mirror", () => {
       const steps = completed.steps.filter((step) => step.path === scenario.path);
       expect(steps.length, `${scenario.path} should record lifecycle steps`).toBeGreaterThanOrEqual(8);
       expect(steps.every((step) => step.status === "pass")).toBe(true);
-      expect(steps.every((step) => step.screenshotArtifactRef?.kind === "playwright_screenshot")).toBe(true);
+      for (const evidenceStep of CI_EVIDENCE_SCREENSHOT_STEPS) {
+        const recorded = steps.find((step) => step.scenarioStep === evidenceStep);
+        expect(recorded?.screenshotArtifactRef?.kind, `${scenario.path}/${evidenceStep} evidence shot`).toBe(
+          "playwright_screenshot",
+        );
+      }
+      const nonEvidence = steps.filter((step) => !CI_EVIDENCE_SCREENSHOT_STEPS.has(step.scenarioStep));
+      expect(
+        nonEvidence.every((step) => step.screenshotArtifactRef == null),
+        `${scenario.path} non-evidence steps should omit screenshots in CI`,
+      ).toBe(true);
     }
   });
 });

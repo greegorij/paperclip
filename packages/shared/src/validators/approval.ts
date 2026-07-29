@@ -34,3 +34,19 @@ export const addApprovalCommentSchema = z.object({
 });
 
 export type AddApprovalComment = z.infer<typeof addApprovalCommentSchema>;
+
+/**
+ * JSON shape of GET /companies/:companyId/decision-cards.
+ * Pending request_confirmation cards with issue context for the Approvals view.
+ */
+export const decisionCardSchema = z.object({
+  id: z.string().uuid(),
+  issueId: z.string().uuid(),
+  issueIdentifier: z.string().nullable(),
+  issueTitle: z.string(),
+  prompt: z.string().nullable(),
+  createdByAgentId: z.string().uuid().nullable(),
+  createdAt: z.string().datetime(),
+}).strict();
+
+export type DecisionCardResponse = z.infer<typeof decisionCardSchema>;

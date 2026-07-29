@@ -121,12 +121,33 @@ vi.mock("../services/issue-dependency-wakeups.js", async () => {
     findExistingIssueBlockerStrandedWake: mockFindExistingIssueBlockerStrandedWake,
   };
 });
+// Cache the heavy issues route + middleware across tests. Per-test isolation comes from
+// hoisted vi.mock factories + clearAllMocks / mockResolvedValue resets below — not from
+// reloading ~11k-line routes/issues.js after every beforeEach vi.resetModules (that alone
+// can exceed the default 5s testTimeout under transform load).
+let cachedIssueRoutes: typeof import("../routes/issues.js").issueRoutes | null = null;
+let cachedErrorHandler: typeof import("../middleware/index.js").errorHandler | null = null;
+
+async function loadIssueRouteModules() {
+  if (cachedIssueRoutes && cachedErrorHandler) {
+    return { issueRoutes: cachedIssueRoutes, errorHandler: cachedErrorHandler };
+  }
+  const [{ issueRoutes }, { errorHandler }] = await Promise.all([
+    vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
+    vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
+  ]);
+  cachedIssueRoutes = issueRoutes;
+  cachedErrorHandler = errorHandler;
+  return { issueRoutes, errorHandler };
+}
+
 async function createApp(db?: ReturnType<typeof createDb> | Record<string, never>) {
   const emptyRows: unknown[] = [];
-  const whereResult = {
+  const whereResult: Record<string, unknown> = {
     limit: vi.fn(async () => emptyRows),
     then: async (resolve: (rows: unknown[]) => unknown) => resolve(emptyRows),
   };
+  whereResult.orderBy = vi.fn(async () => emptyRows);
   const query: Record<string, unknown> = {};
   query.innerJoin = vi.fn(() => query);
   query.where = vi.fn(() => whereResult);
@@ -135,10 +156,7 @@ async function createApp(db?: ReturnType<typeof createDb> | Record<string, never
       from: vi.fn(() => query),
     })),
   };
-  const [{ issueRoutes }, { errorHandler }] = await Promise.all([
-    vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
-    vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
-  ]);
+  const { issueRoutes, errorHandler } = await loadIssueRouteModules();
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -151,17 +169,21 @@ async function createApp(db?: ReturnType<typeof createDb> | Record<string, never
     };
     next();
   });
+  // Fresh router per app: issueRoutes(db) constructs handlers that call issueService(db)
+  // (and peers) at request time, so hoisted mocks stay live without module reload.
   app.use("/api", issueRoutes((db ?? routeDb) as any, {} as any));
   app.use(errorHandler);
   return app;
 }
 
 describe("issue dependency wakeups in issue routes", () => {
+  // Pay the one-time routes/issues.js transform outside each it() so default 5s
+  // testTimeout covers wakeup assertions, not dynamic module bootstrap.
+  beforeAll(async () => {
+    await loadIssueRouteModules();
+  }, 60_000);
+
   beforeEach(() => {
-    vi.resetModules();
-    vi.doUnmock("../routes/issues.js");
-    vi.doUnmock("../routes/authz.js");
-    vi.doUnmock("../middleware/index.js");
     vi.clearAllMocks();
     mockFindExistingIssueBlockersResolvedWake.mockResolvedValue(null);
     mockFindExistingIssueBlockerStrandedWake.mockResolvedValue(null);
@@ -364,7 +386,7 @@ describe("issue dependency wakeups in issue routes", () => {
 
     const res = await request(await createApp())
       .patch("/api/issues/issue-1")
-      .send({ status: "blocked" });
+      .send({ status: "blocked", unblockDescriptor: { owner: "board", action: "Resolve transitive blocker" } });
     expect(res.status).toBe(200);
     // Allow async wake side-effects (parent/sandbox) to settle without stranded wake.
     await new Promise((resolve) => setTimeout(resolve, 50));

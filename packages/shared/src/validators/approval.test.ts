@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addApprovalCommentSchema,
+  decisionCardSchema,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
 } from "./approval.js";
@@ -27,5 +28,34 @@ describe("approval validators", () => {
       .toBe("Decision\n\nApproved.");
     expect(requestApprovalRevisionSchema.parse({ decisionNote: "Decision\\r\\nRevise." }).decisionNote)
       .toBe("Decision\nRevise.");
+  });
+
+  it("parses decision-card list items with issue context", () => {
+    expect(
+      decisionCardSchema.parse({
+        id: "11111111-1111-4111-8111-111111111111",
+        issueId: "22222222-2222-4222-8222-222222222222",
+        issueIdentifier: "PAP-1",
+        issueTitle: "Needs a human decision",
+        prompt: "Ship this?",
+        createdByAgentId: "33333333-3333-4333-8333-333333333333",
+        createdAt: "2026-07-16T12:00:00.000Z",
+      }),
+    ).toMatchObject({
+      issueIdentifier: "PAP-1",
+      prompt: "Ship this?",
+    });
+
+    expect(
+      decisionCardSchema.parse({
+        id: "11111111-1111-4111-8111-111111111111",
+        issueId: "22222222-2222-4222-8222-222222222222",
+        issueIdentifier: null,
+        issueTitle: "Untitled",
+        prompt: null,
+        createdByAgentId: null,
+        createdAt: "2026-07-16T12:00:00.000Z",
+      }).prompt,
+    ).toBeNull();
   });
 });

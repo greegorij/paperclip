@@ -79,6 +79,7 @@ import {
   requestApprovalRevisionSchema,
   resubmitApprovalSchema,
   addApprovalCommentSchema,
+  decisionCardSchema,
   // Cost / budget
   createCostEventSchema,
   createFinanceEventSchema,
@@ -2841,6 +2842,8 @@ registry.registerPath({
 
 // ─── Approvals ───────────────────────────────────────────────────────────────
 
+registry.register("DecisionCard", decisionCardSchema);
+
 registry.registerPath({
   method: "get",
   path: "/api/companies/{companyId}/approvals",
@@ -2848,6 +2851,23 @@ registry.registerPath({
   summary: "List approvals in a company",
   request: { params: z.object({ companyId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/decision-cards",
+  tags: ["approvals"],
+  summary: "List pending request_confirmation decision cards in a company",
+  description:
+    "Read-only company-wide listing of pending request_confirmation issue-thread interactions. " +
+    "Same access gates as list approvals (company access + company_scope:read). " +
+    "Cards are resolved in the issue thread, not via this endpoint.",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: {
+    200: r.ok(z.array(decisionCardSchema)),
+    401: r.unauthorized,
+    403: r.forbidden,
+  },
 });
 
 registry.registerPath({
