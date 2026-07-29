@@ -15,6 +15,8 @@
  *      - triggers on both master and production
  *      - declares `contents: read` at the workflow level
  *      - has no write permissions of any kind
+ *      - `verify` is the authoritative all-critical-lanes aggregate (always(),
+ *        direct needs on every critical lane, each result must be success)
  *   3. Dependabot version-update PRs are disabled (limit 0) on both ecosystems.
  */
 
@@ -185,6 +187,82 @@ test("PR workflow has no write permissions", () => {
     /:\s+write/,
     "PR workflow preamble must not contain any write permissions",
   );
+});
+
+// ---------------------------------------------------------------------------
+// pr.yml — verify aggregate (authoritative all-critical-lanes gate)
+// ---------------------------------------------------------------------------
+
+/** Exact lane id → env var that must bind needs.<lane>.result and test success. */
+const VERIFY_CRITICAL_LANES = Object.freeze({
+  typecheck_release_registry: "TYPECHECK_RELEASE_REGISTRY_RESULT",
+  general_tests: "GENERAL_TESTS_RESULT",
+  build: "BUILD_RESULT",
+  verify_serialized_server: "VERIFY_SERIALIZED_SERVER_RESULT",
+  canary_dry_run: "CANARY_DRY_RUN_RESULT",
+  e2e_shards: "E2E_SHARDS_RESULT",
+});
+
+/** Isolate top-level job bodies from a workflow file (no YAML parser). */
+function parseWorkflowJobs(workflowSource) {
+  const jobs = new Map();
+  let current = null;
+  for (const line of workflowSource.split("\n")) {
+    const header = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(line);
+    if (header) {
+      current = header[1];
+      jobs.set(current, []);
+      continue;
+    }
+    if (current && /^\S/.test(line)) current = null;
+    if (current) jobs.get(current).push(line);
+  }
+  for (const [id, lines] of jobs) jobs.set(id, lines.join("\n"));
+  return jobs;
+}
+
+/** Extract job ids from a conventional `needs:` YAML block sequence (`- job_id`). */
+function parseNeedsBlockSequence(jobBody) {
+  const block = /^ {4}needs:\s*\n((?: {6}- [A-Za-z0-9_-]+\n?)+)/m.exec(jobBody);
+  assert.ok(block, "verify job must declare needs: as a YAML block sequence");
+  return [...block[1].matchAll(/^ {6}- ([A-Za-z0-9_-]+)\s*$/gm)].map((m) => m[1]);
+}
+
+test("PR verify job is the authoritative all-critical-lanes aggregate", () => {
+  const jobs = parseWorkflowJobs(readFile(".github/workflows/pr.yml"));
+  const verify = jobs.get("verify");
+  assert.ok(verify, "pr.yml must define a `verify` job");
+  assert.match(
+    verify,
+    /^ {4}if: \$\{\{ always\(\) \}\}$/m,
+    "verify must use exact if: ${{ always() }}",
+  );
+
+  const expectedLanes = Object.keys(VERIFY_CRITICAL_LANES);
+  const needs = parseNeedsBlockSequence(verify);
+  assert.equal(needs.length, expectedLanes.length);
+  assert.deepEqual(
+    [...needs].sort(),
+    [...expectedLanes].sort(),
+    "verify needs must be exactly the six critical lanes",
+  );
+
+  for (const [lane, envName] of Object.entries(VERIFY_CRITICAL_LANES)) {
+    assert.ok(jobs.has(lane), `critical lane \`${lane}\` must exist as a job`);
+    assert.match(
+      verify,
+      new RegExp(
+        String.raw`^\s+${envName}:\s*\$\{\{\s*needs\.${lane}\.result\s*\}\}\s*$`,
+        "m",
+      ),
+      `verify must bind ${envName} to needs.${lane}.result`,
+    );
+    assert.match(
+      verify,
+      new RegExp(String.raw`test "\$` + envName + String.raw`" = "success"`),
+      `verify must require $${envName} = "success" (skipped/cancelled must fail)`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------

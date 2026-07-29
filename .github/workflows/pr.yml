@@ -210,9 +210,17 @@ jobs:
 
   verify:
     # Preserve the legacy required-check name while the underlying work runs in parallel.
+    # Authoritative all-critical-lanes aggregate: green only when every critical
+    # lane succeeded. The separate `e2e` job remains the legacy e2e-only gate.
     name: verify
     if: ${{ always() }}
-    needs: [typecheck_release_registry, general_tests, build]
+    needs:
+      - typecheck_release_registry
+      - general_tests
+      - build
+      - verify_serialized_server
+      - canary_dry_run
+      - e2e_shards
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -222,10 +230,18 @@ jobs:
           TYPECHECK_RELEASE_REGISTRY_RESULT: ${{ needs.typecheck_release_registry.result }}
           GENERAL_TESTS_RESULT: ${{ needs.general_tests.result }}
           BUILD_RESULT: ${{ needs.build.result }}
+          VERIFY_SERIALIZED_SERVER_RESULT: ${{ needs.verify_serialized_server.result }}
+          CANARY_DRY_RUN_RESULT: ${{ needs.canary_dry_run.result }}
+          E2E_SHARDS_RESULT: ${{ needs.e2e_shards.result }}
         run: |
+          # Require literal success so failure, cancelled, and skipped all fail
+          # the gate (always() still runs verify when a needed job is skipped).
           test "$TYPECHECK_RELEASE_REGISTRY_RESULT" = "success"
           test "$GENERAL_TESTS_RESULT" = "success"
           test "$BUILD_RESULT" = "success"
+          test "$VERIFY_SERIALIZED_SERVER_RESULT" = "success"
+          test "$CANARY_DRY_RUN_RESULT" = "success"
+          test "$E2E_SHARDS_RESULT" = "success"
 
   build:
     name: Build
