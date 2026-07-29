@@ -6,7 +6,12 @@ updates:
       interval: weekly
       day: monday
       time: "06:00"
-    open-pull-requests-limit: 10
+    # limit: 0 disables routine version-update PRs on this production layer;
+    # dependencies flow in through upstream sync instead. Dependabot security
+    # alerts and automatic security-fix PRs are governed separately in repo
+    # Settings → Code security — they may still open PRs when a vulnerability
+    # is detected, regardless of this limit.
+    open-pull-requests-limit: 0
     labels:
       - "dependencies"
     ignore:
@@ -20,4 +25,9 @@ updates:
       interval: weekly
       day: monday
       time: "06:00"
-    open-pull-requests-limit: 5
+    # limit: 0 disables routine version-update PRs on this production layer;
+    # dependencies flow in through upstream sync instead. Dependabot security
+    # alerts and automatic security-fix PRs are governed separately in repo
+    # Settings → Code security — they may still open PRs when a vulnerability
+    # is detected, regardless of this limit.
+    open-pull-requests-limit: 0
