@@ -88,6 +88,29 @@ Phase 5 memory/control-surface prompt evals should be paired with deterministic 
 2. Follow the existing case format (see `core.yaml` for reference)
 3. Run `promptfoo eval` to test
 
+## Fleet Config Comparison
+
+The isolated fleet comparison suite lives in `evals/promptfoo/fleet/`.
+It evaluates agent role/config behaviors across five clearly distinguished harnesses
+(Anthropic direct API, Claude Code subscription CLI, Codex SDK, Cursor subscription exec,
+OpenRouter proxy) without adding cost to the default `evals:smoke` run.
+
+```bash
+# Validate fleet config (offline, no model calls):
+pnpm evals:fleet:validate
+
+# Run fleet suite (opt-in, paid — explicit intent required):
+pnpm evals:fleet:run
+
+# Run wrapper unit tests + preflight (no paid calls):
+pnpm evals:fleet:test
+```
+
+See [`evals/promptfoo/fleet/README.md`](promptfoo/fleet/README.md) for full instructions,
+per-provider filtering, cost reporting guidance, and known limitations.
+
+---
+
 ### Phases
 
 - **Phase 0 (current):** Promptfoo bootstrap - narrow behavior evals with deterministic assertions

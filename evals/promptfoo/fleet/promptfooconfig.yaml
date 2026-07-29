@@ -1,0 +1,158 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+# Fleet Configuration Comparison — isolated from default evals:smoke run
+#
+# Evaluates agent role/config behaviors across five clearly distinguished harnesses:
+#   1. Anthropic direct API          — real billing, no OpenRouter proxy
+#   2. Claude Code subscription CLI  — real claude CLI, subscription auth
+#   3. Codex SDK / ChatGPT login     — openai:codex-sdk, no forced model
+#   4. Cursor subscription harness   — real cursor-agent CLI (exec wrapper)
+#   5. OpenRouter proxy              — routing only, not equivalent to 1–4
+#
+# Usage:
+#   cd evals/promptfoo/fleet
+#   npx promptfoo@0.121.19 eval -c promptfooconfig.yaml
+#   # or via package script:
+#   pnpm evals:fleet:run
+#
+# Validate config (offline, no API calls):
+#   cd evals/promptfoo/fleet
+#   npx promptfoo@0.121.19 validate -c promptfooconfig.yaml
+#
+# See README.md for full instructions and per-provider filtering.
+#
+# Prerequisites per provider tier:
+#
+#   Claude (real Anthropic API — not OpenRouter proxy):
+#     export ANTHROPIC_API_KEY=sk-ant-...
+#
+#   Codex (native openai:codex-sdk — ChatGPT login when no key set):
+#     No key required for default model or explicit gpt-5.6-sol candidate;
+#     existing ChatGPT login may authenticate both. Set OPENAI_API_KEY only
+#     for explicit API-key billing.
+#     export OPENAI_API_KEY=sk-...  # optional
+#
+#   Claude Code subscription CLI (exec harness — scripts/claude-exec.mjs):
+#     Requires claude in PATH or CLAUDE_CODE_PATH env var.
+#     Runs claude-sonnet-5 in a fresh mkdtemp directory.
+#     No API key required (uses local subscription or keychain auth).
+#     Network call IS made for the model; no repo exposure, no tools,
+#     no persisted session, no settings or MCP inheritance.
+#     Subscription cost is NOT comparable to API cost_usd.
+#     Unit tests: node --test scripts/claude-exec.test.js (no paid calls).
+#
+#   Cursor auto (exec harness — scripts/cursor-exec.mjs):
+#     Requires cursor-agent in PATH or CURSOR_AGENT_PATH env var.
+#     Runs in ask mode inside a fresh mkdtemp directory.
+#     No API key required. Subscription cost is NOT comparable to API cost_usd.
+#     Unit tests: node --test scripts/cursor-exec.test.js (no paid calls).
+#
+#   OpenRouter candidates:
+#     export OPENROUTER_API_KEY=sk-or-...
+#
+# Metrics reported per case:
+#   pass/fail on critical assertions, latency_ms,
+#   tokens_in / tokens_out — when provider returns usage (API only),
+#   cost_usd — API pricing only; Cursor subscription cost is NOT comparable
+#     and must be reported separately (no per-call billing data available).
+#   Provider label and model — visible in `promptfoo view` results table.
+#
+# NOTE: openai:codex-sdk uses the native Codex harness (ChatGPT subscription by
+#   default). It does NOT represent the local Cursor or Codex CLI environment.
+#   Cursor auto runs via exec wrapper (scripts/cursor-exec.mjs) and is invoked
+#   in ask mode against a fresh temp directory — no repo modifications are made.
+#   Network isolation is NOT claimed: cursor-agent --sandbox enabled is the best
+#   available enforcement; the CLI does not guarantee network isolation.
+#   Claude Code subscription CLI runs via exec wrapper (scripts/claude-exec.mjs)
+#   using the real claude CLI. Network IS required (model call). What is claimed:
+#   no repo exposure, no tools, no persisted session, no settings/MCP inheritance.
+#   Use label fleet/claude-sonnet5-subscription-cli to filter this provider.
+#
+# NOTE: OpenRouter providers use real OpenRouter IDs as of 2026-07.
+#   google/gemini-3.6-flash is the current main OpenRouter Gemini candidate.
+#   google/gemini-3.5-flash-lite is the cheap candidate.
+#   These test OpenRouter routing only — not equivalent to local Cursor or Codex.
+
+description: "Paperclip fleet configuration comparison"
+
+prompts:
+  - file://../prompts/heartbeat-system.txt
+
+providers:
+  # ── 1. Claude (real Anthropic direct API harness) ────────────────────────
+  # Primary quality candidate: Sonnet 5 direct API.
+  # Label clearly identifies this as direct Anthropic API, not OpenRouter proxy.
+  - id: anthropic:messages:claude-sonnet-5
+    label: fleet/claude-sonnet5-api-quality
+
+  # Cheap candidate: Haiku 4.5 direct API — for state-only recovery work.
+  - id: anthropic:messages:claude-haiku-4-5-20251001
+    label: fleet/claude-haiku45-api-cheap
+
+  # ── 2. Claude Code subscription CLI (exec harness) ──────────────────────
+  # Runs the real claude CLI with claude-sonnet-5 inside a fresh mkdtemp directory.
+  # Uses local subscription or keychain auth — no API key required.
+  # --bare is omitted intentionally so subscription/keychain auth remains possible.
+  # Network call IS made; what IS guaranteed: no repo exposure, no tools,
+  # no persisted session, no settings/MCP inheritance (--setting-sources "",
+  # --strict-mcp-config, --mcp-config '{"mcpServers":{}}').
+  # Subscription cost is NOT comparable to API cost_usd — report separately.
+  # Requires: claude in PATH or CLAUDE_CODE_PATH env var.
+  # Skip with --filter-providers if claude CLI is not available.
+  - id: exec:scripts/claude-exec.mjs
+    label: fleet/claude-sonnet5-subscription-cli
+
+  # ── 3. Codex (native openai:codex-sdk harness) ───────────────────────────
+  # Default: no explicit model → Codex SDK picks its current default
+  # (mirrors live adapter behavior where --model is omitted).
+  # Uses ChatGPT login when OPENAI_API_KEY is not set.
+  - id: openai:codex-sdk
+    label: fleet/codex-sdk-default
+    config:
+      working_dir: ./fixtures/empty-workspace
+      sandbox_mode: read-only
+      network_access_enabled: false
+      web_search_mode: disabled
+      approval_policy: never
+
+  # Explicit Codex candidate: gpt-5.6-sol via native openai:codex-sdk.
+  # Existing ChatGPT login may authenticate this provider — no API key required
+  # by default. Set OPENAI_API_KEY only if you want explicit API-key billing.
+  - id: openai:codex-sdk
+    label: fleet/codex-gpt-5.6-sol
+    config:
+      model: gpt-5.6-sol
+      working_dir: ./fixtures/empty-workspace
+      sandbox_mode: read-only
+      network_access_enabled: false
+      web_search_mode: disabled
+      approval_policy: never
+
+  # ── 4. Cursor auto (exec harness — Node ESM wrapper) ─────────────────────
+  # Runs the real cursor-agent CLI in ask mode inside a fresh mkdtemp directory.
+  # Promptfoo passes the prompt as the first script argument; in Node ESM
+  # process.argv[2] is that argument — the wrapper reads it correctly.
+  # Requires: cursor-agent in PATH or CURSOR_AGENT_PATH env var.
+  # Cost: Cursor subscription — NOT comparable to API cost_usd.
+  # Skip with --filter-providers if cursor-agent is not available.
+  - id: exec:scripts/cursor-exec.mjs
+    label: fleet/cursor-auto-exec
+    config:
+      # Synthetic read-only working directory for the eval run.
+      # The wrapper creates a fresh mkdtemp directory per invocation.
+      working_dir: /tmp/paperclip-fleet-eval-sandbox
+
+  # ── 5. OpenRouter proxy candidates ──────────────────────────────────────
+  # These test OpenRouter routing only.
+  # Not equivalent to local Cursor, Codex CLI, or direct Anthropic API.
+  - id: openrouter:google/gemini-3.6-flash
+    label: fleet/openrouter-gemini-3.6-flash
+
+  - id: openrouter:google/gemini-3.5-flash-lite
+    label: fleet/openrouter-gemini-3.5-flash-lite
+
+defaultTest:
+  options:
+    transformVars: "{ ...vars, apiUrl: 'http://localhost:18080', runId: 'run-fleet-eval-001' }"
+
+tests:
+  - file://tests/fleet-config.yaml

@@ -1,0 +1,3 @@
+# Tracked fixture file for the Codex SDK eval working_dir.
+# This directory is used as working_dir for openai:codex-sdk providers
+# to give the sandbox a harmless, read-only context.

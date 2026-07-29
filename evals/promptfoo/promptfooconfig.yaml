@@ -13,6 +13,17 @@
 #   npx promptfoo@latest validate -c promptfooconfig.yaml
 #
 # Requires OPENROUTER_API_KEY or individual provider keys.
+#
+# Fleet config comparison — use the isolated fleet config in fleet/:
+#   cd evals/promptfoo/fleet && promptfoo eval -c promptfooconfig.yaml
+#   See fleet/README.md for full instructions and provider options.
+#
+# Results report: pass/fail per critical metric, latency_ms,
+# tokens_in/tokens_out (when provider returns usage), cost_usd
+# (API pricing only — subscription cost reported separately).
+#
+# NOTE: Do not mix subscription-based cost (Cursor auto) with API pricing.
+# Report estimated usage value and actual billed cost separately.
 
 description: "Paperclip heartbeat behavior evals"
 
@@ -20,6 +31,8 @@ prompts:
   - file://prompts/heartbeat-system.txt
 
 providers:
+  # Baseline providers for heartbeat behavior evals.
+  # Fleet comparison candidates live in fleet/promptfooconfig.yaml.
   - id: openrouter:anthropic/claude-sonnet-4-20250514
     label: claude-sonnet-4
   - id: openrouter:openai/gpt-4.1
