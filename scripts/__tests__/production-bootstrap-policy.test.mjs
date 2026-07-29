@@ -109,19 +109,33 @@ test("dependency-review step is pinned to a full SHA", () => {
   );
 });
 
-test("dependency-review step is skipped for private repositories", () => {
+test("privileged job is guarded at job level for private repositories", () => {
   const wf = readFile(".github/workflows/commitperclip-review.yml");
 
-  // The step block that contains dependency-review-action must also contain
-  // the private-repo guard condition.
+  // The review job block (from `review:` up to the next top-level job or end of file)
+  // must carry the private-repo guard as a job-level `if:` condition.
+  const jobBlock = wf.match(/\breview:\s*\n([\s\S]*?)(?=\n\S|\n  \w+:\s*\n|$)/);
+  assert.ok(jobBlock, "review job block not found");
+  assert.match(
+    jobBlock[0],
+    /if:\s+github\.event\.repository\.private\s*==\s*false/,
+    "review job must have: if: github.event.repository.private == false at the job level",
+  );
+});
+
+test("dependency-review step does not carry a redundant private-repo guard", () => {
+  const wf = readFile(".github/workflows/commitperclip-review.yml");
+
+  // The step block for Dependency Review must NOT have its own if: condition —
+  // the job-level guard makes it redundant.
   const stepBlock = wf.match(
     /- name: Dependency Review[\s\S]*?(?=\n      - name:|\n  \w|$)/,
   );
   assert.ok(stepBlock, "Dependency Review step not found");
-  assert.match(
+  assert.doesNotMatch(
     stepBlock[0],
-    /if:\s+github\.event\.repository\.private\s*==\s*false/,
-    "Dependency Review step must include: if: github.event.repository.private == false",
+    /^\s+if:/m,
+    "Dependency Review step must not carry a redundant if: condition — the job-level guard is sufficient",
   );
 });
 

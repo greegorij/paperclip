@@ -11,7 +11,11 @@ permissions:
   contents: read
 
 jobs:
+  # Public upstream repo provides the app installation and COMMITPERCLIP_KEY secret.
+  # The private deployment layer uses its own pr.yml and local review without copying
+  # the app secret or a PAT — so this entire job must be skipped for private repos.
   review:
+    if: github.event.repository.private == false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -21,7 +25,6 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
 
       - name: Dependency Review
-        if: github.event.repository.private == false
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           base-ref: ${{ github.event.pull_request.base.sha }}
