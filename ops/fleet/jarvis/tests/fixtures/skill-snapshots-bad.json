@@ -1,0 +1,322 @@
+[
+  {
+    "adapterType": "claude_local",
+    "desiredCount": 39,
+    "desiredSkills": [
+      "s0",
+      "s1",
+      "s2",
+      "s3",
+      "s4",
+      "s5",
+      "s6",
+      "s7",
+      "s8",
+      "s9",
+      "s10",
+      "s11",
+      "s12",
+      "s13",
+      "s14",
+      "s15",
+      "s16",
+      "s17",
+      "s18",
+      "s19",
+      "s20",
+      "s21",
+      "s22",
+      "s23",
+      "s24",
+      "s25",
+      "s26",
+      "s27",
+      "s28",
+      "s29",
+      "s30",
+      "s31",
+      "s32",
+      "s33",
+      "s34",
+      "s35",
+      "s36",
+      "s37",
+      "s38"
+    ],
+    "entries": [
+      {
+        "key": "skill/catalog/0",
+        "runtimeName": "skill-0",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/1",
+        "runtimeName": "skill-1",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/2",
+        "runtimeName": "skill-2",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/3",
+        "runtimeName": "skill-3",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/4",
+        "runtimeName": "skill-4",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/5",
+        "runtimeName": "skill-5",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/6",
+        "runtimeName": "skill-6",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/7",
+        "runtimeName": "skill-7",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/8",
+        "runtimeName": "skill-8",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/9",
+        "runtimeName": "skill-9",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/10",
+        "runtimeName": "skill-10",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/11",
+        "runtimeName": "skill-11",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/12",
+        "runtimeName": "skill-12",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/13",
+        "runtimeName": "skill-13",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/14",
+        "runtimeName": "skill-14",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/15",
+        "runtimeName": "skill-15",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/16",
+        "runtimeName": "skill-16",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/17",
+        "runtimeName": "skill-17",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/18",
+        "runtimeName": "skill-18",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/19",
+        "runtimeName": "skill-19",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/20",
+        "runtimeName": "skill-20",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/21",
+        "runtimeName": "skill-21",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/22",
+        "runtimeName": "skill-22",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/23",
+        "runtimeName": "skill-23",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/24",
+        "runtimeName": "skill-24",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/25",
+        "runtimeName": "skill-25",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/26",
+        "runtimeName": "skill-26",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/27",
+        "runtimeName": "skill-27",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/28",
+        "runtimeName": "skill-28",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/29",
+        "runtimeName": "skill-29",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/30",
+        "runtimeName": "skill-30",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/31",
+        "runtimeName": "skill-31",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/32",
+        "runtimeName": "skill-32",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/33",
+        "runtimeName": "skill-33",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/34",
+        "runtimeName": "skill-34",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/35",
+        "runtimeName": "skill-35",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/36",
+        "runtimeName": "skill-36",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/37",
+        "runtimeName": "skill-37",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      },
+      {
+        "key": "skill/catalog/38",
+        "runtimeName": "skill-38",
+        "desired": true,
+        "managed": true,
+        "state": "configured"
+      }
+    ]
+  }
+]

@@ -211,6 +211,10 @@ These are local modifications in the fork's UI. If re-copying source, these must
 2. **tool_group** — accordion for consecutive non-terminal tools (write, read, search, browser)
 3. **Dashboard excerpt** — `LatestRunCard` strips markdown, shows first 3 lines/280 chars
 
+### Jarvis fleet configuration
+
+Versioned fleet config for the private Jarvis company lives under `ops/fleet/jarvis/` (portable package, desired overlays, dry-run CLI). See `ops/fleet/jarvis/README.md` and `docs/tickets/T-202607-001.md`. Do not treat skill catalog `entries.length` as assignment.
+
 ### Plugin System
 
 PR #2218 (`feat/external-adapter-phase1`) adds external adapter support. See root `AGENTS.md` for full details.

@@ -1,0 +1,672 @@
+schema: "paperclip/v1"
+agents:
+  analityk-biznesowy:
+    role: "pm"
+    capabilities: "Kierownik pionu analizy. Do mnie: zrozumienie problemu, wymagania, kryteria sukcesu, modelowanie procesu. Wołaj mnie ZANIM ktokolwiek zacznie budować."
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        maxTurnsPerRun: 80
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissions:
+      canAssignTasks: true
+      canCreateSkills: true
+      trustPreset: "standard"
+    permissionGrants:
+      -
+        permissionKey: "tasks:assign"
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent analityk-biznesowy"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  badacz:
+    role: "researcher"
+    capabilities: "Kierownik pionu badań. Zbieram materiał z wielu źródeł i zwracam znaleziska z cytatami. Wołaj mnie, gdy trzeba wiedzieć, co mówią źródła — wnioski wyciąga zlecający."
+    adapter:
+      config:
+        maxTurnsPerRun: 60
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissions:
+      canAssignTasks: true
+      canCreateSkills: true
+      trustPreset: "standard"
+    permissionGrants:
+      -
+        permissionKey: "tasks:assign"
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent badacz"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  czytacz-transkryptow:
+    role: "researcher"
+    capabilities: "Czytam transkrypty spotkań i wyciągam ustalenia, zobowiązania i kto co powiedział — z cytatami. Wołaj mnie po każdym nagranym spotkaniu."
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        maxTurnsPerRun: 80
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent czytacz-transkryptow"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  designer-ui:
+    role: "designer"
+    capabilities: "Projektuję interfejsy: makiety, układ, przepływ ekranów, mapy wizualne. Wołaj mnie przed budową funkcji, która ma interfejs."
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        maxTurnsPerRun: 80
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent designer-ui"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  in-ynier-wdro-e:
+    role: "devops"
+    capabilities: "Wdrażam gotowy, zatwierdzony kod na serwer: przesył, restart usług, sprawdzenie zdrowia, odczyt logów. Nie edytuję kodu i nie prowadzę gałęzi."
+    adapter:
+      config:
+        maxTurnsPerRun: 60
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissions:
+      canCreateSkills: true
+    permissionGrants:
+      -
+        permissionKey: "tasks:assign"
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent in-ynier-wdro-e"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  jarvis:
+    role: "ceo"
+    capabilities: "Szef floty. Przyjmuję cele od zarządu, rozbijam je na zadania i rozdzielam między piony. Do mnie: decyzje strategiczne, portfel projektów, zatrudnianie, spory między pionami."
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        maxTurnsPerRun: 20
+        model: "claude-opus-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        intervalSec: 10800
+        maxConcurrentRuns: 2
+        skipTimerWhenNoActionableWork: true
+    permissions:
+      canAssignTasks: true
+      canCreateAgents: true
+      canCreateSkills: true
+    permissionGrants:
+      -
+        permissionKey: "agents:configure"
+      -
+        permissionKey: "skills:create"
+      -
+        permissionKey: "tools:admin"
+      -
+        permissionKey: "tools:manage_connections"
+      -
+        permissionKey: "tools:manage_profiles"
+      -
+        permissionKey: "tools:manage_runtime"
+      -
+        permissionKey: "tools:view_audit"
+  konfigurator-systemu:
+    role: "engineer"
+    capabilities: "Konfiguruję systemy i narzędzia: bramy, ustawienia, integracje, automatyzacje. Wołaj mnie do zmian w konfiguracji i diagnozy, gdy coś jest źle ustawione — nie do pisania nowych funkcji."
+    adapter:
+      config:
+        maxTurnsPerRun: 100
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissions:
+      trustPreset: "standard"
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent konfigurator-systemu"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  kronikarz:
+    role: "general"
+    capabilities: "Zapisuję kronikę projektów: po zamknięciu etapu opisuję co się wydarzyło, co postanowiono i co z tego wynika — jeden wpis w bazie wiedzy, oparty wyłącznie na dowodach z zadań. Wołaj mnie, gdy domyka się etap, zapada kamień milowy albo decyzja kierunkowa. Nie wykonuję pracy projektowej i nie oceniam ludzi."
+    adapter:
+      config:
+        maxTurnsPerRun: 60
+        model: "claude-haiku-4-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissionGrants:
+      -
+        permissionKey: "tasks:assign"
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent kronikarz"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  krytyk:
+    role: "qa"
+    capabilities: "Druga para oczu do dokumentów i planów. Wołaj mnie, gdy trzeba znaleźć dziury w rozumowaniu przed decyzją."
+    adapter:
+      config:
+        maxTurnsPerRun: 40
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent krytyk"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  kurator-crm:
+    role: "general"
+    capabilities: "Aktualizuję kartoteki osób i firm: ostatni kontakt, status, ustalenia, czyj następny ruch. Wołaj mnie po spotkaniu lub wymianie z klientem."
+    adapter:
+      config:
+        maxTurnsPerRun: 60
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissions:
+      canCreateSkills: true
+    permissionGrants:
+      -
+        permissionKey: "tasks:assign"
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent kurator-crm"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  kurator-vaultu:
+    role: "general"
+    capabilities: "Kierownik pionu wiedzy. Pielęgnuję bazę: struktura folderów, odnośniki, archiwizacja, porządek. Wołaj mnie, gdy trzeba uporządkować albo znaleźć miejsce dla nowej wiedzy."
+    adapter:
+      config:
+        maxTurnsPerRun: 60
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissions:
+      canAssignTasks: true
+      canCreateSkills: true
+      trustPreset: "standard"
+    permissionGrants:
+      -
+        permissionKey: "tasks:assign"
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent kurator-vaultu"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  mi-sie-kodu-codex:
+    role: "engineer"
+    capabilities: "Wykonawca kodu na koncie OpenAI — droga zamienna wobec Cursora i zapas na wypadek wyczerpania limitów Anthropic. Wołaj tak samo jak Cursora: plik, zachowanie, kryterium odbioru."
+    adapter:
+      config:
+        dangerouslyBypassApprovalsAndSandbox: true
+        engine: "cli"
+      type: "codex_local"
+    runtime:
+      heartbeat:
+        intervalSec: 300
+        maxConcurrentRuns: 2
+        skipTimerWhenNoActionableWork: true
+    permissions:
+      canCreateSkills: true
+      trustPreset: "standard"
+    permissionGrants:
+      -
+        permissionKey: "tasks:assign"
+  mi-sie-kodu-cursor:
+    role: "engineer"
+    capabilities: "Domyślny wykonawca kodu. Wołaj mnie do zmian opisanych konkretnie: plik, zachowanie, kryterium odbioru. Nie projektuję — wykonuję i oddaję do odbioru."
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "auto"
+      type: "cursor"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissions:
+      authorizationPolicy:
+        assignmentPolicy:
+          mode: "protected"
+    budgetMonthlyCents: 1000
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent mi-sie-kodu-cursor"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  mi-sie-kodu-glm:
+    role: "engineer"
+    capabilities: "Tani wykonawca kodu (zapasowy). Wołaj mnie do drobnych, dokładnie opisanych zmian w plikach — plik, zachowanie, kryterium odbioru. Nie projektuję i nie decyduję; wynik wymaga odbioru u kierownika pionu kodu."
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "openrouter/z-ai/glm-5.2"
+      type: "opencode_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissions:
+      authorizationPolicy:
+        assignmentPolicy:
+          mode: "protected"
+    budgetMonthlyCents: 1000
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent mi-sie-kodu-glm"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+        OPENROUTER_API_KEY:
+          description: "Provide OPENROUTER_API_KEY for agent mi-sie-kodu-glm"
+          kind: "secret"
+          default: ""
+          requirement: "optional"
+  mi-sie-recenzji-glm:
+    role: "qa"
+    capabilities: "Tani wykonawca przeglądów. Wołaj mnie do prostych, powtarzalnych sprawdzeń według podanej listy kontrolnej. Trudniejsze oceny idą do Recenzenta."
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "openrouter/z-ai/glm-5.2"
+      type: "opencode_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissions:
+      authorizationPolicy:
+        assignmentPolicy:
+          mode: "protected"
+    budgetMonthlyCents: 1000
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent mi-sie-recenzji-glm"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+        OPENROUTER_API_KEY:
+          description: "Provide OPENROUTER_API_KEY for agent mi-sie-recenzji-glm"
+          kind: "secret"
+          default: ""
+          requirement: "optional"
+  mi-sie-vault:
+    role: "general"
+    capabilities: "Tani wykonawca mechanicznych zmian w bazie wiedzy: przenoszenie, zmiana nazw, poprawki odnośników według podanej listy. Nie decyduję, co gdzie ma być."
+    adapter:
+      config:
+        model: "claude-haiku-4-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissions:
+      authorizationPolicy:
+        assignmentPolicy:
+          mode: "protected"
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent mi-sie-vault"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  mi-sie-web:
+    role: "researcher"
+    capabilities: "Tani wykonawca wyszukiwania w sieci. Wołaj mnie do zebrania konkretnych informacji ze wskazanych lub znalezionych stron. Wiarygodność ocenia zlecający."
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        model: "openrouter/google/gemini-2.5-flash"
+      type: "opencode_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissions:
+      authorizationPolicy:
+        assignmentPolicy:
+          mode: "protected"
+    budgetMonthlyCents: 1000
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent mi-sie-web"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+        OPENROUTER_API_KEY:
+          description: "Provide OPENROUTER_API_KEY for agent mi-sie-web"
+          kind: "secret"
+          default: ""
+          requirement: "optional"
+  modelarz-procesow:
+    role: "pm"
+    capabilities: "Modeluję procesy: przebieg, role, wąskie gardła, mapy wizualne. Wołaj mnie, gdy trzeba zobaczyć, jak coś działa krok po kroku."
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        maxTurnsPerRun: 80
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent modelarz-procesow"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  obserwator-upstream:
+    role: "researcher"
+    capabilities: "Śledzę zmiany w cudzych projektach, z których korzystamy: nowe wydania, zgłoszenia, pomysły warte przejęcia. Wołaj mnie, gdy trzeba wiedzieć, co nowego u źródła."
+    adapter:
+      config:
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissionGrants:
+      -
+        permissionKey: "tasks:assign"
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent obserwator-upstream"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  recenzent:
+    role: "qa"
+    capabilities: "Kierownik pionu jakości. Adwersaryjnie recenzuję kod i dokumenty: szukam luk, słabych założeń, braków dowodów. Zwracam werdykt z wagą — nie naprawiam sam."
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        maxTurnsPerRun: 80
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissions:
+      canAssignTasks: true
+      canCreateSkills: true
+      trustPreset: "standard"
+    permissionGrants:
+      -
+        permissionKey: "tasks:assign"
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent recenzent"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  senior-programista:
+    role: "engineer"
+    capabilities: "Kierownik pionu kodu. Wołaj mnie, gdy trzeba zaprojektować i przeprowadzić zmianę w kodzie: rozbijam robotę na opisy zmian, zlecam wykonawcom, odbieram i oceniam wynik. Prowadzę i recenzuję — nie klepię kodu sam. Do mnie też: przeglądy kodu, jakość, wydania."
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        maxTurnsPerRun: 80
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissions:
+      canAssignTasks: true
+    permissionGrants:
+      -
+        permissionKey: "tasks:assign"
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent senior-programista"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  specjalista-deck-w:
+    role: "pm"
+    capabilities: "Robię prezentacje: struktura przekazu, slajdy, materiały na spotkanie. Wołaj mnie, gdy wynik ma być pokazany, a nie przeczytany."
+    adapter:
+      config:
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissionGrants:
+      -
+        permissionKey: "tasks:assign"
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent specjalista-deck-w"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  specjalista-komunikacji-klienckiej:
+    role: "pm"
+    capabilities: "Piszę do klientów: odpowiedzi, podsumowania po spotkaniach, wyjaśnienia. Wołaj mnie, gdy trzeba coś sformułować dla odbiorcy zewnętrznego."
+    adapter:
+      config:
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissionGrants:
+      -
+        permissionKey: "tasks:assign"
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent specjalista-komunikacji-klienckiej"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  specjalista-ofert:
+    role: "pm"
+    capabilities: "Buduję oferty i wyceny: zakres, warianty, uzasadnienie ceny. Wołaj mnie, gdy trzeba przygotować propozycję dla klienta."
+    adapter:
+      config:
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissionGrants:
+      -
+        permissionKey: "tasks:assign"
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent specjalista-ofert"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  szef-komercyjny:
+    role: "pm"
+    capabilities: "Kierownik pionu klienckiego. Do mnie: oferty, wyceny, komunikacja z klientem, prowadzenie relacji. Rozbijam robotę kliencką i odbieram ją od swoich ludzi."
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        maxTurnsPerRun: 80
+        model: "claude-opus-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissions:
+      canAssignTasks: true
+    permissionGrants:
+      -
+        permissionKey: "tasks:assign"
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent szef-komercyjny"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  zwiadowca-kodu:
+    role: "researcher"
+    capabilities: "Namierzam kod: gdzie coś jest, jak działa moduł, gdzie zdefiniowano funkcję. Zwracam ścieżki, numery linii i cytaty. Tylko odczyt — niczego nie zmieniam."
+    adapter:
+      config:
+        maxTurnsPerRun: 60
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    permissions:
+      canCreateSkills: true
+    permissionGrants:
+      -
+        permissionKey: "tasks:assign"
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent zwiadowca-kodu"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+  zwiadowca-vaultu:
+    role: "researcher"
+    capabilities: "Znajduję w bazie wiedzy to, co potrzebne: właściwe notatki, decyzje i ich uzasadnienia, z cytatami i ścieżkami. Tylko odczyt — nie interpretuję."
+    adapter:
+      config:
+        dangerouslySkipPermissions: true
+        maxTurnsPerRun: 60
+        model: "claude-sonnet-5"
+      type: "claude_local"
+    runtime:
+      heartbeat:
+        maxConcurrentRuns: 2
+    inputs:
+      env:
+        CLAUDE_CONFIG_DIR:
+          description: "Optional default for CLAUDE_CONFIG_DIR on agent zwiadowca-vaultu"
+          kind: "plain"
+          default: ""
+          portability: "system_dependent"
+          requirement: "optional"
+company:
+  attachmentMaxBytes: 10485760
+sidebar:
+  agents:
+    - "jarvis"
+    - "analityk-biznesowy"
+    - "badacz"
+    - "krytyk"
+    - "kurator-vaultu"
+    - "recenzent"
+    - "senior-programista"
+    - "szef-komercyjny"
+    - "zwiadowca-vaultu"
+    - "modelarz-procesow"
+    - "czytacz-transkryptow"
+    - "mi-sie-web"
+    - "obserwator-upstream"
+    - "kronikarz"
+    - "mi-sie-vault"
+    - "mi-sie-recenzji-glm"
+    - "designer-ui"
+    - "in-ynier-wdro-e"
+    - "konfigurator-systemu"
+    - "mi-sie-kodu-codex"
+    - "mi-sie-kodu-cursor"
+    - "mi-sie-kodu-glm"
+    - "zwiadowca-kodu"
+    - "kurator-crm"
+    - "specjalista-deck-w"
+    - "specjalista-komunikacji-klienckiej"
+    - "specjalista-ofert"

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "overrides": {
+    "in-ynier-wdro-e": ["paperclip", "ticket", "contract"],
+    "senior-programista": [
+      "paperclip",
+      "paperclip-converting-plans-to-tasks",
+      "coding-workflow",
+      "review",
+      "code-quality",
+      "ticket",
+      "layered-design",
+      "grill-me"
+    ],
+    "mi-sie-web": ["paperclip", "research"],
+    "mi-sie-recenzji-glm": ["paperclip", "review", "contract"]
+  },
+  "forbiddenOnOverrides": {
+    "in-ynier-wdro-e": ["commit", "release"],
+    "senior-programista": ["commit", "release"],
+    "mi-sie-web": ["commit", "ticket", "review"],
+    "mi-sie-recenzji-glm": ["commit", "ticket", "research"]
+  },
+  "skillRuntimePolicy": {
+    "claude_local": { "desiredMin": 1, "desiredMax": 10, "activeState": "configured" },
+    "codex_local": { "desiredMin": 1, "desiredMax": 10, "activeState": "configured" },
+    "cursor": { "desiredMin": 1, "desiredMax": 5, "activeState": "installed" },
+    "opencode_local": { "desiredMin": 1, "desiredMax": 5, "activeState": "installed" }
+  }
+}

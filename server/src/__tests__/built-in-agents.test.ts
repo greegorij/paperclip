@@ -164,6 +164,11 @@ describeEmbeddedPostgres("built-in agents", () => {
       defaultAdapterConfig: { model: "claude-haiku-4-5" },
     });
     expect(summarizer?.defaultRuntimeConfig).toBeUndefined();
+    expect(summarizer?.defaultInstructions).toContain("claude-haiku-4-5");
+    expect(summarizer?.defaultInstructions).not.toMatch(
+      /run on the low-cost model profile lane\s*\(`cheap`\)\s*by default/i,
+    );
+    expect(summarizer?.defaultInstructions).not.toMatch(/model profile lane \(`cheap`\)/i);
     expect(() => validateBuiltInAgentDefinitions([
       {
         key: "briefs",
@@ -1146,6 +1151,11 @@ describeEmbeddedPostgres("built-in agents", () => {
     expect(resetFile.content).toContain("<<<SUMMARY-DRAFT>>>");
     expect(resetFile.content).toContain("<<<END-SUMMARY-DRAFT>>>");
     expect(resetFile.content).not.toContain("Operator edit.");
+    expect(resetFile.content).toContain("claude-haiku-4-5");
+    expect(resetFile.content).not.toMatch(
+      /run on the low-cost model profile lane\s*\(`cheap`\)\s*by default/i,
+    );
+    expect(resetFile.content).toContain("Respect whatever model the run actually provides");
   });
 
   it("controls the Reflection Coach routine schedule without enabling it by default", async () => {

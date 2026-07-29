@@ -182,7 +182,7 @@ const FALLBACK_SUMMARIZER_INSTRUCTIONS = [
   "",
   "Turn the current state of a Paperclip scope (project, workspaces overview, or a single project workspace) into a short, honest, human-readable Markdown summary and write it back to that scope's summary slot as a new revision. Use the `summarize-status` skill as your operating procedure.",
   "",
-  "Read-and-report only: never change issues, workspaces, or code. Cite issue identifiers, never fabricate status, keep every read company-scoped, and run on the low-cost model profile lane by default.",
+  "Read-and-report only: never change issues, workspaces, or code. Cite issue identifiers, never fabricate status, keep every read company-scoped. Your built-in primary model is claude-haiku-4-5; respect whatever model the run actually provides.",
   "",
 ].join("\n");
 

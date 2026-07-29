@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "routines": [
+    {
+      "title": "Przegląd nowych PR-ów upstream",
+      "id": "23311405-afb9-46b3-a4cd-981b42439771",
+      "triggerId": "b9d081f3-30c2-4eb3-9b0c-dec3121021d8",
+      "status": "paused",
+      "scheduleTriggerEnabled": false
+    },
+    {
+      "title": "Review recent agent trajectories for coaching proposals",
+      "id": "dc5d4ccd-f965-4bcf-a33c-fcd0b3abfd93",
+      "triggerId": "a2267c9f-f114-4c08-a952-c4efbca7ec77",
+      "status": "active",
+      "scheduleTriggerEnabled": true
+    },
+    {
+      "title": "Refresh stale summary slots",
+      "id": "8b9b861f-f6df-4e48-96ad-4ba25ee812a0",
+      "triggerId": "2c3c61be-71a2-475e-bd79-c655bc55cb91",
+      "status": "paused",
+      "scheduleTriggerEnabled": false
+    },
+    {
+      "title": "Cotygodniowy przeglad trajektorii agentow (refleksja)",
+      "id": "917e06bd-97e7-4e2f-84cc-b6dbb14ccd9f",
+      "triggerId": "ab78f03a-fb5d-4a3e-b590-652d2f836eb2",
+      "status": "paused",
+      "scheduleTriggerEnabled": false
+    },
+    {
+      "title": "Nasłuch skrzynki Company OS (agent KO)",
+      "id": "f539d2b7-22f7-4e21-983c-15ba9ba1e92a",
+      "triggerId": "c4284183-44c9-4452-a000-b4abc0c3dc51",
+      "status": "paused",
+      "scheduleTriggerEnabled": false
+    }
+  ]
+}

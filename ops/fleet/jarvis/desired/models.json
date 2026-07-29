@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "agents": {
+    "jarvis": { "model": "claude-opus-5", "adapterType": "claude_local" },
+    "szef-komercyjny": { "model": "claude-opus-5", "adapterType": "claude_local" },
+    "kronikarz": { "model": "claude-haiku-4-5", "adapterType": "claude_local" },
+    "mi-sie-vault": {
+      "model": "claude-haiku-4-5",
+      "adapterType": "claude_local",
+      "normalizeFrom": ["haiku"]
+    },
+    "mi-sie-kodu-cursor": { "model": "auto", "adapterType": "cursor" },
+    "mi-sie-kodu-glm": {
+      "model": "openrouter/z-ai/glm-5.2",
+      "adapterType": "opencode_local"
+    },
+    "mi-sie-web": {
+      "model": "openrouter/google/gemini-2.5-flash",
+      "adapterType": "opencode_local"
+    },
+    "mi-sie-recenzji-glm": {
+      "model": "openrouter/z-ai/glm-5.2",
+      "adapterType": "opencode_local"
+    },
+    "mi-sie-kodu-codex": {
+      "model": null,
+      "adapterType": "codex_local",
+      "status": "paused"
+    }
+  },
+  "defaultClaudeLocalModel": "claude-sonnet-5",
+  "builtIns": {
+    "summarizer": {
+      "key": "summarizer",
+      "displayName": "Summarizer",
+      "model": "claude-haiku-4-5",
+      "forbidClaim": "run on cheap profile by default as the primary model path"
+    },
+    "reflection-coach": {
+      "key": "reflection-coach",
+      "displayName": "Reflection Coach"
+    }
+  }
+}

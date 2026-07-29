@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "contradictions": [
+    {
+      "id": "recenzent-branch-edit-block",
+      "agentSlug": "recenzent",
+      "description": "Recenzent must not carry the shared branch/edit/commit block",
+      "forbidPatterns": ["GDZIE WOLNO PISAĆ KOD", "git checkout -b", "tutaj edytujesz do woli"]
+    },
+    {
+      "id": "zwiadowca-kodu-branch-edit-block",
+      "agentSlug": "zwiadowca-kodu",
+      "description": "Zwiadowca Kodu must not edit/create/run via the shared git block",
+      "forbidPatterns": ["GDZIE WOLNO PISAĆ KOD", "git checkout -b", "tutaj edytujesz do woli"]
+    },
+    {
+      "id": "inzynier-wdrozen-branch-edit-block",
+      "agentSlug": "in-ynier-wdro-e",
+      "description": "Inżynier Wdrożeń deploys committed changes; no personal git edit block",
+      "forbidPatterns": ["GDZIE WOLNO PISAĆ KOD", "git checkout -b", "tutaj edytujesz do woli"]
+    },
+    {
+      "id": "senior-personal-edit-block",
+      "agentSlug": "senior-programista",
+      "description": "Senior plans/delegates/reviews; no personal edit/commit block",
+      "forbidPatterns": ["GDZIE WOLNO PISAĆ KOD", "tutaj edytujesz do woli", "git push -u origin"]
+    },
+    {
+      "id": "miesien-web-in-review-semantics",
+      "agentSlug": "mi-sie-web",
+      "description": "in_review only when waiting on a human decision",
+      "forbidPatterns": [
+        "in_review gdy potrzebna weryfikacja przełożonego",
+        "Status in_review po dostarczeniu"
+      ],
+      "requirePatterns": ["in_review.*decyz"]
+    },
+    {
+      "id": "miesien-recenzji-glm-in-review-semantics",
+      "agentSlug": "mi-sie-recenzji-glm",
+      "description": "in_review only when waiting on a human decision",
+      "forbidPatterns": [
+        "in_review gdy potrzebna weryfikacja przełożonego",
+        "potem status in_review"
+      ],
+      "requirePatterns": ["in_review.*decyz"]
+    },
+    {
+      "id": "summarizer-cheap-claim",
+      "agentSlug": "summarizer",
+      "builtIn": true,
+      "description": "Summarizer must not claim cheap as default model path when live model is Haiku",
+      "forbidPatterns": [
+        "run on the low-cost model profile lane \\(`cheap`\\) by default"
+      ],
+      "expectedModel": "claude-haiku-4-5"
+    }
+  ]
+}

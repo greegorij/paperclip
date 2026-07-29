@@ -4,6 +4,14 @@
 >
 > Format: [Keep a Changelog](https://keepachangelog.com/pl/). Tagi: `fork-vX.Y.Z` na `greegorij/paperclip-legacy`, **nigdy pushowane do upstreamu**.
 
+## [Unreleased]
+
+### Dodane
+- **Zarządzanie konfiguracją floty Jarvisa** (`ops/fleet/jarvis/`): przenośny pakiet 27 agentów, overlay 2 built-inów i 5 rutyn, CLI `snapshot|validate|diff|apply|verify` (dry-run offline, brama kopii = plik+SHA bez miękkiego potwierdzenia, snapshot/validate fail-closed, minimalny PATCH modelu, fail-fast + GET write-verify, skill keys tylko z `skillLibrary`). Ticket: `docs/tickets/T-202607-001.md`.
+
+### Naprawione / Wzmocnione
+- **Przegląd i utwardzenie `ops/fleet/jarvis`** (Pass 3): pełne `skillKeys` vs live `desiredSkills` dla wszystkich 27 agentów przenośnych + built-inów w `desired/built-ins.json`; brama `completeness` (29 = 27 + 2, liczniki zgodne z tablicami); weryfikacja built-in model/skills i Summarizera (dokładny `plan.next`/SHA-256); poprawne `partial=true` przy write-ok/verify-fail; brak ścieżek hosta `~/` w pakiecie wersjonowanym. Bez uruchomionego live `--apply`.
+
 ## [0.1.0] — 2026-07-17
 
 Pierwsze formalne wydanie warstwy forka. Wcześniejsze zmiany (logowanie Google, adnotacje, karty decyzyjne) istniały bez wersjonowania i historii — to wydanie je obejmuje.

@@ -62,6 +62,7 @@
     "evals:fleet:validate": "cd evals/promptfoo/fleet && npx promptfoo@0.121.19 validate -c promptfooconfig.yaml",
     "evals:fleet:run": "cd evals/promptfoo/fleet && npx promptfoo@0.121.19 eval -c promptfooconfig.yaml",
     "evals:fleet:test": "node --test evals/promptfoo/fleet/scripts/cursor-exec.test.js evals/promptfoo/fleet/scripts/claude-exec.test.js && node evals/promptfoo/fleet/scripts/fleet-preflight.mjs",
+    "test:fleet-config": "node --test ops/fleet/jarvis/tests/fleet-config.test.mjs",
     "test:release-smoke": "npx playwright test --config tests/release-smoke/playwright.config.ts",
     "test:release-smoke:headed": "npx playwright test --config tests/release-smoke/playwright.config.ts --headed",
     "metrics:paperclip-commits": "tsx scripts/paperclip-commit-metrics.ts",

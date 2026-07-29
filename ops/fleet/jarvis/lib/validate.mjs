@@ -1,0 +1,498 @@
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { loadDesired, loadPackage, skillShortName } from "./load.mjs";
+import { checkAllContradictions } from "./contradictions.mjs";
+import { assertSkillShortNamesMatch, validateSkillRuntime } from "./skill-state.mjs";
+import { matchRoutineStrict } from "./diff.mjs";
+import {
+  FLEET_INVARIANTS,
+  assertDesiredFleetMatchesInvariants,
+} from "./fleet-invariants.mjs";
+import { assertSnapshotCompleteness } from "./snapshot-completeness.mjs";
+
+function expectedModelForAgent(slug, adapterType, modelsDesired) {
+  const explicit = modelsDesired.agents[slug];
+  if (explicit) return explicit.model ?? null;
+  if (adapterType === "claude_local") return modelsDesired.defaultClaudeLocalModel;
+  return undefined;
+}
+
+function collectDesiredSkillKeys(desired) {
+  const keys = new Set();
+  for (const agent of desired.agents?.agents ?? []) {
+    for (const key of agent.skillKeys ?? []) keys.add(key);
+  }
+  for (const bi of desired.builtIns?.builtIns ?? []) {
+    for (const key of bi.skillKeys ?? []) keys.add(key);
+  }
+  return [...keys];
+}
+
+function builtInKey(agent) {
+  return agent?.metadata?.paperclipBuiltInAgent?.key ?? null;
+}
+
+function resolveAgentInstructions(agent, liveSnapshot) {
+  if (typeof agent.instructions === "string" && agent.instructions.trim().length > 0) {
+    return agent.instructions;
+  }
+  const key = builtInKey(agent);
+  if (!key) return null;
+  const bi = (liveSnapshot.builtIns ?? []).find((b) => b.key === key);
+  if (typeof bi?.instructions === "string" && bi.instructions.trim().length > 0) {
+    return bi.instructions;
+  }
+  return null;
+}
+
+function sameStringArray(a, b) {
+  const left = [...(a ?? [])].map(String).sort();
+  const right = [...(b ?? [])].map(String).sort();
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+/**
+ * Validate portable package + desired overlays (+ optional live snapshot).
+ *
+ * @param {{ forApply?: boolean }} [options]
+ *   When forApply=true, mutable live drifts (routine status/trigger, Codex pause)
+ *   become warnings so apply can repair them; structural incompleteness stays ERROR.
+ */
+export function validateFleet({
+  packageDir,
+  desiredDir,
+  liveSnapshot = null,
+  includeBuiltInInstructions = null,
+  forApply = false,
+} = {}) {
+  const desired = loadDesired(desiredDir);
+  const pkg = loadPackage(packageDir);
+  const errors = [];
+  const warnings = [];
+  const ok = [];
+
+  const invariantCheck = assertDesiredFleetMatchesInvariants(desired.fleet);
+  if (!invariantCheck.ok) {
+    for (const message of invariantCheck.errors) {
+      errors.push({ code: "fleet-invariant", message });
+    }
+  } else {
+    ok.push({
+      code: "fleet-invariant",
+      message: `29 = ${FLEET_INVARIANTS.portableAgentCount} portable + ${FLEET_INVARIANTS.managedBuiltInCount} built-ins`,
+    });
+  }
+
+  if (pkg.agents.length !== FLEET_INVARIANTS.portableAgentCount) {
+    errors.push({
+      code: "portable-agent-count",
+      message: `Expected ${FLEET_INVARIANTS.portableAgentCount} portable agents, found ${pkg.agents.length}`,
+    });
+  } else {
+    ok.push({ code: "portable-agent-count", message: `${pkg.agents.length} portable agents` });
+  }
+
+  const desiredBuiltInKeys = (desired.builtIns?.builtIns ?? []).map((b) => b.key).sort();
+  const requiredKeys = [...FLEET_INVARIANTS.requiredBuiltInKeys].sort();
+  if (JSON.stringify(desiredBuiltInKeys) !== JSON.stringify(requiredKeys)) {
+    errors.push({
+      code: "built-in-keys",
+      message: `desired built-ins keys [${desiredBuiltInKeys}] != required [${requiredKeys}]`,
+    });
+  }
+
+  for (const bi of desired.builtIns.builtIns) {
+    if (pkg.agentBySlug[bi.key] || pkg.agentBySlug[bi.displayName]) {
+      errors.push({
+        code: "built-in-in-package",
+        message: `Managed built-in ${bi.key} must not appear in portable package`,
+      });
+    }
+    if (!Array.isArray(bi.skillKeys) || bi.skillKeys.length === 0) {
+      errors.push({
+        code: "built-in-skills-missing",
+        message: `Built-in ${bi.key} must declare non-empty skillKeys`,
+      });
+    }
+  }
+
+  const skillsRoot = path.join(packageDir, "skills");
+  if (existsSync(skillsRoot)) {
+    errors.push({
+      code: "vendored-skills",
+      message: "package/skills must not exist — skill keys are validated against the live library",
+    });
+  } else {
+    ok.push({ code: "no-vendored-skills", message: "package/skills absent" });
+  }
+
+  if (desired.agents?.meta?.warnings) {
+    errors.push({
+      code: "raw-export-warnings",
+      message: "desired/agents.json must not store raw export warnings (use exportWarnings categories)",
+    });
+  }
+  if (desired.agents?.meta?.exportWarnings) {
+    ok.push({ code: "export-warnings-summarized", message: "export warnings anonymized" });
+  }
+
+  for (const [slug, expected] of Object.entries(desired.skills.overrides)) {
+    const agent = pkg.agentBySlug[slug];
+    if (!agent) {
+      errors.push({ code: "missing-agent", message: `Package missing agent ${slug}` });
+      continue;
+    }
+    const match = assertSkillShortNamesMatch(agent.skills, expected);
+    if (!match.ok) {
+      errors.push({
+        code: "skill-override-mismatch",
+        message: `${slug}: missing=${match.missing.join(",")} extra=${match.extra.join(",")}`,
+      });
+    } else {
+      ok.push({ code: "skill-override", message: `${slug} skills match override` });
+    }
+    for (const forbidden of desired.skills.forbiddenOnOverrides[slug] ?? []) {
+      if (agent.skills.map(skillShortName).includes(forbidden)) {
+        errors.push({
+          code: "forbidden-skill",
+          message: `${slug} still has forbidden skill ${forbidden}`,
+        });
+      }
+    }
+  }
+
+  // Every portable agent must declare full skillKeys in desired/agents.json
+  if (desired.agents?.agents) {
+    for (const agent of desired.agents.agents) {
+      if (!Array.isArray(agent.skillKeys) || agent.skillKeys.length === 0) {
+        errors.push({
+          code: "agent-skill-keys-missing",
+          message: `${agent.slug}: desired skillKeys must be a non-empty array of full keys`,
+        });
+      }
+      const want = expectedModelForAgent(agent.slug, agent.adapterType, desired.models);
+      if (want !== undefined && agent.model !== want) {
+        if (!(want == null && agent.model == null)) {
+          errors.push({
+            code: "model-mismatch",
+            message: `${agent.slug}: desired agents.json model=${agent.model} expected=${want}`,
+          });
+        }
+      }
+      if (agent.slug === "mi-sie-kodu-codex") {
+        if (agent.manageStatus !== true || agent.status !== "paused") {
+          errors.push({
+            code: "codex-not-paused",
+            message: "Mięsień Kodu Codex must have manageStatus:true and status:paused",
+          });
+        }
+      } else if (agent.manageStatus === true) {
+        warnings.push({
+          code: "unexpected-manage-status",
+          message: `${agent.slug} has manageStatus:true — only Codex is expected`,
+        });
+      }
+    }
+    const vault = desired.agents.agents.find((a) => a.slug === "mi-sie-vault");
+    if (vault && vault.model !== "claude-haiku-4-5") {
+      errors.push({
+        code: "vault-model-alias",
+        message: `mi-sie-vault model must be normalized to claude-haiku-4-5, got ${vault.model}`,
+      });
+    } else if (vault) {
+      ok.push({ code: "vault-model-alias", message: "mi-sie-vault normalized to claude-haiku-4-5" });
+    }
+  }
+
+  // Routines must declare id + triggerId + title
+  for (const routine of desired.routines.routines) {
+    if (!routine.id || !routine.triggerId || !routine.title) {
+      errors.push({
+        code: "routine-incomplete",
+        message: `Routine missing id/triggerId/title: ${JSON.stringify(routine)}`,
+      });
+    }
+  }
+
+  const ctx = {};
+  for (const agent of pkg.agents) {
+    ctx[agent.slug] = {
+      instructions: agent.instructions,
+      model: desired.agents?.agents?.find((a) => a.slug === agent.slug)?.model ?? null,
+    };
+  }
+  if (includeBuiltInInstructions) {
+    for (const [slug, instructions] of Object.entries(includeBuiltInInstructions)) {
+      ctx[slug] = {
+        instructions,
+        model: desired.models.builtIns[slug]?.model ?? null,
+      };
+    }
+  }
+
+  const contradictionResults = checkAllContradictions(
+    desired.contradictions.contradictions,
+    ctx,
+  );
+  for (const result of contradictionResults) {
+    if (result.agentSlug === "summarizer" && !ctx.summarizer) {
+      warnings.push({
+        code: "summarizer-check-deferred",
+        message: "Summarizer contradiction check needs live/built-in instructions overlay",
+      });
+      continue;
+    }
+    if (!result.ok) {
+      errors.push({
+        code: `contradiction:${result.id}`,
+        message: `${result.id}: ${result.hits.map((h) => h.message).join("; ")}`,
+      });
+    } else {
+      ok.push({ code: `contradiction:${result.id}`, message: result.description });
+    }
+  }
+
+  if (liveSnapshot) {
+    const completeness = assertSnapshotCompleteness(liveSnapshot);
+    if (!completeness.ok) {
+      for (const item of completeness.errors) {
+        errors.push(item);
+      }
+    } else {
+      ok.push({
+        code: "snapshot-completeness",
+        message: "Snapshot completeness object and counters match arrays",
+      });
+    }
+
+    const liveAgents = liveSnapshot.agents ?? [];
+    if (liveAgents.length !== FLEET_INVARIANTS.expectedLiveAgentCount) {
+      errors.push({
+        code: "live-agent-count",
+        message: `Live has ${liveAgents.length} agents, expected ${FLEET_INVARIANTS.expectedLiveAgentCount}`,
+      });
+    } else {
+      ok.push({ code: "live-agent-count", message: "29 live agents" });
+    }
+
+    const skillSnapByAgent = new Map(
+      (liveSnapshot.skillSnapshots ?? [])
+        .filter((s) => s.agentId)
+        .map((s) => [s.agentId, s]),
+    );
+
+    for (const agent of liveAgents) {
+      const label = agent.slug ?? agent.name ?? agent.id;
+      const isBuiltIn = Boolean(builtInKey(agent));
+      if (!Array.isArray(agent.desiredSkills)) {
+        errors.push({
+          code: "agent-desired-skills-missing",
+          message: `${label}: desiredSkills missing from snapshot`,
+        });
+      }
+      const instructions = resolveAgentInstructions(agent, liveSnapshot);
+      if (instructions == null || String(instructions).trim() === "") {
+        errors.push({
+          code: "agent-instructions-missing",
+          message: `${label}: instructions missing/empty from snapshot`,
+        });
+      }
+      if (!skillSnapByAgent.has(agent.id)) {
+        errors.push({
+          code: "agent-skill-snapshot-missing",
+          message: `${label}: skill snapshot missing for agent id ${agent.id}`,
+        });
+      }
+
+      // Portable: full skillKeys must match live desiredSkills
+      if (!isBuiltIn && agent.slug) {
+        const desiredAgent = desired.agents?.agents?.find((a) => a.slug === agent.slug);
+        if (desiredAgent?.skillKeys && Array.isArray(agent.desiredSkills)) {
+          if (!sameStringArray(desiredAgent.skillKeys, agent.desiredSkills)) {
+            const item = {
+              code: "agent-skills-drift",
+              message: `${agent.slug}: live desiredSkills != desired skillKeys`,
+            };
+            if (forApply) warnings.push(item);
+            else errors.push(item);
+          }
+        }
+      }
+    }
+
+    for (const biDesired of desired.builtIns?.builtIns ?? []) {
+      // Canonical live truth: agent whose metadata key matches (id/key binding
+      // already enforced by assertSnapshotCompleteness). Ignore builtIns row fields.
+      const biAgent =
+        liveAgents.find((a) => builtInKey(a) === biDesired.key) ?? null;
+      if (!biAgent) {
+        errors.push({
+          code: "builtin-missing",
+          message: `Built-in ${biDesired.key} missing from live snapshot`,
+        });
+        continue;
+      }
+      const instructions =
+        typeof biAgent.instructions === "string" && biAgent.instructions.trim()
+          ? biAgent.instructions
+          : null;
+      if (!instructions) {
+        errors.push({
+          code: "builtin-instructions-missing",
+          message: `${biDesired.key} instructions missing from live snapshot`,
+        });
+      } else {
+        ok.push({
+          code: "builtin-instructions-present",
+          message: `${biDesired.key} present with instructions`,
+        });
+      }
+      if (Array.isArray(biDesired.skillKeys)) {
+        const liveSkills = Array.isArray(biAgent.desiredSkills)
+          ? biAgent.desiredSkills
+          : null;
+        if (!Array.isArray(liveSkills) || !sameStringArray(biDesired.skillKeys, liveSkills)) {
+          const item = {
+            code: "builtin-skills-drift",
+            message: `${biDesired.key}: live desiredSkills != desired skillKeys`,
+          };
+          if (forApply) warnings.push(item);
+          else errors.push(item);
+        }
+      }
+      if (biDesired.expectedModel != null) {
+        const got = biAgent.adapterConfig?.model ?? biAgent.model ?? null;
+        if (got !== biDesired.expectedModel) {
+          const item = {
+            code: "builtin-model-drift",
+            message: `${biDesired.key}: model=${got} desired=${biDesired.expectedModel}`,
+          };
+          if (forApply) warnings.push(item);
+          else errors.push(item);
+        }
+      }
+    }
+
+    const summarizerLive = liveAgents.find(
+      (a) => builtInKey(a) === "summarizer" || a.slug === "summarizer",
+    );
+    if (!summarizerLive) {
+      errors.push({
+        code: "summarizer-missing",
+        message: "Summarizer built-in missing from live snapshot",
+      });
+    } else {
+      ok.push({ code: "summarizer-present", message: "Summarizer present with instructions" });
+    }
+
+    const builtInCount = (liveSnapshot.builtIns ?? []).length;
+    const portableLive = liveAgents.filter((a) => !builtInKey(a)).length;
+    if (
+      liveAgents.length === FLEET_INVARIANTS.expectedLiveAgentCount &&
+      (builtInCount !== FLEET_INVARIANTS.managedBuiltInCount ||
+        portableLive !== FLEET_INVARIANTS.portableAgentCount)
+    ) {
+      errors.push({
+        code: "portable-builtin-split",
+        message: `Expected ${FLEET_INVARIANTS.portableAgentCount} portable + ${FLEET_INVARIANTS.managedBuiltInCount} built-ins; live portable=${portableLive} builtIns=${builtInCount}`,
+      });
+    }
+
+    const codex = liveAgents.find((a) => a.slug === "mi-sie-kodu-codex");
+    if (codex && codex.status !== "paused") {
+      const item = {
+        code: "codex-live-not-paused",
+        message: "Live Codex agent is not paused",
+      };
+      if (forApply) warnings.push(item);
+      else errors.push(item);
+    }
+
+    for (const skillSnap of liveSnapshot.skillSnapshots ?? []) {
+      const agent = liveAgents.find((a) => a.id === skillSnap.agentId);
+      if (agent && builtInKey(agent)) continue; // built-ins may use dedicated skill policy
+      for (const finding of validateSkillRuntime(skillSnap, desired.skills.skillRuntimePolicy)) {
+        if (finding.severity === "error") errors.push(finding);
+        else if (finding.severity === "ok") ok.push(finding);
+        else warnings.push(finding);
+      }
+    }
+
+    if (!Array.isArray(liveSnapshot.skillLibrary)) {
+      errors.push({
+        code: "skill-library-absent",
+        message: "Live snapshot missing skillLibrary — refuse validate/apply",
+      });
+    } else {
+      const libraryKeys = new Set(
+        liveSnapshot.skillLibrary.map((s) => (typeof s === "string" ? s : s.key)).filter(Boolean),
+      );
+      if (libraryKeys.size === 0) {
+        errors.push({
+          code: "skill-library-empty",
+          message: "Live snapshot skillLibrary is empty",
+        });
+      } else {
+        for (const key of collectDesiredSkillKeys(desired)) {
+          if (!libraryKeys.has(key)) {
+            errors.push({
+              code: "skill-missing-from-library",
+              message: `Desired skill key not in live library: ${key}`,
+            });
+          }
+        }
+        if (!errors.some((e) => e.code === "skill-missing-from-library")) {
+          ok.push({
+            code: "skill-library-complete",
+            message: "All desired skill keys present in live library",
+          });
+        }
+      }
+    }
+
+    for (const routineDesired of desired.routines.routines) {
+      const matched = matchRoutineStrict(routineDesired, liveSnapshot.routines ?? []);
+      if (!matched.ok) {
+        errors.push({ code: matched.code, message: matched.detail });
+        continue;
+      }
+      // Executive truth for routines is status + trigger.enabled.
+      // Stale nextRunAt on paused/disabled triggers is an observability limitation — not validated.
+      if (matched.live.status !== routineDesired.status) {
+        const item = {
+          code: "routine-status",
+          message: `${routineDesired.title}: status=${matched.live.status} desired=${routineDesired.status}`,
+        };
+        if (forApply) warnings.push(item);
+        else errors.push(item);
+      }
+      if (matched.trigger.enabled !== routineDesired.scheduleTriggerEnabled) {
+        const item = {
+          code: "routine-trigger",
+          message: `${routineDesired.title}: trigger ${routineDesired.triggerId} enabled=${matched.trigger.enabled} desired=${routineDesired.scheduleTriggerEnabled}`,
+        };
+        if (forApply) warnings.push(item);
+        else errors.push(item);
+      } else if (matched.live.status === routineDesired.status) {
+        ok.push({
+          code: "routine-id-title-trigger",
+          message: `${routineDesired.title}: id+title+triggerId match`,
+        });
+      } else {
+        ok.push({
+          code: "routine-id-title-trigger",
+          message: `${routineDesired.title}: id+title+triggerId match (status drift deferred to apply)`,
+        });
+      }
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    warnings,
+    okItems: ok,
+    contradictionResults,
+    portableAgentCount: pkg.agents.length,
+  };
+}

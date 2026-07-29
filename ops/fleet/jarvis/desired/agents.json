@@ -1,0 +1,597 @@
+{
+  "meta": {
+    "schemaVersion": 1,
+    "generatedFromExport": "paperclip-fleet-export-20260729-1243.json",
+    "exportSha256": "d64b1d776e747407ffe77d066288f4950bb228273727d4d6b38890b53280bbec",
+    "portableAgentCount": 27,
+    "managedBuiltInCount": 2,
+    "expectedLiveAgentCount": 29,
+    "exportWarnings": {
+      "total": 30,
+      "categories": {
+        "skippedBuiltIns": 1,
+        "systemDependentEnv": 25,
+        "omittedSystemDependentCommands": 4,
+        "other": 0
+      }
+    }
+  },
+  "agents": [
+    {
+      "slug": "analityk-biznesowy",
+      "name": "Analityk Biznesowy",
+      "role": "pm",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "paperclip-converting-plans-to-tasks",
+        "brief",
+        "pm",
+        "grill-me",
+        "layered-design",
+        "lean-process-modeling",
+        "research"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
+        "local/975b65d979/brief",
+        "local/f2120e9006/pm",
+        "local/d489dc1150/grill-me",
+        "local/4353e46af0/layered-design",
+        "local/97f1608210/lean-process-modeling",
+        "local/59da7d4268/research"
+      ],
+      "reportsToSlug": "jarvis"
+    },
+    {
+      "slug": "badacz",
+      "name": "Badacz",
+      "role": "researcher",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "paperclip-converting-plans-to-tasks",
+        "research",
+        "research-radar",
+        "ingest",
+        "grill-me"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
+        "local/59da7d4268/research",
+        "local/b0ef075081/research-radar",
+        "local/372cce2e54/ingest",
+        "local/d489dc1150/grill-me"
+      ],
+      "reportsToSlug": "jarvis"
+    },
+    {
+      "slug": "czytacz-transkryptow",
+      "name": "Czytacz Transkryptow",
+      "role": "researcher",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "meeting-audit",
+        "meeting-followup"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/5184c0a0bf/meeting-audit",
+        "local/fcc42d131d/meeting-followup"
+      ],
+      "reportsToSlug": "badacz"
+    },
+    {
+      "slug": "designer-ui",
+      "name": "Designer UI",
+      "role": "designer",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "layered-design",
+        "json-canvas",
+        "brief"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/4353e46af0/layered-design",
+        "local/2d5d204266/json-canvas",
+        "local/975b65d979/brief"
+      ],
+      "reportsToSlug": "senior-programista"
+    },
+    {
+      "slug": "in-ynier-wdro-e",
+      "name": "Inżynier Wdrożeń",
+      "role": "devops",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "ticket",
+        "contract"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/8ce6211023/ticket",
+        "local/a39efcc7e6/contract"
+      ],
+      "reportsToSlug": "senior-programista"
+    },
+    {
+      "slug": "jarvis",
+      "name": "Jarvis",
+      "role": "ceo",
+      "adapterType": "claude_local",
+      "model": "claude-opus-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "paperclip-board",
+        "paperclip-converting-plans-to-tasks",
+        "paperclip-create-agent",
+        "pm",
+        "grill-me",
+        "brief"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "paperclipai/paperclip/paperclip-board",
+        "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
+        "paperclipai/paperclip/paperclip-create-agent",
+        "local/f2120e9006/pm",
+        "local/d489dc1150/grill-me",
+        "local/975b65d979/brief"
+      ],
+      "reportsToSlug": null
+    },
+    {
+      "slug": "konfigurator-systemu",
+      "name": "Konfigurator Systemu",
+      "role": "engineer",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "coding-workflow",
+        "review",
+        "commit",
+        "ticket",
+        "contract",
+        "code-quality"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/f3431548ce/coding-workflow",
+        "local/d4d5048369/review",
+        "local/3df4438c6b/commit",
+        "local/8ce6211023/ticket",
+        "local/a39efcc7e6/contract",
+        "local/a33d9d94a7/code-quality"
+      ],
+      "reportsToSlug": "senior-programista"
+    },
+    {
+      "slug": "kronikarz",
+      "name": "Kronikarz",
+      "role": "general",
+      "adapterType": "claude_local",
+      "model": "claude-haiku-4-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip"
+      ],
+      "reportsToSlug": "kurator-vaultu"
+    },
+    {
+      "slug": "krytyk",
+      "name": "Krytyk",
+      "role": "qa",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "review",
+        "grill-me"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/d4d5048369/review",
+        "local/d489dc1150/grill-me"
+      ],
+      "reportsToSlug": "jarvis"
+    },
+    {
+      "slug": "kurator-crm",
+      "name": "Kurator CRM",
+      "role": "general",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "meeting-followup"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/fcc42d131d/meeting-followup"
+      ],
+      "reportsToSlug": "szef-komercyjny"
+    },
+    {
+      "slug": "kurator-vaultu",
+      "name": "Kurator Vaultu",
+      "role": "general",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "paperclip-converting-plans-to-tasks",
+        "vault-architect",
+        "json-canvas",
+        "ingest"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
+        "local/c2ebf1f8cd/vault-architect",
+        "local/2d5d204266/json-canvas",
+        "local/372cce2e54/ingest"
+      ],
+      "reportsToSlug": "jarvis"
+    },
+    {
+      "slug": "mi-sie-kodu-codex",
+      "name": "Mięsień Kodu Codex",
+      "role": "engineer",
+      "adapterType": "codex_local",
+      "model": null,
+      "manageStatus": true,
+      "status": "paused",
+      "skills": [
+        "paperclip",
+        "ticket",
+        "commit"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/8ce6211023/ticket",
+        "local/3df4438c6b/commit"
+      ],
+      "reportsToSlug": "senior-programista"
+    },
+    {
+      "slug": "mi-sie-kodu-cursor",
+      "name": "Mięsień Kodu Cursor",
+      "role": "engineer",
+      "adapterType": "cursor",
+      "model": "auto",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "ticket",
+        "commit"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/8ce6211023/ticket",
+        "local/3df4438c6b/commit"
+      ],
+      "reportsToSlug": "senior-programista"
+    },
+    {
+      "slug": "mi-sie-kodu-glm",
+      "name": "Mięsień Kodu GLM",
+      "role": "engineer",
+      "adapterType": "opencode_local",
+      "model": "openrouter/z-ai/glm-5.2",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "ticket",
+        "commit",
+        "review",
+        "research"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/8ce6211023/ticket",
+        "local/3df4438c6b/commit",
+        "local/d4d5048369/review",
+        "local/59da7d4268/research"
+      ],
+      "reportsToSlug": "senior-programista"
+    },
+    {
+      "slug": "mi-sie-recenzji-glm",
+      "name": "Mięsień Recenzji GLM",
+      "role": "qa",
+      "adapterType": "opencode_local",
+      "model": "openrouter/z-ai/glm-5.2",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "review",
+        "contract"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/d4d5048369/review",
+        "local/a39efcc7e6/contract"
+      ],
+      "reportsToSlug": "recenzent"
+    },
+    {
+      "slug": "mi-sie-vault",
+      "name": "Mięsień Vault",
+      "role": "general",
+      "adapterType": "claude_local",
+      "model": "claude-haiku-4-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip"
+      ],
+      "reportsToSlug": "kurator-vaultu"
+    },
+    {
+      "slug": "mi-sie-web",
+      "name": "Mięsień Web",
+      "role": "researcher",
+      "adapterType": "opencode_local",
+      "model": "openrouter/google/gemini-2.5-flash",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "research"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/59da7d4268/research"
+      ],
+      "reportsToSlug": "badacz"
+    },
+    {
+      "slug": "modelarz-procesow",
+      "name": "Modelarz Procesow",
+      "role": "pm",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "lean-process-modeling",
+        "layered-design",
+        "json-canvas",
+        "brief"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/97f1608210/lean-process-modeling",
+        "local/4353e46af0/layered-design",
+        "local/2d5d204266/json-canvas",
+        "local/975b65d979/brief"
+      ],
+      "reportsToSlug": "analityk-biznesowy"
+    },
+    {
+      "slug": "obserwator-upstream",
+      "name": "Obserwator Upstream",
+      "role": "researcher",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "research-radar",
+        "ingest",
+        "research"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/b0ef075081/research-radar",
+        "local/372cce2e54/ingest",
+        "local/59da7d4268/research"
+      ],
+      "reportsToSlug": "badacz"
+    },
+    {
+      "slug": "recenzent",
+      "name": "Recenzent",
+      "role": "qa",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "paperclip-converting-plans-to-tasks",
+        "review",
+        "grill-me",
+        "code-quality",
+        "contract"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
+        "local/d4d5048369/review",
+        "local/d489dc1150/grill-me",
+        "local/a33d9d94a7/code-quality",
+        "local/a39efcc7e6/contract"
+      ],
+      "reportsToSlug": "jarvis"
+    },
+    {
+      "slug": "senior-programista",
+      "name": "Senior Programista",
+      "role": "engineer",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "paperclip-converting-plans-to-tasks",
+        "coding-workflow",
+        "review",
+        "code-quality",
+        "ticket",
+        "layered-design",
+        "grill-me"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
+        "local/f3431548ce/coding-workflow",
+        "local/d4d5048369/review",
+        "local/a33d9d94a7/code-quality",
+        "local/8ce6211023/ticket",
+        "local/4353e46af0/layered-design",
+        "local/d489dc1150/grill-me"
+      ],
+      "reportsToSlug": "jarvis"
+    },
+    {
+      "slug": "specjalista-deck-w",
+      "name": "Specjalista Decków",
+      "role": "pm",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "brief",
+        "research",
+        "json-canvas"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/975b65d979/brief",
+        "local/59da7d4268/research",
+        "local/2d5d204266/json-canvas"
+      ],
+      "reportsToSlug": "szef-komercyjny"
+    },
+    {
+      "slug": "specjalista-komunikacji-klienckiej",
+      "name": "Specjalista Komunikacji Klienckiej",
+      "role": "pm",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "meeting-followup",
+        "research"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/fcc42d131d/meeting-followup",
+        "local/59da7d4268/research"
+      ],
+      "reportsToSlug": "szef-komercyjny"
+    },
+    {
+      "slug": "specjalista-ofert",
+      "name": "Specjalista Ofert",
+      "role": "pm",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "pm",
+        "brief",
+        "grill-me",
+        "research"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/f2120e9006/pm",
+        "local/975b65d979/brief",
+        "local/d489dc1150/grill-me",
+        "local/59da7d4268/research"
+      ],
+      "reportsToSlug": "szef-komercyjny"
+    },
+    {
+      "slug": "szef-komercyjny",
+      "name": "Szef Komercyjny",
+      "role": "pm",
+      "adapterType": "claude_local",
+      "model": "claude-opus-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "paperclip-converting-plans-to-tasks",
+        "pm",
+        "brief",
+        "grill-me",
+        "meeting-followup",
+        "research"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
+        "local/f2120e9006/pm",
+        "local/975b65d979/brief",
+        "local/d489dc1150/grill-me",
+        "local/fcc42d131d/meeting-followup",
+        "local/59da7d4268/research"
+      ],
+      "reportsToSlug": "jarvis"
+    },
+    {
+      "slug": "zwiadowca-kodu",
+      "name": "Zwiadowca Kodu",
+      "role": "researcher",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "research"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/59da7d4268/research"
+      ],
+      "reportsToSlug": "senior-programista"
+    },
+    {
+      "slug": "zwiadowca-vaultu",
+      "name": "Zwiadowca Vaultu",
+      "role": "researcher",
+      "adapterType": "claude_local",
+      "model": "claude-sonnet-5",
+      "manageStatus": false,
+      "skills": [
+        "paperclip",
+        "research"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/59da7d4268/research"
+      ],
+      "reportsToSlug": "jarvis"
+    }
+  ]
+}

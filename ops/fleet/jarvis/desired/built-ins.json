@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "builtIns": [
+    {
+      "key": "summarizer",
+      "displayName": "Summarizer",
+      "expectedModel": "claude-haiku-4-5",
+      "manageInstructionsViaPackage": false,
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "paperclipai/bundled/paperclip-operations/summarize-status"
+      ],
+      "falseClaims": [
+        {
+          "pattern": "run on the low-cost model profile lane \\(`cheap`\\) by default",
+          "remediation": "Stock AGENTS.md no longer claims the cheap lane. With enableBuiltInAgents=false, fleet-config apply patches the live Summarizer AGENTS.md via GET→exact-old→PUT→verify on instructions-bundle/file. Do not import Summarizer into package/."
+        }
+      ]
+    },
+    {
+      "key": "reflection-coach",
+      "displayName": "Reflection Coach",
+      "manageInstructionsViaPackage": false,
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "paperclipai/bundled/paperclip-operations/reflection-coach"
+      ]
+    }
+  ]
+}
