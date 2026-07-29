@@ -98,6 +98,33 @@ test("privileged workflow has only contents: read permission (no write grants)",
   );
 });
 
+test("dependency-review step is pinned to a full SHA", () => {
+  const wf = readFile(".github/workflows/commitperclip-review.yml");
+
+  // The line using dependency-review-action must reference a 40-char SHA.
+  assert.match(
+    wf,
+    /uses:\s+actions\/dependency-review-action@[0-9a-f]{40}/,
+    "dependency-review-action must be pinned to a full commit SHA",
+  );
+});
+
+test("dependency-review step is skipped for private repositories", () => {
+  const wf = readFile(".github/workflows/commitperclip-review.yml");
+
+  // The step block that contains dependency-review-action must also contain
+  // the private-repo guard condition.
+  const stepBlock = wf.match(
+    /- name: Dependency Review[\s\S]*?(?=\n      - name:|\n  \w|$)/,
+  );
+  assert.ok(stepBlock, "Dependency Review step not found");
+  assert.match(
+    stepBlock[0],
+    /if:\s+github\.event\.repository\.private\s*==\s*false/,
+    "Dependency Review step must include: if: github.event.repository.private == false",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // pr.yml — regular PR workflow (runs untrusted PR code)
 // ---------------------------------------------------------------------------
