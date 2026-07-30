@@ -6,6 +6,12 @@
 
 ## [Unreleased]
 
+## [0.2.6] — 2026-07-30
+
+### Naprawione / Wzmocnione
+- **Izolacja lokalnych agentów OpenCode:** każdy agent bez jawnie ustawionego katalogu domowego dostaje własny trwały katalog wykonawczy i widzi wyłącznie przypisane mu umiejętności; synchronizacja jednego agenta nie usuwa już umiejętności pozostałych.
+- **Weryfikacja stanu wykonawczego floty:** zapis listy umiejętności jest uznawany za poprawny dopiero wtedy, gdy dokładnie wszystkie żądane pozycje są faktycznie aktywne w stanie właściwym dla danego wykonawcy.
+
 ## [0.2.5] — 2026-07-30
 
 ### Wzmocnione
