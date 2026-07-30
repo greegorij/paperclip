@@ -55,6 +55,30 @@ function sameStringArray(a, b) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function sameStringArrayInOrder(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (String(a[i]) !== String(b[i])) return false;
+  }
+  return true;
+}
+
+function sameStringSet(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  const left = new Set(a.map(String));
+  const right = new Set(b.map(String));
+  if (left.size !== right.size) return false;
+  for (const item of left) {
+    if (!right.has(item)) return false;
+  }
+  return true;
+}
+
+function isScalar(value) {
+  return value == null || ["string", "number", "boolean"].includes(typeof value);
+}
+
 /**
  * Validate portable package + desired overlays (+ optional live snapshot).
  *
@@ -183,17 +207,17 @@ export function validateFleet({
           });
         }
       }
-      if (agent.slug === "mi-sie-kodu-codex") {
+      if (agent.slug === "mi-sie-kodu-codex" || agent.slug === "recenzent") {
         if (agent.manageStatus !== true || agent.status !== "paused") {
           errors.push({
             code: "codex-not-paused",
-            message: "Mięsień Kodu Codex must have manageStatus:true and status:paused",
+            message: `${agent.slug} must have manageStatus:true and status:paused`,
           });
         }
       } else if (agent.manageStatus === true) {
         warnings.push({
           code: "unexpected-manage-status",
-          message: `${agent.slug} has manageStatus:true — only Codex is expected`,
+          message: `${agent.slug} has manageStatus:true — only Codex and Recenzent are expected`,
         });
       }
     }
@@ -272,6 +296,11 @@ export function validateFleet({
     }
 
     const liveAgents = liveSnapshot.agents ?? [];
+    const portableLiveBySlug = new Map(
+      liveAgents
+        .filter((a) => !builtInKey(a))
+        .map((a) => [a.slug, a]),
+    );
     if (liveAgents.length !== FLEET_INVARIANTS.expectedLiveAgentCount) {
       errors.push({
         code: "live-agent-count",
@@ -322,6 +351,68 @@ export function validateFleet({
             if (forApply) warnings.push(item);
             else errors.push(item);
           }
+        }
+      }
+    }
+
+    for (const desiredAgent of desired.agents?.agents ?? []) {
+      const liveAgent = portableLiveBySlug.get(desiredAgent.slug) ?? null;
+      if (!liveAgent) {
+        errors.push({
+          code: "live-portable-agent-missing",
+          message: `${desiredAgent.slug}: portable agent missing from live snapshot`,
+        });
+        continue;
+      }
+
+      if (liveAgent.adapterType !== desiredAgent.adapterType) {
+        errors.push({
+          code: "live-adapter-type-mismatch",
+          message: `${desiredAgent.slug}: adapterType mismatch (live=${liveAgent.adapterType}, desired=${desiredAgent.adapterType})`,
+        });
+      }
+
+      const policy = desiredAgent.expectedRuntimePolicy;
+      if (!policy) continue;
+
+      const liveConfig = liveAgent.adapterConfig ?? {};
+      if (typeof policy.cwdSuffix === "string") {
+        const liveCwd = typeof liveConfig.cwd === "string" ? liveConfig.cwd : "";
+        if (!liveCwd.endsWith(policy.cwdSuffix)) {
+          errors.push({
+            code: "runtime-policy-cwd-mismatch",
+            message: `${desiredAgent.slug}: runtime cwd does not match expected policy suffix`,
+          });
+        }
+      }
+
+      const expectedConfig = policy.adapterConfig ?? {};
+      for (const [key, expectedValue] of Object.entries(expectedConfig)) {
+        const liveValue = liveConfig[key];
+        if (key === "extraArgs") {
+          if (!sameStringArrayInOrder(expectedValue, liveValue)) {
+            errors.push({
+              code: "runtime-policy-extra-args-mismatch",
+              message: `${desiredAgent.slug}: adapterConfig.extraArgs mismatch`,
+            });
+          }
+          continue;
+        }
+        if (key === "networkAllowlist") {
+          if (!sameStringSet(expectedValue, liveValue)) {
+            errors.push({
+              code: "runtime-policy-network-allowlist-mismatch",
+              message: `${desiredAgent.slug}: adapterConfig.networkAllowlist mismatch`,
+            });
+          }
+          continue;
+        }
+        if (!isScalar(expectedValue)) continue;
+        if (liveValue !== expectedValue) {
+          errors.push({
+            code: "runtime-policy-adapter-config-mismatch",
+            message: `${desiredAgent.slug}: adapterConfig.${key} mismatch`,
+          });
         }
       }
     }

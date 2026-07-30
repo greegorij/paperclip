@@ -419,25 +419,43 @@
       "slug": "recenzent",
       "name": "Recenzent",
       "role": "qa",
-      "adapterType": "claude_local",
-      "model": "claude-sonnet-5",
-      "manageStatus": false,
+      "adapterType": "codex_local",
+      "model": "gpt-5.6-sol",
+      "manageStatus": true,
+      "status": "paused",
       "skills": [
         "paperclip",
-        "paperclip-converting-plans-to-tasks",
-        "review",
-        "grill-me",
-        "code-quality",
-        "contract"
+        "review"
       ],
       "skillKeys": [
         "paperclipai/paperclip/paperclip",
-        "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
-        "local/d4d5048369/review",
-        "local/d489dc1150/grill-me",
-        "local/a33d9d94a7/code-quality",
-        "local/a39efcc7e6/contract"
+        "local/d4d5048369/review"
       ],
+      "expectedRuntimePolicy": {
+        "cwdSuffix": ".paperclip/pilot-workspaces/recenzent",
+        "adapterConfig": {
+          "engine": "cli",
+          "search": false,
+          "fastMode": false,
+          "graceSec": 15,
+          "extraArgs": [
+            "--sandbox",
+            "read-only",
+            "--skip-git-repo-check"
+          ],
+          "timeoutSec": 1200,
+          "networkScope": "allowlist",
+          "filesystemScope": "workspace",
+          "networkAllowlist": [
+            "chatgpt.com",
+            "api.openai.com",
+            "auth.openai.com"
+          ],
+          "modelReasoningEffort": "high",
+          "outputInactivityTimeoutMs": 600000,
+          "dangerouslyBypassApprovalsAndSandbox": false
+        }
+      },
       "reportsToSlug": "jarvis"
     },
     {

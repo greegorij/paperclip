@@ -57,6 +57,16 @@ const liveApplyDrift = (() => {
     }
   }
 
+  const alignedRecenzent = alignedBySlug.get("recenzent");
+  const driftRecenzent = driftBySlug.get("recenzent");
+  assert.ok(alignedRecenzent, "aligned fixture missing recenzent");
+  assert.ok(driftRecenzent, "drift fixture missing recenzent");
+  driftRecenzent.status = alignedRecenzent.status;
+  driftRecenzent.adapterType = alignedRecenzent.adapterType;
+  driftRecenzent.adapterConfig = structuredClone(alignedRecenzent.adapterConfig);
+  driftRecenzent.model = alignedRecenzent.model;
+  driftRecenzent.desiredSkills = structuredClone(alignedRecenzent.desiredSkills);
+
   const alignedSummarizer = liveAligned.builtIns?.find((b) => b.key === "summarizer");
   const driftSummarizer = snap.builtIns?.find((b) => b.key === "summarizer");
   const alignedCanonicalSummarizerAgent = alignedBySlug.get("summarizer");
@@ -237,11 +247,115 @@ test("target models and Codex manageStatus paused are encoded", () => {
   assert.equal(bySlug["mi-sie-kodu-cursor"].model, "auto");
   assert.equal(bySlug["mi-sie-kodu-glm"].model, "openrouter/z-ai/glm-5.2");
   assert.equal(bySlug["mi-sie-web"].model, "openrouter/google/gemini-2.5-flash");
+  assert.equal(bySlug.recenzent.model, "gpt-5.6-sol");
+  assert.equal(bySlug.recenzent.adapterType, "codex_local");
+  assert.equal(bySlug.recenzent.status, "paused");
+  assert.equal(bySlug.recenzent.manageStatus, true);
   assert.equal(bySlug["mi-sie-kodu-codex"].status, "paused");
   assert.equal(bySlug["mi-sie-kodu-codex"].manageStatus, true);
   assert.ok(
-    desired.agents.agents.filter((a) => a.slug !== "mi-sie-kodu-codex" && a.manageStatus).length === 0,
+    desired.agents.agents.filter((a) => !["mi-sie-kodu-codex", "recenzent"].includes(a.slug) && a.manageStatus)
+      .length === 0,
   );
+});
+
+async function assertValidateAndApplyRejectsRecenzentDrift({ mutate, errorCode }) {
+  const snap = structuredClone(liveAligned);
+  const recenzent = snap.agents.find((a) => a.slug === "recenzent");
+  assert.ok(recenzent, "fixture must include recenzent");
+  mutate(recenzent);
+
+  const validation = validateFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snap,
+    forApply: true,
+  });
+  assert.equal(validation.ok, false);
+  assert.ok(
+    validation.errors.some((e) => e.code === errorCode),
+    JSON.stringify(validation.errors, null, 2),
+  );
+
+  let calls = 0;
+  const api = {
+    dryRun: false,
+    async get() {
+      calls += 1;
+      throw new Error("must not call get");
+    },
+    async patch() {
+      calls += 1;
+      throw new Error("must not call patch");
+    },
+    async post() {
+      calls += 1;
+      throw new Error("must not call post");
+    },
+    async put() {
+      calls += 1;
+      throw new Error("must not call put");
+    },
+  };
+
+  const report = await applyFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snap,
+    apply: true,
+    backupGate: makeBackupGate(),
+    api,
+  });
+  assert.equal(report.ok, false);
+  assert.equal(report.writesSucceeded, 0);
+  assert.equal(report.completed.length, 0);
+  assert.equal(calls, 0);
+  assert.ok(report.failed.some((f) => f.step === "validate"));
+}
+
+test("live Recenzent adapterType drift fails validate/apply before API call", async () => {
+  await assertValidateAndApplyRejectsRecenzentDrift({
+    mutate: (agent) => {
+      agent.adapterType = "claude_local";
+    },
+    errorCode: "live-adapter-type-mismatch",
+  });
+});
+
+test("live Recenzent cwd drift fails validate/apply before API call", async () => {
+  await assertValidateAndApplyRejectsRecenzentDrift({
+    mutate: (agent) => {
+      agent.adapterConfig.cwd = "/srv/paperclip/production/recenzent-mirror";
+    },
+    errorCode: "runtime-policy-cwd-mismatch",
+  });
+});
+
+test("live Recenzent sandbox args drift fails validate/apply before API call", async () => {
+  await assertValidateAndApplyRejectsRecenzentDrift({
+    mutate: (agent) => {
+      agent.adapterConfig.extraArgs = ["--sandbox", "workspace-write", "--skip-git-repo-check"];
+    },
+    errorCode: "runtime-policy-extra-args-mismatch",
+  });
+});
+
+test("live Recenzent bypass=true fails validate/apply before API call", async () => {
+  await assertValidateAndApplyRejectsRecenzentDrift({
+    mutate: (agent) => {
+      agent.adapterConfig.dangerouslyBypassApprovalsAndSandbox = true;
+    },
+    errorCode: "runtime-policy-adapter-config-mismatch",
+  });
+});
+
+test("live Recenzent missing allowlist domain fails validate/apply before API call", async () => {
+  await assertValidateAndApplyRejectsRecenzentDrift({
+    mutate: (agent) => {
+      agent.adapterConfig.networkAllowlist = ["chatgpt.com", "api.openai.com"];
+    },
+    errorCode: "runtime-policy-network-allowlist-mismatch",
+  });
 });
 
 test("five routines have exact live ids and trigger ids", () => {
