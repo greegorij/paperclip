@@ -6,6 +6,12 @@
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-07-30
+
+### Wzmocnione
+- **Bezpieczne zarządzanie instrukcjami floty:** eksportowe `AGENTS.md` nie są już porównywane ani używane do pełnego nadpisania działających agentów; automatyczne zastosowanie zmian odrzuca wszystkie mutacje instrukcji przed pierwszym wywołaniem API.
+- **Walidacja rzeczywistej konfiguracji:** reguły sprzeczności są sprawdzane także na instrukcjach i modelach z żywej migawki floty, dzięki czemu różnica między poprawnym pakietem a niepoprawną produkcją blokuje zastosowanie zmian.
+
 ## [0.2.3] — 2026-07-30
 
 ### Naprawione
