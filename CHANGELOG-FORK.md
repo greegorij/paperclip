@@ -6,6 +6,12 @@
 
 ## [Unreleased]
 
+## [0.2.7] — 2026-07-30
+
+### Naprawione / Wzmocnione
+- **Logowanie Codexa w lokalnym sandboxie:** przebieg w Bubblewrap dostaje prywatny, kuratorowany katalog Codexa z rzeczywistą kopią `auth.json`, zamiast zerwanego dowiązania do niewidocznego katalogu hosta; nowsze odświeżone poświadczenie wraca bezpiecznie do właściwego źródła, a katalog tymczasowy jest zawsze usuwany.
+- **Izolacja poświadczeń:** cały hostowy katalog `~/.codex` nadal nie jest montowany w sandboxie, a ręcznie wskazany `CODEX_HOME` zachowuje własny cel zapisu zamiast nadpisywać domyślne konto hosta.
+
 ## [0.2.6] — 2026-07-30
 
 ### Naprawione / Wzmocnione
