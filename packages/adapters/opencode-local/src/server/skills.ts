@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -13,27 +12,14 @@ import {
   readInstalledSkillTargets,
   resolvePaperclipDesiredSkillNames,
 } from "@paperclipai/adapter-utils/server-utils";
+import { resolveOpenCodeSkillHome } from "./skill-home.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
-function asString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}
-
-function resolveOpenCodeSkillsHome(config: Record<string, unknown>) {
-  const env =
-    typeof config.env === "object" && config.env !== null && !Array.isArray(config.env)
-      ? (config.env as Record<string, unknown>)
-      : {};
-  const configuredHome = asString(env.HOME);
-  const home = configuredHome ? path.resolve(configuredHome) : os.homedir();
-  return path.join(home, ".claude", "skills");
-}
-
-async function buildOpenCodeSkillSnapshot(config: Record<string, unknown>): Promise<AdapterSkillSnapshot> {
-  const availableEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
-  const desiredSkills = resolvePaperclipDesiredSkillNames(config, availableEntries);
-  const skillsHome = resolveOpenCodeSkillsHome(config);
+async function buildOpenCodeSkillSnapshot(ctx: AdapterSkillContext): Promise<AdapterSkillSnapshot> {
+  const availableEntries = await readPaperclipRuntimeSkillEntries(ctx.config, __moduleDir);
+  const desiredSkills = resolvePaperclipDesiredSkillNames(ctx.config, availableEntries);
+  const { skillsHome, source } = resolveOpenCodeSkillHome(ctx.config, ctx.agentId);
   const installed = await readInstalledSkillTargets(skillsHome);
   return buildPersistentSkillSnapshot({
     adapterType: "opencode_local",
@@ -42,18 +28,27 @@ async function buildOpenCodeSkillSnapshot(config: Record<string, unknown>): Prom
     installed,
     skillsHome,
     locationLabel: "~/.claude/skills",
-    installedDetail: "Installed in the shared Claude/OpenCode skills home.",
-    missingDetail: "Configured but not currently linked into the shared Claude/OpenCode skills home.",
-    externalConflictDetail: "Skill name is occupied by an external installation in the shared skills home.",
-    externalDetail: "Installed outside Paperclip management in the shared skills home.",
-    warnings: [
-      "OpenCode currently uses the shared Claude skills home (~/.claude/skills).",
-    ],
+    installedDetail:
+      source === "configured_env"
+        ? "Installed in the OpenCode skills home under the configured HOME."
+        : "Installed in the Paperclip-managed OpenCode HOME for this agent.",
+    missingDetail:
+      source === "configured_env"
+        ? "Configured but not currently linked into the OpenCode skills home under the configured HOME."
+        : "Configured but not currently linked into this agent's Paperclip-managed OpenCode HOME.",
+    externalConflictDetail:
+      source === "configured_env"
+        ? "Skill name is occupied by an external installation in the configured OpenCode skills home."
+        : "Skill name is occupied by an external installation in this agent's Paperclip-managed OpenCode HOME.",
+    externalDetail:
+      source === "configured_env"
+        ? "Installed outside Paperclip management in the configured OpenCode skills home."
+        : "Installed outside Paperclip management in this agent's Paperclip-managed OpenCode HOME.",
   });
 }
 
 export async function listOpenCodeSkills(ctx: AdapterSkillContext): Promise<AdapterSkillSnapshot> {
-  return buildOpenCodeSkillSnapshot(ctx.config);
+  return buildOpenCodeSkillSnapshot(ctx);
 }
 
 export async function syncOpenCodeSkills(
@@ -62,7 +57,7 @@ export async function syncOpenCodeSkills(
 ): Promise<AdapterSkillSnapshot> {
   const availableEntries = await readPaperclipRuntimeSkillEntries(ctx.config, __moduleDir);
   const desiredSet = new Set(desiredSkills);
-  const skillsHome = resolveOpenCodeSkillsHome(ctx.config);
+  const { skillsHome } = resolveOpenCodeSkillHome(ctx.config, ctx.agentId);
   await fs.mkdir(skillsHome, { recursive: true });
   const installed = await readInstalledSkillTargets(skillsHome);
   const availableByRuntimeName = new Map(availableEntries.map((entry) => [entry.runtimeName, entry]));
@@ -81,7 +76,7 @@ export async function syncOpenCodeSkills(
     await fs.unlink(path.join(skillsHome, name)).catch(() => {});
   }
 
-  return buildOpenCodeSkillSnapshot(ctx.config);
+  return buildOpenCodeSkillSnapshot(ctx);
 }
 
 export function resolveOpenCodeDesiredSkillNames(

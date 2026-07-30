@@ -6,6 +6,19 @@ function sameStringArray(a, b) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function expectedActiveSkillState(adapterType) {
+  switch (adapterType) {
+    case "opencode_local":
+    case "cursor":
+      return "installed";
+    case "claude_local":
+    case "codex_local":
+      return "configured";
+    default:
+      return null;
+  }
+}
+
 /**
  * After a successful write, GET and confirm the expected live state.
  * Missing or mismatched verification is a hard failure.
@@ -25,10 +38,21 @@ export async function verifyAgentModel(client, { agentId, expectedModel }) {
   return { ok: true, got };
 }
 
-export async function verifyAgentSkills(client, { agentId, expectedKeys }) {
+export async function verifyAgentSkills(client, { agentId, expectedKeys, expectedAdapterType = null }) {
   const res = await client.get(`/api/agents/${agentId}/skills`);
   if (!res.ok) {
     return { ok: false, error: `skills verify GET failed HTTP ${res.status}` };
+  }
+  const liveAdapterType = res.data?.adapterType ?? null;
+  if (
+    expectedAdapterType != null &&
+    liveAdapterType != null &&
+    liveAdapterType !== expectedAdapterType
+  ) {
+    return {
+      ok: false,
+      error: `skills verify adapterType mismatch: live=${liveAdapterType} expected=${expectedAdapterType}`,
+    };
   }
   const got = res.data?.desiredSkills ?? null;
   if (!Array.isArray(got)) {
@@ -40,6 +64,43 @@ export async function verifyAgentSkills(client, { agentId, expectedKeys }) {
       error: `skills verify mismatch: live=${JSON.stringify(got)} expected=${JSON.stringify(expectedKeys)}`,
       liveShort: got.map(skillShortName),
     };
+  }
+  const adapterType = liveAdapterType ?? expectedAdapterType;
+  const activeState = expectedActiveSkillState(adapterType);
+  if (!activeState) {
+    return {
+      ok: false,
+      error: `skills verify unsupported adapterType for state checks: ${String(adapterType)}`,
+    };
+  }
+  const entries = Array.isArray(res.data?.entries) ? res.data.entries : null;
+  if (!entries) {
+    return { ok: false, error: "skills verify missing entries array" };
+  }
+  const expectedSet = new Set((expectedKeys ?? []).map(String));
+  const desiredTrueEntries = entries.filter((entry) => entry?.desired === true);
+  const desiredTrueKeys = desiredTrueEntries.map((entry) => String(entry?.key));
+  if (!sameStringArray(desiredTrueKeys, [...expectedSet])) {
+    return {
+      ok: false,
+      error:
+        `skills verify desired:true key set mismatch: live=${JSON.stringify(desiredTrueKeys)} ` +
+        `expected=${JSON.stringify([...expectedSet])}`,
+    };
+  }
+  for (const key of expectedSet) {
+    const entry = desiredTrueEntries.find((item) => item?.key === key) ?? null;
+    if (!entry) {
+      return { ok: false, error: `skills verify missing desired entry for ${key}` };
+    }
+    if (entry.state !== activeState) {
+      return {
+        ok: false,
+        error:
+          `skills verify invalid state for ${key}: live=${String(entry.state)} ` +
+          `expected=${activeState}`,
+      };
+    }
   }
   return { ok: true, got };
 }

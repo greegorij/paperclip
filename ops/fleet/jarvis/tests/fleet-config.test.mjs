@@ -14,6 +14,7 @@ import { diffFleet, matchRoutineStrict } from "../lib/diff.mjs";
 import { applyFleet, validateApplyChanges } from "../lib/apply.mjs";
 import { assertBackupGate } from "../lib/backup-gate.mjs";
 import { verifyFleet } from "../lib/verify.mjs";
+import { verifyAgentSkills } from "../lib/write-verify.mjs";
 import { resolveFullSkillKeys, resolveBootstrapSkillKey } from "../lib/skill-keys.mjs";
 import { snapshotFleet } from "../lib/snapshot.mjs";
 import {
@@ -599,6 +600,12 @@ function createStatefulApplyMock({
   verifyFailKind = null,
   liveSnapshot = liveDrift,
 } = {}) {
+  const activeStateForAdapter = (adapterType) => {
+    if (adapterType === "opencode_local" || adapterType === "cursor") return "installed";
+    if (adapterType === "claude_local" || adapterType === "codex_local") return "configured";
+    return "configured";
+  };
+
   const agents = new Map(liveSnapshot.agents.map((a) => [a.id, structuredClone(a)]));
   const routines = new Map(liveSnapshot.routines.map((r) => [r.id, structuredClone(r)]));
   let summarizerContent =
@@ -628,10 +635,31 @@ function createStatefulApplyMock({
       }
       if (url.match(/\/api\/agents\/[^/]+\/skills$/)) {
         const id = url.split("/api/agents/")[1].split("/")[0];
+        const agent = agents.get(id);
+        const desiredSkills = agent?.desiredSkills ?? [];
+        const activeState = activeStateForAdapter(agent?.adapterType);
+        const desiredSet = new Set(desiredSkills);
+        const entries = desiredSkills.map((key) => ({
+          key,
+          state: activeState,
+          desired: true,
+        }));
+        if (verifyFailKind === "skills") {
+          if (entries.length > 1) {
+            entries[entries.length - 1].state = "missing";
+          } else if (entries.length === 1) {
+            entries.length = 0;
+          }
+        }
         return {
           ok: true,
           status: 200,
-          data: { desiredSkills: agents.get(id)?.desiredSkills ?? [] },
+          data: {
+            adapterType: agent?.adapterType ?? null,
+            desiredSkills,
+            entries,
+            desiredCount: desiredSet.size,
+          },
         };
       }
       if (url.match(/\/api\/agents\/[^/]+$/)) {
@@ -810,6 +838,108 @@ test("apply fails closed when post-write verify mismatches", async () => {
   assert.equal(api.patchCalls, 1);
   assert.equal(api.postCalls, 0);
   assert.equal(api.putCalls, 0);
+});
+
+test("verifyAgentSkills fails when desired keys match but active states are incomplete", async () => {
+  const result = await verifyAgentSkills(
+    {
+      get: async () => ({
+        ok: true,
+        status: 200,
+        data: {
+          adapterType: "cursor",
+          desiredSkills: ["skill/a", "skill/b"],
+          entries: [
+            { key: "skill/a", desired: true, state: "installed" },
+            { key: "skill/b", desired: true, state: "missing" },
+          ],
+        },
+      }),
+    },
+    {
+      agentId: "agent-cursor",
+      expectedKeys: ["skill/a", "skill/b"],
+      expectedAdapterType: "cursor",
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /invalid state/i);
+});
+
+test("verifyAgentSkills fails when expected key has desired=false", async () => {
+  const result = await verifyAgentSkills(
+    {
+      get: async () => ({
+        ok: true,
+        status: 200,
+        data: {
+          adapterType: "cursor",
+          desiredSkills: ["skill/a"],
+          entries: [
+            { key: "skill/a", desired: false, state: "installed" },
+          ],
+        },
+      }),
+    },
+    {
+      agentId: "agent-cursor",
+      expectedKeys: ["skill/a"],
+      expectedAdapterType: "cursor",
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /desired:true key set mismatch/i);
+});
+
+test("verifyAgentSkills fails when entries contain extra desired:true key", async () => {
+  const result = await verifyAgentSkills(
+    {
+      get: async () => ({
+        ok: true,
+        status: 200,
+        data: {
+          adapterType: "cursor",
+          desiredSkills: ["skill/a"],
+          entries: [
+            { key: "skill/a", desired: true, state: "installed" },
+            { key: "skill/extra", desired: true, state: "installed" },
+          ],
+        },
+      }),
+    },
+    {
+      agentId: "agent-cursor",
+      expectedKeys: ["skill/a"],
+      expectedAdapterType: "cursor",
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /desired:true key set mismatch/i);
+});
+
+test("verifyAgentSkills fails closed on adapterType mismatch", async () => {
+  const result = await verifyAgentSkills(
+    {
+      get: async () => ({
+        ok: true,
+        status: 200,
+        data: {
+          adapterType: "claude_local",
+          desiredSkills: ["skill/a"],
+          entries: [
+            { key: "skill/a", desired: true, state: "configured" },
+          ],
+        },
+      }),
+    },
+    {
+      agentId: "agent-cursor",
+      expectedKeys: ["skill/a"],
+      expectedAdapterType: "cursor",
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /adapterType mismatch/i);
 });
 
 test("summarizer patch plans exact replace and refuses unexpected drift", () => {

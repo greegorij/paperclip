@@ -241,6 +241,7 @@ export async function applyFleet({
         const verified = await verifyAgentSkills(client, {
           agentId,
           expectedKeys: keys,
+          expectedAdapterType: liveBySlug.get(change.target)?.adapterType ?? null,
         });
         if (!verified.ok) throw new Error(verified.error);
         report.completed.push({
