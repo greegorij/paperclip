@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+## [0.2.14] — 2026-07-30
+
+### Naprawione / Wzmocnione
+- **Odporność Codexa na duże wyniki narzędzi:** lokalny adapter Codexa opróżnia wyjście procesu niezależnie od wolniejszego zapisu dziennika, zachowuje kolejność zdarzeń i ogranicza pamięć kolejki z histerezą; zapobiega to awarii `Resource temporarily unavailable` ujawnionej przez produkcyjny pilot odczytu Boot Manifest. Naprawę śledzi bilet `T-202607-007`.
+
 ## [0.2.13] — 2026-07-30
 
 ### Naprawione / Wzmocnione
