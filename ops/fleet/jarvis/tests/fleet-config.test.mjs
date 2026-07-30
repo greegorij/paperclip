@@ -105,6 +105,104 @@ const summarizerNew = readFileSync(
   "utf8",
 );
 
+function jsonResponse(status, data) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function createLiveSnapshotFetchMock({
+  companyId = "company-jarvis",
+  detailFailureById = new Map(),
+} = {}) {
+  const desiredSkillStateForAdapter = (adapterType) => {
+    if (adapterType === "opencode_local" || adapterType === "cursor") return "installed";
+    if (adapterType === "claude_local" || adapterType === "codex_local") return "configured";
+    return "configured";
+  };
+
+  const source = structuredClone(liveAligned);
+  const secondSelectedAgentSlug = "jarvis";
+  const list = source.agents.map((agent) => {
+    const row = structuredClone(agent);
+    delete row.runtimeConfig;
+    if (row.slug === "recenzent" || row.slug === secondSelectedAgentSlug) row.maxConcurrentRuns = null;
+    return row;
+  });
+  const detailsById = new Map(source.agents.map((agent) => [agent.id, structuredClone(agent)]));
+  const skillSnapshotsByAgentId = new Map(
+    (source.skillSnapshots ?? []).map((snapshot) => [snapshot.agentId, structuredClone(snapshot)]),
+  );
+  const recenzent = source.agents.find((agent) => agent.slug === "recenzent");
+  assert.ok(recenzent, "fixture must include recenzent");
+  const recenzentDetail = detailsById.get(recenzent.id);
+  recenzentDetail.maxConcurrentRuns = null;
+  recenzentDetail.runtimeConfig = { heartbeat: { maxConcurrentRuns: 1 } };
+  const secondSelectedAgent = source.agents.find((agent) => agent.slug === secondSelectedAgentSlug);
+  assert.ok(secondSelectedAgent, `fixture must include ${secondSelectedAgentSlug}`);
+  const secondSelectedAgentDetail = detailsById.get(secondSelectedAgent.id);
+  secondSelectedAgentDetail.maxConcurrentRuns = null;
+  secondSelectedAgentDetail.runtimeConfig = { heartbeat: { maxConcurrentRuns: 0 } };
+
+  return async function fetchMock(url) {
+    const parsed = new URL(url);
+    const { pathname, searchParams } = parsed;
+
+    if (pathname === `/api/companies/${companyId}/agents`) return jsonResponse(200, list);
+    if (pathname === `/api/companies/${companyId}/routines`) return jsonResponse(200, source.routines);
+    if (pathname === `/api/companies/${companyId}/skills`) {
+      return jsonResponse(200, { skills: source.skillLibrary });
+    }
+    if (pathname === `/api/companies/${companyId}/built-in-agents`) return jsonResponse(404, { error: "off" });
+
+    const detailMatch = pathname.match(/^\/api\/agents\/([^/]+)$/);
+    if (detailMatch) {
+      const agentId = detailMatch[1];
+      const failedStatus = detailFailureById.get(agentId);
+      if (failedStatus) return jsonResponse(failedStatus, { error: "detail failed" });
+      return jsonResponse(200, detailsById.get(agentId));
+    }
+
+    const instructionsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/instructions-bundle\/file$/);
+    if (instructionsMatch) {
+      if (searchParams.get("path") !== "AGENTS.md") return jsonResponse(404, { error: "path not found" });
+      const agent = detailsById.get(instructionsMatch[1]);
+      return jsonResponse(200, { content: agent.instructions });
+    }
+
+    const skillsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/skills$/);
+    if (skillsMatch) {
+      const agentId = skillsMatch[1];
+      const agent = detailsById.get(agentId);
+      if (!agent) {
+        throw new Error(`mock route /api/agents/:id/skills missing agent for agentId=${agentId}`);
+      }
+      const skillSnapshot = skillSnapshotsByAgentId.get(agentId);
+      if (!skillSnapshot) {
+        throw new Error(`mock route /api/agents/:id/skills missing skillSnapshot for agentId=${agentId}`);
+      }
+      const desiredSkills = agent.desiredSkills ?? [];
+      const desiredSet = new Set(desiredSkills);
+      const desiredState = desiredSkillStateForAdapter(agent.adapterType);
+      const entries = (skillSnapshot.entries ?? []).map((entry) => {
+        const desired = desiredSet.has(entry.key);
+        return {
+          ...entry,
+          desired,
+          state: desired ? desiredState : "available",
+        };
+      });
+      return jsonResponse(200, {
+        desiredSkills,
+        entries,
+      });
+    }
+
+    return jsonResponse(404, { error: "unhandled mock route" });
+  };
+}
+
 test("package contains 27 portable agents and excludes built-ins", () => {
   const pkg = loadPackage(PACKAGE_DIR);
   assert.equal(pkg.agents.length, 27);
@@ -1073,6 +1171,53 @@ test("missing completeness object is a validate error", () => {
   const result = validateFleet({ packageDir: PACKAGE_DIR, desiredDir: DESIRED_DIR, liveSnapshot: snap });
   assert.equal(result.ok, false);
   assert.ok(result.errors.some((e) => e.code === "completeness-missing"));
+});
+
+test("snapshotFleet live path maps runtimeConfig heartbeat maxConcurrentRuns", async () => {
+  const companyId = "company-jarvis";
+  const snap = await snapshotFleet({
+    companyId,
+    apiUrl: "http://mock.paperclip.local",
+    apiKey: "token",
+    fetchImpl: createLiveSnapshotFetchMock({ companyId }),
+  });
+  const recenzent = snap.agents.find((agent) => agent.slug === "recenzent");
+  assert.ok(recenzent, "snapshot should include recenzent");
+  assert.equal(recenzent.maxConcurrentRuns, 1);
+  const jarvis = snap.agents.find((agent) => agent.slug === "jarvis");
+  assert.ok(jarvis, "snapshot should include jarvis");
+  assert.equal(jarvis.maxConcurrentRuns, 0);
+
+  const validation = validateFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snap,
+  });
+  assert.equal(validation.ok, true, JSON.stringify(validation.errors, null, 2));
+  assert.ok(
+    !validation.errors.some((error) => error.code === "runtime-policy-max-concurrent-mismatch"),
+    JSON.stringify(validation.errors, null, 2),
+  );
+});
+
+test("snapshotFleet live path fails closed on agent detail GET error", async () => {
+  const companyId = "company-jarvis";
+  const recenzent = liveAligned.agents.find((agent) => agent.slug === "recenzent");
+  assert.ok(recenzent, "fixture should include recenzent");
+
+  await assert.rejects(
+    () =>
+      snapshotFleet({
+        companyId,
+        apiUrl: "http://mock.paperclip.local",
+        apiKey: "token",
+        fetchImpl: createLiveSnapshotFetchMock({
+          companyId,
+          detailFailureById: new Map([[recenzent.id, 503]]),
+        }),
+      }),
+    /agent detail GET failed for recenzent .*HTTP 503/i,
+  );
 });
 
 test("snapshotFleet fixture path enforces completeness", async () => {

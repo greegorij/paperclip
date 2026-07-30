@@ -109,8 +109,20 @@ export async function snapshotFleet({
 
   const agents = [];
   const skillSnapshots = [];
-  for (const agent of agentsList) {
-    const label = agentLabel(agent);
+  for (const listAgent of agentsList) {
+    const label = agentLabel(listAgent);
+    const detail = await client.get(`/api/agents/${listAgent.id}`);
+    if (!detail.ok) {
+      throw new Error(
+        `agent detail GET failed for ${label} (id=${listAgent.id}): HTTP ${detail.status}`,
+      );
+    }
+    if (!detail.data || typeof detail.data !== "object") {
+      throw new Error(`agent detail payload missing for ${label} (id=${listAgent.id})`);
+    }
+    // Full detail record is the source of runtime policy fields.
+    const agent = { ...listAgent, ...detail.data };
+
     const bundle = await client.get(
       `/api/agents/${agent.id}/instructions-bundle/file?path=${encodeURIComponent("AGENTS.md")}`,
     );

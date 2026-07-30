@@ -101,6 +101,8 @@ export function normalizeLiveSnapshot(raw) {
     capturedAt: raw.capturedAt ?? new Date().toISOString(),
     companyId: raw.companyId ?? null,
     agents: (raw.agents ?? []).map((a) => ({
+      maxConcurrentRuns:
+        a.runtimeConfig?.heartbeat?.maxConcurrentRuns ?? a.maxConcurrentRuns ?? null,
       id: a.id,
       name: a.name,
       slug: a.slug ?? a.urlKey ?? null,
