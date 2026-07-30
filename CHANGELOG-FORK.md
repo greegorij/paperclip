@@ -6,6 +6,12 @@
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-07-30
+
+### Wzmocnione
+- **Bezpieczny profil Recenzenta na Codexie:** manifest floty utrwala model GPT, minimalne umiejętności oraz stan wstrzymany poza pilotem.
+- **Kontrola środowiska wykonawczego:** walidator blokuje zmianę adaptera, przestrzeni roboczej, sandboxa tylko do odczytu, ograniczeń sieci, wysiłku rozumowania, limitów czasu i zakazu omijania zabezpieczeń; tych pól nie naprawia automatycznie.
+
 ## [0.2.4] — 2026-07-30
 
 ### Wzmocnione
