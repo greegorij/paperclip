@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+## [0.2.11] — 2026-07-30
+
+### Naprawione / Wzmocnione
+- **Pełna wymiana konfiguracji przy zmianie adaptera:** pełne `replaceAdapterConfig` przy zmianie adaptera nie zachowuje już pominiętych pól starego adaptera (zwłaszcza `CLAUDE_CONFIG_DIR`); zwykła zmiana bez pełnego zastąpienia zachowuje dotychczasowe pola. Test PATCH→GET pokrywa oba przypadki. Naprawę śledzi i zamyka bilet `T-202607-003`.
+
 ## [0.2.10] — 2026-07-30
 
 ### Dodane / Wzmocnione
