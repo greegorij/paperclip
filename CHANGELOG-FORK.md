@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+## [0.2.12] — 2026-07-30
+
+### Naprawione / Wzmocnione
+- **Kanoniczna weryfikacja umiejętności po zmianie profilu:** przełącznik odczytuje `desiredSkills` z właściwego punktu `/skills`, zamiast uznawać brak tego pola w szczegółach agenta za pustą listę; błąd odczytu, zły kształt danych i rzeczywisty dryf nadal twardo zatrzymują zmianę i uruchamiają cofanie. Naprawę śledzi i zamyka bilet `T-202607-004`.
+
 ## [0.2.11] — 2026-07-30
 
 ### Naprawione / Wzmocnione
