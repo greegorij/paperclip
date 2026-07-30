@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "switchableAgents": [
+    "analityk-biznesowy",
+    "badacz",
+    "czytacz-transkryptow",
+    "designer-ui",
+    "in-ynier-wdro-e",
+    "jarvis",
+    "konfigurator-systemu",
+    "kronikarz",
+    "krytyk",
+    "kurator-crm",
+    "kurator-vaultu",
+    "mi-sie-vault",
+    "modelarz-procesow",
+    "obserwator-upstream",
+    "senior-programista",
+    "specjalista-deck-w",
+    "specjalista-komunikacji-klienckiej",
+    "specjalista-ofert",
+    "szef-komercyjny",
+    "zwiadowca-vaultu",
+    "summarizer",
+    "reflection-coach"
+  ],
+  "profiles": {
+    "openai-first": {
+      "version": "2026-07-30.1",
+      "agents": [
+        { "slug": "jarvis", "adapterType": "codex_local", "model": "gpt-5.6-sol", "modelReasoningEffort": "high", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 2 },
+        { "slug": "szef-komercyjny", "adapterType": "codex_local", "model": "gpt-5.6-sol", "modelReasoningEffort": "high", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 2 },
+        { "slug": "senior-programista", "adapterType": "codex_local", "model": "gpt-5.6-sol", "modelReasoningEffort": "high", "filesystemWorkspaceAccess": "rw", "maxDailyRuns": 2 },
+        { "slug": "krytyk", "adapterType": "codex_local", "model": "gpt-5.6-sol", "modelReasoningEffort": "high", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 2 },
+        { "slug": "analityk-biznesowy", "adapterType": "codex_local", "model": "gpt-5.6-sol", "modelReasoningEffort": "medium", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 2 },
+        { "slug": "badacz", "adapterType": "codex_local", "model": "gpt-5.6-sol", "modelReasoningEffort": "medium", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 2 },
+        { "slug": "designer-ui", "adapterType": "codex_local", "model": "gpt-5.6-sol", "modelReasoningEffort": "medium", "filesystemWorkspaceAccess": "rw", "maxDailyRuns": 2 },
+        { "slug": "konfigurator-systemu", "adapterType": "codex_local", "model": "gpt-5.6-sol", "modelReasoningEffort": "medium", "filesystemWorkspaceAccess": "rw", "maxDailyRuns": 2 },
+        { "slug": "modelarz-procesow", "adapterType": "codex_local", "model": "gpt-5.6-sol", "modelReasoningEffort": "medium", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 2 },
+        { "slug": "specjalista-deck-w", "adapterType": "codex_local", "model": "gpt-5.6-sol", "modelReasoningEffort": "medium", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 2 },
+        { "slug": "specjalista-komunikacji-klienckiej", "adapterType": "codex_local", "model": "gpt-5.6-sol", "modelReasoningEffort": "medium", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 2 },
+        { "slug": "specjalista-ofert", "adapterType": "codex_local", "model": "gpt-5.6-sol", "modelReasoningEffort": "medium", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 2 },
+        { "slug": "czytacz-transkryptow", "adapterType": "codex_local", "model": "gpt-5.6-luna", "modelReasoningEffort": "medium", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 1 },
+        { "slug": "in-ynier-wdro-e", "adapterType": "codex_local", "model": "gpt-5.6-luna", "modelReasoningEffort": "medium", "filesystemWorkspaceAccess": "rw", "maxDailyRuns": 1 },
+        { "slug": "kurator-crm", "adapterType": "codex_local", "model": "gpt-5.6-luna", "modelReasoningEffort": "medium", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 1 },
+        { "slug": "kurator-vaultu", "adapterType": "codex_local", "model": "gpt-5.6-luna", "modelReasoningEffort": "medium", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 1 },
+        { "slug": "obserwator-upstream", "adapterType": "codex_local", "model": "gpt-5.6-luna", "modelReasoningEffort": "medium", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 1 },
+        { "slug": "reflection-coach", "adapterType": "codex_local", "model": "gpt-5.6-luna", "modelReasoningEffort": "medium", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 1 },
+        { "slug": "zwiadowca-vaultu", "adapterType": "codex_local", "model": "gpt-5.6-luna", "modelReasoningEffort": "medium", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 1 },
+        { "slug": "kronikarz", "adapterType": "codex_local", "model": "gpt-5.6-luna", "modelReasoningEffort": "low", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 1 },
+        { "slug": "mi-sie-vault", "adapterType": "codex_local", "model": "gpt-5.6-luna", "modelReasoningEffort": "low", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 1 },
+        { "slug": "summarizer", "adapterType": "codex_local", "model": "gpt-5.6-luna", "modelReasoningEffort": "low", "filesystemWorkspaceAccess": "ro", "maxDailyRuns": 1 }
+      ]
+    },
+    "anthropic-first": {
+      "version": "2026-07-30.1",
+      "agents": [
+        { "slug": "jarvis", "adapterType": "claude_local", "model": "claude-opus-5", "maxTurnsPerRun": 20, "maxDailyRuns": 2, "claudeConfigProfile": "boss" },
+        { "slug": "szef-komercyjny", "adapterType": "claude_local", "model": "claude-opus-5", "maxTurnsPerRun": 40, "maxDailyRuns": 2, "claudeConfigProfile": "worker" },
+        { "slug": "kronikarz", "adapterType": "claude_local", "model": "claude-haiku-4-5", "maxTurnsPerRun": 20, "maxDailyRuns": 1, "claudeConfigProfile": "worker" },
+        { "slug": "mi-sie-vault", "adapterType": "claude_local", "model": "claude-haiku-4-5", "maxTurnsPerRun": 20, "maxDailyRuns": 1, "claudeConfigProfile": "worker" },
+        { "slug": "summarizer", "adapterType": "claude_local", "model": "claude-haiku-4-5", "maxTurnsPerRun": 10, "maxDailyRuns": 1, "claudeConfigProfile": "worker" },
+        { "slug": "analityk-biznesowy", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 40, "maxDailyRuns": 2, "claudeConfigProfile": "worker" },
+        { "slug": "badacz", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 30, "maxDailyRuns": 2, "claudeConfigProfile": "worker" },
+        { "slug": "czytacz-transkryptow", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 30, "maxDailyRuns": 1, "claudeConfigProfile": "worker" },
+        { "slug": "designer-ui", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 40, "maxDailyRuns": 2, "claudeConfigProfile": "worker" },
+        { "slug": "in-ynier-wdro-e", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 30, "maxDailyRuns": 1, "claudeConfigProfile": "worker" },
+        { "slug": "konfigurator-systemu", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 40, "maxDailyRuns": 2, "claudeConfigProfile": "worker" },
+        { "slug": "krytyk", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 30, "maxDailyRuns": 2, "claudeConfigProfile": "worker" },
+        { "slug": "kurator-crm", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 30, "maxDailyRuns": 1, "claudeConfigProfile": "worker" },
+        { "slug": "kurator-vaultu", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 30, "maxDailyRuns": 1, "claudeConfigProfile": "worker" },
+        { "slug": "modelarz-procesow", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 40, "maxDailyRuns": 2, "claudeConfigProfile": "worker" },
+        { "slug": "obserwator-upstream", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 20, "maxDailyRuns": 1, "claudeConfigProfile": "worker" },
+        { "slug": "senior-programista", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 40, "maxDailyRuns": 2, "claudeConfigProfile": "worker" },
+        { "slug": "specjalista-deck-w", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 40, "maxDailyRuns": 2, "claudeConfigProfile": "worker" },
+        { "slug": "specjalista-komunikacji-klienckiej", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 40, "maxDailyRuns": 2, "claudeConfigProfile": "worker" },
+        { "slug": "specjalista-ofert", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 40, "maxDailyRuns": 2, "claudeConfigProfile": "worker" },
+        { "slug": "zwiadowca-vaultu", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 30, "maxDailyRuns": 1, "claudeConfigProfile": "worker" },
+        { "slug": "reflection-coach", "adapterType": "claude_local", "model": "claude-sonnet-5", "maxTurnsPerRun": 20, "maxDailyRuns": 1, "claudeConfigProfile": "worker" }
+      ]
+    }
+  }
+}

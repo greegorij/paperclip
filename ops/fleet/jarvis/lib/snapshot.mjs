@@ -15,11 +15,14 @@ function builtInKey(agent) {
   return agent?.metadata?.paperclipBuiltInAgent?.key ?? null;
 }
 
-function finalizeSnapshot(snap, { outPath = null } = {}) {
+function finalizeSnapshot(snap, { outPath = null, internalCapture = false } = {}) {
   const gate = assertSnapshotCompleteness(snap);
   if (!gate.ok) {
     const detail = gate.errors.map((e) => e.message ?? e.code).join("; ");
     throw new Error(`snapshot completeness failed: ${detail}`);
+  }
+  if (internalCapture && outPath) {
+    throw new Error("internalCapture forbids writing unredacted snapshot to outPath");
   }
   if (outPath) {
     mkdirSync(path.dirname(outPath), { recursive: true });
@@ -30,7 +33,7 @@ function finalizeSnapshot(snap, { outPath = null } = {}) {
 
 /**
  * Snapshot live company state for offline diff/validate/verify.
- * Reads only; never mutates. Redacts secrets.
+ * Reads only; never mutates. Redacts secrets by default.
  * Fail-closed: missing instructions/skills/library or wrong agent counts abort.
  * Fixture path runs the same completeness gate as live capture.
  */
@@ -41,13 +44,14 @@ export async function snapshotFleet({
   outPath = null,
   fetchImpl = globalThis.fetch,
   fixture = null,
+  internalCapture = false,
   expectedLiveAgentCount = FLEET_INVARIANTS.expectedLiveAgentCount,
   expectedPortableCount = FLEET_INVARIANTS.portableAgentCount,
   expectedBuiltInCount = FLEET_INVARIANTS.managedBuiltInCount,
 } = {}) {
   if (fixture) {
-    const snap = normalizeLiveSnapshot(fixture);
-    return finalizeSnapshot(snap, { outPath });
+    const snap = normalizeLiveSnapshot(fixture, { redact: !internalCapture });
+    return finalizeSnapshot(snap, { outPath, internalCapture });
   }
 
   const client = createApiClient({
@@ -55,6 +59,7 @@ export async function snapshotFleet({
     apiKey,
     fetchImpl,
     dryRun: false,
+    redactResponseData: !internalCapture,
   });
 
   if (!companyId) throw new Error("--company-id required for live snapshot");
@@ -229,7 +234,7 @@ export async function snapshotFleet({
     skillLibrary,
     completeness,
     warnings,
-  });
+  }, { redact: !internalCapture });
 
-  return finalizeSnapshot(snap, { outPath });
+  return finalizeSnapshot(snap, { outPath, internalCapture });
 }

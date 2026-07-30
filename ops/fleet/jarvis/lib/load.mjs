@@ -10,6 +10,9 @@ export function loadDesired(desiredDir = DESIRED_DIR) {
   return {
     fleet: readJson(path.join(desiredDir, "fleet.json")),
     models: readJson(path.join(desiredDir, "models.json")),
+    profiles: existsSync(path.join(desiredDir, "profiles.json"))
+      ? readJson(path.join(desiredDir, "profiles.json"))
+      : null,
     skills: readJson(path.join(desiredDir, "skills.json")),
     routines: readJson(path.join(desiredDir, "routines.json")),
     builtIns: readJson(path.join(desiredDir, "built-ins.json")),

@@ -72,6 +72,64 @@ node ops/fleet/jarvis/bin/fleet-config.mjs apply --apply --snapshot /tmp/jarvis-
 node ops/fleet/jarvis/bin/fleet-config.mjs verify --snapshot /tmp/jarvis-fleet-post.json
 ```
 
+## Provider profile switch (safe preview/apply/rollback)
+
+Switches only the 22 Anthropic-backed Jarvis roles (`20 portable claude_local + summarizer + reflection-coach`) between named profiles:
+
+- `openai-first`
+- `anthropic-first`
+
+Profile-specific prerequisites:
+
+- `anthropic-first` requires existing directories from `JARVIS_CLAUDE_WORKER_CONFIG_DIR` and `JARVIS_CLAUDE_BOSS_CONFIG_DIR` (absolute, non-empty, inspectable as directories).
+- `openai-first` requires a current boss-instructions source file from `JARVIS_CLAUDE_BOSS_INSTRUCTIONS_FILE` and exact parity between committed `AGENTS-CODEX.md` and the generated artifact.
+
+Safety gates for profile apply/rollback:
+
+- explicit profile confirmation (`--confirm-profile`)
+- verified DB backup gate (`--backup-file` + `--backup-sha256`)
+- complete fresh live snapshot capture
+- zero active runs (`/api/companies/:companyId/live-runs`)
+- all affected agents already paused
+- pre-change JSON backup of affected runtime state before first mutation (written atomically as a private `0600` rollback file)
+- PATCH+GET verification per agent
+- automatic reverse rollback on first failure
+
+Rollback backup/report handling:
+
+- rollback backup stores the exact private pre-change state needed for restore, including `secret_ref` fields inside adapter/runtime payloads.
+- operator preview/apply reports and standard snapshots are secret-redacted; `secret_ref` values never appear there.
+
+Profile switching uses `replaceAdapterConfig: true`, preserves only managed instruction-bundle fields and `paperclipSkillSync`, and never mutates instructions or skill assignments.
+
+```sh
+# Preview only (offline, non-mutating)
+node ops/fleet/jarvis/bin/fleet-config.mjs profile-switch \
+  --profile openai-first \
+  --snapshot /tmp/jarvis-fleet-snapshot.json
+
+# Apply with strict gates
+node ops/fleet/jarvis/bin/fleet-config.mjs profile-switch \
+  --apply \
+  --profile openai-first \
+  --confirm-profile openai-first \
+  --company-id "$COMPANY_ID" \
+  --backup-file /path/to/verified-db-backup \
+  --backup-sha256 "<sha256>" \
+  --state-backup-file /tmp/jarvis-profile-prechange.json
+
+# Explicit rollback from profile backup file
+node ops/fleet/jarvis/bin/fleet-config.mjs profile-switch \
+  --rollback \
+  --profile openai-first \
+  --company-id "$COMPANY_ID" \
+  --rollback-file /tmp/jarvis-profile-prechange.json \
+  --backup-file /path/to/verified-db-backup \
+  --backup-sha256 "<sha256>"
+```
+
+Profile switch **does not activate the fleet**: all affected agents remain `paused` and no resume calls are issued.
+
 Routine IDs and schedule trigger IDs are already filled in `desired/routines.json` from the live audit. Apply refuses if live id/title/triggerId do not all match — **no name-only fallback**.
 
 ## APIs used
@@ -105,6 +163,7 @@ After a routine is paused and its schedule trigger disabled, the live API may st
 
 ```sh
 node --test ops/fleet/jarvis/tests/fleet-config.test.mjs
+node --test ops/fleet/jarvis/tests/profile-switch.test.mjs
 # optional (may SKIP without embedded Postgres):
 ./node_modules/.bin/vitest run server/src/__tests__/built-in-agents.test.ts -t 'Summarizer|summarizer'
 ```

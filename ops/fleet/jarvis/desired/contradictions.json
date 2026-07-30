@@ -49,11 +49,10 @@
       "id": "summarizer-cheap-claim",
       "agentSlug": "summarizer",
       "builtIn": true,
-      "description": "Summarizer must not claim cheap as default model path when live model is Haiku",
+      "description": "Summarizer must not claim the stale cheap-lane default path",
       "forbidPatterns": [
         "run on the low-cost model profile lane \\(`cheap`\\) by default"
-      ],
-      "expectedModel": "claude-haiku-4-5"
+      ]
     }
   ]
 }

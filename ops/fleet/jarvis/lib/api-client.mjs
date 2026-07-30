@@ -8,6 +8,7 @@ export function createApiClient({
   apiKey,
   fetchImpl = globalThis.fetch,
   dryRun = true,
+  redactResponseData = true,
 } = {}) {
   if (!baseUrl) throw new Error("PAPERCLIP_API_URL / --api-url required for live operations");
 
@@ -49,7 +50,7 @@ export function createApiClient({
       ok: res.ok,
       dryRun: false,
       status: res.status,
-      data: redactSecrets(data),
+      data: redactResponseData ? redactSecrets(data) : data,
       request: logSafe,
     };
   }
@@ -65,9 +66,14 @@ export function createApiClient({
 
 /**
  * Build a live snapshot shape from API responses (or fixtures).
- * Skill entry values are preserved without secrets.
+ * Skill entry values are preserved, with secret redaction enabled by default.
  */
-export function normalizeLiveSnapshot(raw) {
+function cloneJson(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+export function normalizeLiveSnapshot(raw, { redact = true } = {}) {
+  const maybeRedact = (value) => (redact ? redactSecrets(value) : cloneJson(value));
   const agentsRaw = raw.agents ?? [];
   const builtIns = (raw.builtIns ?? []).map((b) => {
     const agentId = b.agentId ?? b.agent?.id ?? null;
@@ -90,7 +96,7 @@ export function normalizeLiveSnapshot(raw) {
       displayName: b.displayName ?? b.key,
       agentId,
       model: b.model ?? linked?.adapterConfig?.model ?? linked?.model ?? null,
-      adapterConfig: b.adapterConfig ? redactSecrets(b.adapterConfig) : null,
+      adapterConfig: b.adapterConfig ? maybeRedact(b.adapterConfig) : null,
       instructions: b.instructions ?? null,
       status: b.status ?? null,
       desiredSkills,
@@ -113,13 +119,14 @@ export function normalizeLiveSnapshot(raw) {
     agents: (raw.agents ?? []).map((a) => ({
       maxConcurrentRuns:
         a.runtimeConfig?.heartbeat?.maxConcurrentRuns ?? a.maxConcurrentRuns ?? null,
+      runtimeConfig: maybeRedact(a.runtimeConfig ?? {}),
       heartbeat: normalizeHeartbeat(a),
       id: a.id,
       name: a.name,
       slug: a.slug ?? a.urlKey ?? null,
       status: a.status,
       adapterType: a.adapterType,
-      adapterConfig: redactSecrets(a.adapterConfig ?? {}),
+      adapterConfig: maybeRedact(a.adapterConfig ?? {}),
       model: a.adapterConfig?.model ?? a.model ?? null,
       instructions: a.instructions ?? null,
       instructionsHash: a.instructionsHash ?? null,

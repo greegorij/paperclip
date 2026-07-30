@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
-import { readFileSync, writeFileSync, mkdtempSync, readdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, readdirSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 
@@ -23,6 +23,7 @@ import {
   SUMMARIZER_CHEAP_CLAIM_RE,
 } from "../lib/summarizer-patch.mjs";
 import { summarizeExportWarnings } from "../lib/sanitize.mjs";
+import { planProviderProfileSwitch } from "../lib/profile-switch.mjs";
 
 const broken = JSON.parse(
   readFileSync(path.join(FIXTURES_DIR, "broken-instructions.json"), "utf8"),
@@ -36,8 +37,44 @@ const OPENAI_SAFE_ALLOWLIST_WITH_GITHUB = [
   "objects.githubusercontent.com",
   "raw.githubusercontent.com",
 ];
+const SWITCHABLE_PROFILE_SLUGS = new Set(
+  (loadDesired(DESIRED_DIR).profiles?.switchableAgents ?? []).map(String),
+);
+const ANTHROPIC_RUNTIME_ENV = {
+  ...process.env,
+  ...(() => {
+    const rootDir = mkdtempSync(path.join(os.tmpdir(), "jarvis-claude-config-"));
+    const workerDir = path.join(rootDir, "worker");
+    const bossDir = path.join(rootDir, "boss");
+    mkdirSync(workerDir);
+    mkdirSync(bossDir);
+    return {
+      JARVIS_CLAUDE_WORKER_CONFIG_DIR: workerDir,
+      JARVIS_CLAUDE_BOSS_CONFIG_DIR: bossDir,
+    };
+  })(),
+};
+
+function canonicalModel(agent) {
+  return agent?.adapterConfig?.model ?? agent?.model ?? null;
+}
+
+function ensureJarvisManagedInstructions(snapshot) {
+  const jarvis = snapshot.agents?.find((agent) => agent.slug === "jarvis");
+  if (!jarvis) return snapshot;
+  const instructionsRootPath = path.join(os.tmpdir(), "jarvis-managed-instructions");
+  jarvis.adapterConfig = {
+    ...(jarvis.adapterConfig ?? {}),
+    instructionsBundleMode: "managed",
+    instructionsRootPath,
+    instructionsEntryFile: "AGENTS.md",
+    instructionsFilePath: path.join(instructionsRootPath, "AGENTS.md"),
+  };
+  return snapshot;
+}
 
 function applyManagedOpenAiRoleFit(snapshot) {
+  ensureJarvisManagedInstructions(snapshot);
   const bySlug = new Map((snapshot.agents ?? []).map((agent) => [agent.slug, agent]));
   const specs = {
     "zwiadowca-kodu": {
@@ -85,63 +122,76 @@ function applyManagedOpenAiRoleFit(snapshot) {
   return snapshot;
 }
 
+function buildLiveSnapshotForProfile(profileName, runtimeEnv) {
+  const snapshot = structuredClone(liveAligned);
+  ensureJarvisManagedInstructions(snapshot);
+  for (const agent of snapshot.agents ?? []) {
+    if (SWITCHABLE_PROFILE_SLUGS.has(agent.slug)) {
+      agent.status = "paused";
+    }
+  }
+  const plan = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+    profileName,
+    runtimeEnv,
+  });
+  assert.equal(plan.ok, true, JSON.stringify(plan.blockers ?? plan.issues ?? [], null, 2));
+  for (const step of plan.allAffected ?? []) {
+    const live = snapshot.agents.find((agent) => agent.id === step.agentId);
+    assert.ok(live, `missing live agent for ${step.slug}`);
+    live.status = step.to.status;
+    live.adapterType = step.to.adapterType;
+    live.adapterConfig = structuredClone(step.to.adapterConfig);
+    live.runtimeConfig = structuredClone(step.to.runtimeConfig);
+    live.model = canonicalModel(live);
+  }
+  for (const builtIn of snapshot.builtIns ?? []) {
+    const live = snapshot.agents.find((agent) => agent.id === builtIn.agentId);
+    if (!live) continue;
+    builtIn.model = canonicalModel(live);
+  }
+  return snapshot;
+}
+
+function isProfileOwnedModelChange(change) {
+  if (change.kind !== "agent-model" && change.kind !== "builtin-model") return false;
+  return SWITCHABLE_PROFILE_SLUGS.has(String(change.target));
+}
+
 const liveAligned = applyManagedOpenAiRoleFit(
   JSON.parse(readFileSync(path.join(FIXTURES_DIR, "live-aligned.json"), "utf8")),
 );
 const liveDrift = applyManagedOpenAiRoleFit(
   JSON.parse(readFileSync(path.join(FIXTURES_DIR, "live-drift.json"), "utf8")),
 );
-const liveApplyDrift = (() => {
-  const snap = structuredClone(liveDrift);
-  const alignedBySlug = new Map(liveAligned.agents.map((a) => [a.slug, a]));
-  const driftBySlug = new Map(snap.agents.map((a) => [a.slug, a]));
-  const contradictionTargets = [
-    "recenzent",
-    "zwiadowca-kodu",
-    "in-ynier-wdro-e",
-    "senior-programista",
-    "mi-sie-web",
-    "mi-sie-recenzji-glm",
-    "summarizer",
-  ];
+function buildApplySnapshotWithNonProfileModelDrift({
+  includeSecondModelDrift = false,
+} = {}) {
+  const snap = buildLiveSnapshotForProfile("anthropic-first", ANTHROPIC_RUNTIME_ENV);
+  const driftBySlug = new Map(snap.agents.map((agent) => [agent.slug, agent]));
+  const web = driftBySlug.get("mi-sie-web");
+  assert.ok(web, "drift fixture missing mi-sie-web");
+  assert.equal(SWITCHABLE_PROFILE_SLUGS.has("mi-sie-web"), false);
+  web.adapterConfig = {
+    ...(web.adapterConfig ?? {}),
+    model: "openrouter/openai/gpt-4o-mini",
+  };
+  web.model = "openrouter/openai/gpt-4o-mini";
 
-  for (const slug of contradictionTargets) {
-    const from = alignedBySlug.get(slug);
-    const to = driftBySlug.get(slug);
-    assert.ok(from, `aligned fixture missing contradiction target: ${slug}`);
-    assert.ok(to, `drift fixture missing contradiction target: ${slug}`);
-    to.instructions = from.instructions;
-    if ("instructionsHash" in from && "instructionsHash" in to) {
-      to.instructionsHash = from.instructionsHash;
-    }
-  }
-
-  const alignedRecenzent = alignedBySlug.get("recenzent");
-  const driftRecenzent = driftBySlug.get("recenzent");
-  assert.ok(alignedRecenzent, "aligned fixture missing recenzent");
-  assert.ok(driftRecenzent, "drift fixture missing recenzent");
-  driftRecenzent.status = alignedRecenzent.status;
-  driftRecenzent.maxConcurrentRuns = alignedRecenzent.maxConcurrentRuns;
-  driftRecenzent.adapterType = alignedRecenzent.adapterType;
-  driftRecenzent.adapterConfig = structuredClone(alignedRecenzent.adapterConfig);
-  driftRecenzent.model = alignedRecenzent.model;
-  driftRecenzent.desiredSkills = structuredClone(alignedRecenzent.desiredSkills);
-
-  const alignedSummarizer = liveAligned.builtIns?.find((b) => b.key === "summarizer");
-  const driftSummarizer = snap.builtIns?.find((b) => b.key === "summarizer");
-  const alignedCanonicalSummarizerAgent = alignedBySlug.get("summarizer");
-  const canonicalSummarizerAgent = driftBySlug.get("summarizer");
-  assert.ok(alignedSummarizer, "aligned fixture missing built-in summarizer row");
-  assert.ok(driftSummarizer, "drift fixture missing built-in summarizer row");
-  assert.ok(alignedCanonicalSummarizerAgent, "aligned fixture missing canonical summarizer agent row");
-  assert.ok(canonicalSummarizerAgent, "drift fixture missing canonical summarizer agent row");
-  driftSummarizer.instructions = canonicalSummarizerAgent.instructions;
-  if ("instructionsHash" in alignedCanonicalSummarizerAgent && "instructionsHash" in driftSummarizer) {
-    driftSummarizer.instructionsHash = alignedCanonicalSummarizerAgent.instructionsHash;
+  if (includeSecondModelDrift) {
+    const reviewGlm = driftBySlug.get("mi-sie-recenzji-glm");
+    assert.ok(reviewGlm, "drift fixture missing mi-sie-recenzji-glm");
+    assert.equal(SWITCHABLE_PROFILE_SLUGS.has("mi-sie-recenzji-glm"), false);
+    reviewGlm.adapterConfig = {
+      ...(reviewGlm.adapterConfig ?? {}),
+      model: "openrouter/openai/gpt-4o-mini",
+    };
+    reviewGlm.model = "openrouter/openai/gpt-4o-mini";
   }
 
   return snap;
-})();
+}
 const liveTitleMismatch = applyManagedOpenAiRoleFit(
   JSON.parse(readFileSync(path.join(FIXTURES_DIR, "live-routine-title-mismatch.json"), "utf8")),
 );
@@ -896,6 +946,7 @@ function makeBackupGate() {
 }
 
 test("apply dry-run is offline — no API client / env required", async () => {
+  const liveApplyDrift = buildApplySnapshotWithNonProfileModelDrift();
   const prevUrl = process.env.PAPERCLIP_API_URL;
   const prevKey = process.env.PAPERCLIP_API_KEY;
   delete process.env.PAPERCLIP_API_URL;
@@ -1224,6 +1275,7 @@ function createStatefulApplyMock({
 }
 
 test("apply writes minimal model patch body and verifies", async () => {
+  const liveApplyDrift = buildApplySnapshotWithNonProfileModelDrift();
   const api = createStatefulApplyMock({ liveSnapshot: liveApplyDrift });
   const report = await applyFleet({
     packageDir: PACKAGE_DIR,
@@ -1234,16 +1286,39 @@ test("apply writes minimal model patch body and verifies", async () => {
     api,
   });
   assert.equal(report.ok, true, JSON.stringify(report.failed, null, 2));
+  const plannedModelStep = report.planned.find((c) => c.kind === "agent-model");
+  assert.ok(plannedModelStep);
+  assert.equal(plannedModelStep.target, "mi-sie-web");
+  assert.equal(plannedModelStep.from, "openrouter/openai/gpt-4o-mini");
+  assert.equal(plannedModelStep.to, "openrouter/google/gemini-2.5-flash");
   const modelStep = report.completed.find((c) => c.kind === "agent-model");
   assert.ok(modelStep);
+  assert.equal(modelStep.target, "mi-sie-web");
   assert.deepEqual(modelStep.requestBody, {
-    adapterConfig: { model: "claude-haiku-4-5" },
+    adapterConfig: { model: "openrouter/google/gemini-2.5-flash" },
     replaceAdapterConfig: false,
   });
-  assert.ok(report.completed.every((c) => c.verified));
+  assert.deepEqual(modelStep.verified, {
+    ok: true,
+    got: "openrouter/google/gemini-2.5-flash",
+  });
+  assert.equal(report.writesSucceeded, 1);
+  assert.ok(report.completed.every((c) => c.verified?.ok === true));
 });
 
 test("apply fail-fast stops after first mutation error with partial=true", async () => {
+  const liveApplyDrift = buildApplySnapshotWithNonProfileModelDrift({
+    includeSecondModelDrift: true,
+  });
+  const planned = diffFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: liveApplyDrift,
+  });
+  assert.ok(
+    planned.changes.filter((change) => change.kind === "agent-model").length >= 2,
+    JSON.stringify(planned.changes, null, 2),
+  );
   const api = createStatefulApplyMock({ failOnPatchCall: 2, liveSnapshot: liveApplyDrift });
   const report = await applyFleet({
     packageDir: PACKAGE_DIR,
@@ -1261,13 +1336,13 @@ test("apply fail-fast stops after first mutation error with partial=true", async
 });
 
 test("apply fails closed when post-write verify mismatches", async () => {
-  // Isolated from liveDrift: only planned mutation is Mięsień Vault model haiku → claude-haiku-4-5.
-  // liveDrift also plans Codex pause first, which would complete before model verify fails.
+  // Isolated from liveDrift: only planned mutation is mi-sie-web model wrong -> desired.
   const snap = structuredClone(liveAligned);
-  const vault = snap.agents.find((a) => a.slug === "mi-sie-vault");
-  assert.ok(vault, "fixture must include mi-sie-vault");
-  vault.adapterConfig = { ...(vault.adapterConfig ?? {}), model: "haiku" };
-  vault.model = "haiku";
+  assert.equal(SWITCHABLE_PROFILE_SLUGS.has("mi-sie-web"), false);
+  const web = snap.agents.find((a) => a.slug === "mi-sie-web");
+  assert.ok(web, "fixture must include mi-sie-web");
+  web.adapterConfig = { ...(web.adapterConfig ?? {}), model: "openrouter/openai/gpt-4o-mini" };
+  web.model = "openrouter/openai/gpt-4o-mini";
 
   const planned = diffFleet({
     packageDir: PACKAGE_DIR,
@@ -1276,9 +1351,9 @@ test("apply fails closed when post-write verify mismatches", async () => {
   });
   assert.equal(planned.changeCount, 1, JSON.stringify(planned.changes, null, 2));
   assert.equal(planned.changes[0].kind, "agent-model");
-  assert.equal(planned.changes[0].target, "mi-sie-vault");
-  assert.equal(planned.changes[0].from, "haiku");
-  assert.equal(planned.changes[0].to, "claude-haiku-4-5");
+  assert.equal(planned.changes[0].target, "mi-sie-web");
+  assert.equal(planned.changes[0].from, "openrouter/openai/gpt-4o-mini");
+  assert.equal(planned.changes[0].to, "openrouter/google/gemini-2.5-flash");
 
   const api = createStatefulApplyMock({ liveSnapshot: snap, verifyFailKind: "model" });
   const report = await applyFleet({
@@ -1576,7 +1651,23 @@ test("snapshotFleet fixture path enforces completeness", async () => {
   assert.equal(ok.completeness.complete, true);
 });
 
-test("diff plans builtin-model correction when live summarizer model is null", () => {
+test("snapshotFleet internal capture forbids raw outPath writes", async () => {
+  const outPath = path.join(
+    mkdtempSync(path.join(os.tmpdir(), "jarvis-snapshot-internal-")),
+    "live.json",
+  );
+  await assert.rejects(
+    () =>
+      snapshotFleet({
+        fixture: liveAligned,
+        internalCapture: true,
+        outPath,
+      }),
+    /internalCapture forbids writing unredacted snapshot to outPath/,
+  );
+});
+
+test("diff blocks provider profile inconsistency and avoids builtin-model repair for profile-owned built-in", () => {
   const snap = structuredClone(liveAligned);
   const bi = snap.builtIns.find((b) => b.key === "summarizer");
   bi.model = null;
@@ -1584,7 +1675,14 @@ test("diff plans builtin-model correction when live summarizer model is null", (
   agent.model = null;
   agent.adapterConfig = { ...(agent.adapterConfig ?? {}), model: null };
   const diff = diffFleet({ packageDir: PACKAGE_DIR, desiredDir: DESIRED_DIR, liveSnapshot: snap });
-  assert.ok(diff.changes.some((c) => c.kind === "builtin-model" && c.target === "summarizer" && c.from == null));
+  assert.ok(
+    diff.changes.some((c) => c.kind === "provider-profile-inconsistent" && c.blocking),
+    JSON.stringify(diff.changes, null, 2),
+  );
+  assert.ok(
+    !diff.changes.some((c) => c.kind === "builtin-model" && c.target === "summarizer"),
+    JSON.stringify(diff.changes, null, 2),
+  );
 });
 
 test("verifyFleet fails when summarizer model drifts", () => {
@@ -1599,7 +1697,7 @@ test("verifyFleet fails when summarizer model drifts", () => {
     includeBuiltInInstructions: { summarizer: summarizerNew },
   });
   assert.equal(result.ok, false);
-  assert.ok(result.remainingMutable.some((c) => c.kind === "builtin-model"));
+  assert.ok(result.remainingBlocking.some((c) => c.kind === "provider-profile-inconsistent"));
 });
 
 test("diff compares full skillKeys for all portable agents not only overrides", () => {
@@ -1716,6 +1814,74 @@ test("diff is idempotent against aligned live snapshot", () => {
     liveSnapshot: liveAligned,
   });
   assert.equal(result.changeCount, 0, JSON.stringify(result.changes, null, 2));
+});
+
+test("openai profile live snapshot validates and never plans profile-owned model patches", () => {
+  const snapshot = buildLiveSnapshotForProfile("openai-first");
+  const diff = diffFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+  });
+  assert.equal(
+    diff.changes.filter((change) => isProfileOwnedModelChange(change)).length,
+    0,
+    JSON.stringify(diff.changes, null, 2),
+  );
+  const validation = validateFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+  });
+  assert.equal(validation.ok, true, JSON.stringify(validation.errors, null, 2));
+});
+
+test("switchable profile model corruption blocks profile consistency and avoids destructive model patches", () => {
+  const snapshot = buildLiveSnapshotForProfile("openai-first");
+  const jarvis = snapshot.agents.find((agent) => agent.slug === "jarvis");
+  assert.ok(jarvis, "fixture must include jarvis");
+  jarvis.adapterConfig = { ...(jarvis.adapterConfig ?? {}), model: "claude-opus-5" };
+  jarvis.model = "claude-opus-5";
+  const diff = diffFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+  });
+  assert.ok(
+    diff.changes.some((change) => change.kind === "provider-profile-inconsistent" && change.blocking),
+    JSON.stringify(diff.changes, null, 2),
+  );
+  assert.equal(
+    diff.changes.filter((change) => isProfileOwnedModelChange(change)).length,
+    0,
+    JSON.stringify(diff.changes, null, 2),
+  );
+  const validation = validateFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+  });
+  assert.ok(
+    validation.errors.some((error) => error.code === "provider-profile-inconsistent"),
+    JSON.stringify(validation.errors, null, 2),
+  );
+});
+
+test("non-profile model drift still emits agent-model while profile is consistent", () => {
+  const snapshot = buildLiveSnapshotForProfile("openai-first");
+  const recenzent = snapshot.agents.find((agent) => agent.slug === "recenzent");
+  assert.ok(recenzent, "fixture must include recenzent");
+  recenzent.adapterConfig = { ...(recenzent.adapterConfig ?? {}), model: "gpt-5.6-luna" };
+  recenzent.model = "gpt-5.6-luna";
+  const diff = diffFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+  });
+  assert.ok(
+    diff.changes.some((change) => change.kind === "agent-model" && change.target === "recenzent"),
+    JSON.stringify(diff.changes, null, 2),
+  );
 });
 
 test("verify passes on aligned fixture", () => {

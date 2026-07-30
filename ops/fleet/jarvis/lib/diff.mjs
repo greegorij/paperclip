@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { loadDesired } from "./load.mjs";
+import { detectProviderProfileState } from "./profile-switch.mjs";
 
 function sameStringArray(a, b) {
   const left = [...(a ?? [])].map(String).sort();
@@ -71,6 +72,22 @@ export function diffFleet({ packageDir, desiredDir, liveSnapshot }) {
   void packageDir;
   const desired = loadDesired(desiredDir);
   const changes = [];
+  const switchableSlugs = new Set((desired.profiles?.switchableAgents ?? []).map(String));
+  const providerState = desired.profiles
+    ? detectProviderProfileState({
+      profilesDoc: desired.profiles,
+      liveSnapshot,
+    })
+    : null;
+  if (providerState && !providerState.ok) {
+    changes.push({
+      kind: "provider-profile-inconsistent",
+      target: "switchable-agents",
+      blocking: true,
+      detail: providerState.issues.map((item) => item.detail).join("; "),
+      issues: providerState.issues,
+    });
+  }
 
   const liveBySlug = new Map();
   for (const agent of liveSnapshot.agents ?? []) {
@@ -91,7 +108,8 @@ export function diffFleet({ packageDir, desiredDir, liveSnapshot }) {
     }
 
     const liveModel = live.adapterConfig?.model ?? live.model ?? null;
-    if ((agent.model ?? null) !== (liveModel ?? null)) {
+    const profileOwned = switchableSlugs.has(String(agent.slug));
+    if (!profileOwned && (agent.model ?? null) !== (liveModel ?? null)) {
       changes.push({
         kind: "agent-model",
         target: agent.slug,
@@ -166,12 +184,13 @@ export function diffFleet({ packageDir, desiredDir, liveSnapshot }) {
     if (!liveAgent?.id) continue;
 
     const agentId = liveAgent.id;
+    const profileOwnedBuiltIn = switchableSlugs.has(String(liveAgent.slug ?? builtInKey(liveAgent) ?? ""));
 
     const wantModel =
       biDesired.expectedModel ??
       desired.models?.builtIns?.[biDesired.key]?.model ??
       null;
-    if (wantModel != null) {
+    if (!profileOwnedBuiltIn && wantModel != null) {
       const got = liveAgent.adapterConfig?.model ?? liveAgent.model ?? null;
       // Diff when live is wrong OR null (missing)
       if (got !== wantModel) {

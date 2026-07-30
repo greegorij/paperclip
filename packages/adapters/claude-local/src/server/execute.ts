@@ -158,6 +158,34 @@ function resolveClaudeBillingType(env: Record<string, string>): "api" | "subscri
   return hasNonEmptyEnvValue(env, "ANTHROPIC_API_KEY") ? "api" : "subscription";
 }
 
+function normalizeTrustedNetworkUrl(value: unknown): string | null {
+  const raw = asString(value, "").trim();
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function buildLocalSandboxTrustedNetworkUrls(input: {
+  paperclipApiUrl: unknown;
+  runtimeMcpServers: Array<{ url: string }>;
+}): string[] {
+  const trustedUrls: string[] = [];
+  const seen = new Set<string>();
+  const candidates: unknown[] = [input.paperclipApiUrl, ...input.runtimeMcpServers.map((server) => server.url)];
+  for (const candidate of candidates) {
+    const normalized = normalizeTrustedNetworkUrl(candidate);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    trustedUrls.push(normalized);
+  }
+  return trustedUrls;
+}
+
 async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<ClaudeRuntimeConfig> {
   const { runId, agent, config, context, runtimeCommandSpec, executionTarget, authToken } = input;
   const onLog = input.onLog ?? (async () => {});
@@ -545,6 +573,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           homeDir: filesystemScope ? path.dirname(sharedClaudeConfigDir) : null,
           networkScope,
           networkAllowlist: parseLocalProcessNetworkAllowlist(config.networkAllowlist),
+          networkTrustedUrls: buildLocalSandboxTrustedNetworkUrls({
+            paperclipApiUrl: env.PAPERCLIP_API_URL,
+            runtimeMcpServers,
+          }),
           command: asString(config.filesystemSandboxCommand, "bwrap"),
         }
       : null;

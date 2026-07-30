@@ -7,5 +7,9 @@
   "profilePolicy": {
     "declaredProfiles": ["cheap"],
     "notes": "Platform declares a single named profile cheap. Summarizer live model is adapterConfig.model claude-haiku-4-5."
+  },
+  "providerSwitchPolicy": {
+    "declaredProfiles": ["openai-first", "anthropic-first"],
+    "switchableAgentCount": 22
   }
 }

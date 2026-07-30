@@ -9,6 +9,7 @@ import {
   assertDesiredFleetMatchesInvariants,
 } from "./fleet-invariants.mjs";
 import { assertSnapshotCompleteness } from "./snapshot-completeness.mjs";
+import { detectProviderProfileState } from "./profile-switch.mjs";
 
 function expectedModelForAgent(slug, adapterType, modelsDesired) {
   const explicit = modelsDesired.agents[slug];
@@ -474,6 +475,7 @@ export function validateFleet({
   let liveContradictionResults = [];
 
   if (liveSnapshot) {
+    const switchableSlugs = new Set((desired.profiles?.switchableAgents ?? []).map(String));
     const completeness = assertSnapshotCompleteness(liveSnapshot);
     if (!completeness.ok) {
       for (const item of completeness.errors) {
@@ -484,6 +486,23 @@ export function validateFleet({
         code: "snapshot-completeness",
         message: "Snapshot completeness object and counters match arrays",
       });
+    }
+    if (desired.profiles) {
+      const providerState = detectProviderProfileState({
+        profilesDoc: desired.profiles,
+        liveSnapshot,
+      });
+      if (!providerState.ok) {
+        errors.push({
+          code: "provider-profile-inconsistent",
+          message: providerState.issues.map((item) => item.detail).join("; "),
+        });
+      } else {
+        ok.push({
+          code: "provider-profile-consistent",
+          message: `switchable agents match profile ${providerState.profileName}`,
+        });
+      }
     }
 
     const liveAgents = liveSnapshot.agents ?? [];
@@ -556,7 +575,8 @@ export function validateFleet({
         continue;
       }
 
-      if (liveAgent.adapterType !== desiredAgent.adapterType) {
+      const profileOwnedSlug = switchableSlugs.has(String(desiredAgent.slug));
+      if (!profileOwnedSlug && liveAgent.adapterType !== desiredAgent.adapterType) {
         errors.push({
           code: "live-adapter-type-mismatch",
           message: `${desiredAgent.slug}: adapterType mismatch (live=${liveAgent.adapterType}, desired=${desiredAgent.adapterType})`,
@@ -723,7 +743,8 @@ export function validateFleet({
           else errors.push(item);
         }
       }
-      if (biDesired.expectedModel != null) {
+      const profileOwnedBuiltIn = switchableSlugs.has(String(biAgent.slug ?? builtInKey(biAgent) ?? ""));
+      if (!profileOwnedBuiltIn && biDesired.expectedModel != null) {
         const got = biAgent.adapterConfig?.model ?? biAgent.model ?? null;
         if (got !== biDesired.expectedModel) {
           const item = {
