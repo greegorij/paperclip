@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-07-30
+
+### Naprawione
+- **Sandbox Bubblewrap dla local-process workspace**: wykrywa układ merged-/usr i non-merged-/usr, zachowuje hostowe dowiązania, montuje prawdziwe katalogi tylko do odczytu i nie generuje konfliktujących mountów, dzięki czemu bezpieczny pilot Codex uruchamia się na Ubuntu bez regresji dla starszych dystrybucji.
+
 ## [0.2.2] — 2026-07-30
 
 ### Wzmocnione
