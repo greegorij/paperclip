@@ -3001,10 +3001,12 @@ export function agentRoutes(
       if (requestedAdapterConfig && !changingAdapterType && !replaceAdapterConfig) {
         rawEffectiveAdapterConfig = { ...existingAdapterConfig, ...requestedAdapterConfig };
       }
-      if (changingAdapterType) {
+      if (changingAdapterType && !replaceAdapterConfig) {
         // Preserve adapter-agnostic keys (env, cwd, etc.) from the existing config
-        // when the adapter type changes. Without this, a PATCH that includes
-        // adapterConfig but omits these keys would silently drop them.
+        // when the adapter type changes without an explicit full replace. Without
+        // this, a PATCH that includes adapterConfig but omits these keys would
+        // silently drop them. replaceAdapterConfig:true means the caller supplied
+        // the complete next config (after server defaults/normalization).
         for (const key of ADAPTER_AGNOSTIC_KEYS) {
           if (KNOWN_INSTRUCTIONS_BUNDLE_KEY_SET.has(key)) continue;
           if (rawEffectiveAdapterConfig[key] === undefined && existingAdapterConfig[key] !== undefined) {

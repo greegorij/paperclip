@@ -6,6 +6,7 @@ Engineering tickets for this fork (not Paperclip issues). First ticket: **T-2026
 |----|-------|--------|------|
 | [T-202607-001](./T-202607-001.md) | Jarvis fleet configuration contradictions | fixed-in-repo (apply pending orchestrator) | 2026-07-29 |
 | [T-202607-002](./T-202607-002.md) | Jarvis fleet runtime snapshot maxConcurrentRuns mismatch | FIXED | 2026-07-30 |
+| [T-202607-003](./T-202607-003.md) | replaceAdapterConfig ignored on adapter type change | FIXED | 2026-07-30 |
 
 ## Naming
 

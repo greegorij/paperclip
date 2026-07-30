@@ -6,6 +6,7 @@ const mockAgentService = vi.hoisted(() => ({
   getById: vi.fn(),
   update: vi.fn(),
   resolveByReference: vi.fn(),
+  getChainOfCommand: vi.fn(),
 }));
 
 const mockBuiltInAgentService = vi.hoisted(() => ({
@@ -27,6 +28,8 @@ const mockAccessService = vi.hoisted(() => ({
   canUser: vi.fn(),
   decide: vi.fn(),
   hasPermission: vi.fn(),
+  getMembership: vi.fn(),
+  listPrincipalGrants: vi.fn(),
 }));
 
 const mockSecretService = vi.hoisted(() => ({
@@ -207,7 +210,10 @@ describe("agent instructions bundle routes", () => {
       reason: "allow_explicit_grant",
       explanation: "Allowed by test grant",
     });
+    mockAccessService.getMembership.mockResolvedValue(null);
+    mockAccessService.listPrincipalGrants.mockResolvedValue([]);
     mockAgentService.getById.mockResolvedValue(makeAgent());
+    mockAgentService.getChainOfCommand.mockResolvedValue([]);
     mockAgentService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
       ...makeAgent(),
       adapterConfig: patch.adapterConfig ?? {},
@@ -461,9 +467,9 @@ describe("agent instructions bundle routes", () => {
   it("preserves paperclip skill-sync selections when switching adapters", async () => {
     // Desired skills live inside the per-adapter config under
     // `paperclipSkillSync`, yet they are adapter-agnostic company-level
-    // selections. Switching adapter type must not silently wipe them — the
-    // server carries them over from the existing config the same way it
-    // preserves env/cwd and the instructions bundle.
+    // selections. Switching adapter type without replaceAdapterConfig must not
+    // silently wipe them — the server carries them over from the existing
+    // config the same way it preserves env/cwd and the instructions bundle.
     mockAgentService.getById.mockResolvedValue({
       ...makeAgent(),
       adapterType: "claude_local",
@@ -477,7 +483,6 @@ describe("agent instructions bundle routes", () => {
       .patch("/api/agents/11111111-1111-4111-8111-111111111111?companyId=company-1")
       .send({
         adapterType: "codex_local",
-        replaceAdapterConfig: true,
         adapterConfig: {
           model: "gpt-5.4",
         },
@@ -491,6 +496,100 @@ describe("agent instructions bundle routes", () => {
         adapterConfig: expect.objectContaining({
           model: "gpt-5.4",
           paperclipSkillSync: { desiredSkills: ["research", "code-review"] },
+        }),
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it("drops inherited adapter-agnostic env on adapter type change when replaceAdapterConfig is true", async () => {
+    // Profile switches send a complete adapterConfig with replaceAdapterConfig:true.
+    // Omitting env must not resurrect CLAUDE_CONFIG_DIR (or other stale env) from
+    // the previous adapter — PATCH then GET must match the replacement payload
+    // after normal server defaults/normalization.
+    const agentId = "11111111-1111-4111-8111-111111111111";
+    let storedAgent = {
+      ...makeAgent(),
+      adapterType: "claude_local",
+      adapterConfig: {
+        model: "claude-sonnet-4",
+        cwd: "/tmp/agent-workspace",
+        env: {
+          CLAUDE_CONFIG_DIR: "/Users/operator/.claude-worker",
+        },
+      },
+    };
+    mockAgentService.getById.mockImplementation(async () => storedAgent);
+    mockAgentService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => {
+      storedAgent = {
+        ...storedAgent,
+        ...patch,
+        adapterConfig: (patch.adapterConfig as Record<string, unknown> | undefined) ?? storedAgent.adapterConfig,
+      };
+      return storedAgent;
+    });
+
+    const app = await createApp();
+    const patchRes = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}?companyId=company-1`)
+      .send({
+        adapterType: "codex_local",
+        replaceAdapterConfig: true,
+        adapterConfig: {
+          model: "gpt-5.4",
+          cwd: "/tmp/agent-workspace",
+        },
+      }));
+
+    expect(patchRes.status, JSON.stringify(patchRes.body)).toBe(200);
+    expect(patchRes.body.adapterType).toBe("codex_local");
+    expect(patchRes.body.adapterConfig?.env?.CLAUDE_CONFIG_DIR).toBeUndefined();
+    expect(patchRes.body.adapterConfig?.env).toBeUndefined();
+
+    const getRes = await requestApp(app, (baseUrl) => request(baseUrl)
+      .get(`/api/agents/${agentId}?companyId=company-1`));
+
+    expect(getRes.status, JSON.stringify(getRes.body)).toBe(200);
+    expect(getRes.body.adapterType).toBe("codex_local");
+    expect(getRes.body.adapterConfig?.model).toBe("gpt-5.4");
+    expect(getRes.body.adapterConfig?.cwd).toBe("/tmp/agent-workspace");
+    expect(getRes.body.adapterConfig?.env?.CLAUDE_CONFIG_DIR).toBeUndefined();
+    expect(getRes.body.adapterConfig?.env).toBeUndefined();
+  });
+
+  it("preserves adapter-agnostic env when switching adapters without replaceAdapterConfig", async () => {
+    mockAgentService.getById.mockResolvedValue({
+      ...makeAgent(),
+      adapterType: "claude_local",
+      adapterConfig: {
+        model: "claude-sonnet-4",
+        env: {
+          CLAUDE_CONFIG_DIR: "/Users/operator/.claude-worker",
+          SHARED_TOKEN: "keep-me",
+        },
+      },
+    });
+
+    const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
+      .patch("/api/agents/11111111-1111-4111-8111-111111111111?companyId=company-1")
+      .send({
+        adapterType: "codex_local",
+        adapterConfig: {
+          model: "gpt-5.4",
+        },
+      }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      expect.objectContaining({
+        adapterType: "codex_local",
+        adapterConfig: expect.objectContaining({
+          model: "gpt-5.4",
+          env: {
+            CLAUDE_CONFIG_DIR: "/Users/operator/.claude-worker",
+            SHARED_TOKEN: "keep-me",
+          },
         }),
       }),
       expect.any(Object),
