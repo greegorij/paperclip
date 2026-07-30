@@ -363,6 +363,7 @@ describe("codex execute — local filesystem sandbox staged CODEX_HOME", () => {
     runChildProcess.mockImplementationOnce(async (...args: unknown[]) => {
       const options = args[3] as {
         env: Record<string, string>;
+        onLogBackpressure?: "pause" | "queue";
         localProcessSandbox?: {
           homeDir?: string | null;
           filesystemWorkspaceAccess?: "ro" | "rw" | null;
@@ -370,6 +371,7 @@ describe("codex execute — local filesystem sandbox staged CODEX_HOME", () => {
         } | null;
       };
       stagedHomePath = options.localProcessSandbox?.homeDir ?? null;
+      expect(options.onLogBackpressure).toBe("queue");
       expect(stagedHomePath).toBeTruthy();
       expect(stagedHomePath).toContain("paperclip-codex-home-sync-");
       expect(options.env.CODEX_HOME).toBe(stagedHomePath);

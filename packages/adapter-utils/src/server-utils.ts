@@ -101,6 +101,8 @@ export function signalRunningProcess(
 
 export const runningProcesses = new Map<string, RunningProcess>();
 export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
+/** Default queued onLog byte budget when `onLogBackpressure` is `"queue"`. */
+export const DEFAULT_MAX_QUEUED_ON_LOG_BYTES = MAX_CAPTURE_BYTES;
 export const MAX_EXCERPT_BYTES = 32 * 1024;
 const TERMINAL_RESULT_SCAN_OVERLAP_CHARS = 64 * 1024;
 const DEFAULT_PAPERCLIP_INSTANCE_ID = "default";
@@ -3143,6 +3145,8 @@ export async function ensureCommandResolvable(
   throw new Error(`Command not found in PATH: "${command}"`);
 }
 
+export type ChildProcessOnLogBackpressure = "pause" | "queue";
+
 export async function runChildProcess(
   runId: string,
   command: string,
@@ -3157,11 +3161,25 @@ export async function runChildProcess(
     onSpawn?: (meta: { pid: number; processGroupId: number | null; startedAt: string }) => Promise<void>;
     terminalResultCleanup?: TerminalResultCleanupOptions;
     stdin?: string;
+    /**
+     * How child stdout/stderr interact with async `onLog`.
+     * - `"pause"` (default): pause each stream until its chunk's `onLog` settles.
+     * - `"queue"`: keep draining pipes; order `onLog` via the shared chain; pause
+     *   only when queued log bytes exceed `maxQueuedOnLogBytes`.
+     */
+    onLogBackpressure?: ChildProcessOnLogBackpressure;
+    /** Byte budget for queued `onLog` payloads when `onLogBackpressure` is `"queue"`. */
+    maxQueuedOnLogBytes?: number;
     remoteExecution?: RemoteExecutionSpec | null;
     localProcessSandbox?: LocalProcessSandboxOptions | null;
   },
 ): Promise<RunProcessResult> {
   const onLogError = opts.onLogError ?? ((err, id, msg) => console.warn({ err, runId: id }, msg));
+  const onLogBackpressure = opts.onLogBackpressure === "queue" ? "queue" : "pause";
+  const maxQueuedOnLogBytes = Math.max(
+    1,
+    Math.floor(opts.maxQueuedOnLogBytes ?? DEFAULT_MAX_QUEUED_ON_LOG_BYTES),
+  );
   return new Promise<RunProcessResult>((resolve, reject) => {
     const rawMerged: NodeJS.ProcessEnv = {
       ...sanitizeInheritedPaperclipEnv(process.env),
@@ -3220,6 +3238,9 @@ export async function runChildProcess(
         let stdout = "";
         let stderr = "";
         let logChain: Promise<void> = Promise.resolve();
+        let queuedOnLogBytes = 0;
+        let streamsPausedForOnLogBacklog = false;
+        let childExited = false;
         let terminalResultSeen = false;
         let terminalCleanupStarted = false;
         let terminalCleanupSignal: NodeJS.Signals | null = null;
@@ -3234,6 +3255,54 @@ export async function runChildProcess(
           if (terminalCleanupKillTimer) clearTimeout(terminalCleanupKillTimer);
           terminalCleanupTimer = null;
           terminalCleanupKillTimer = null;
+        };
+
+        const pauseStreamsForOnLogBacklog = () => {
+          // After exit, remaining buffered stdio must drain or `close` can stall.
+          if (childExited || streamsPausedForOnLogBacklog) return;
+          streamsPausedForOnLogBacklog = true;
+          child.stdout?.pause();
+          child.stderr?.pause();
+        };
+
+        const resumeStreamsAfterOnLogBacklog = () => {
+          if (!streamsPausedForOnLogBacklog) return;
+          streamsPausedForOnLogBacklog = false;
+          resumeReadable(child.stdout);
+          resumeReadable(child.stderr);
+        };
+
+        const enqueueOnLog = (stream: "stdout" | "stderr", text: string) => {
+          const bytes = Buffer.byteLength(text, "utf8");
+          queuedOnLogBytes += bytes;
+          if (
+            onLogBackpressure === "queue" &&
+            !childExited &&
+            queuedOnLogBytes > maxQueuedOnLogBytes
+          ) {
+            pauseStreamsForOnLogBacklog();
+          }
+          logChain = logChain
+            .then(() => opts.onLog(stream, text))
+            .catch((err) =>
+              onLogError(err, runId, `failed to append ${stream} log chunk`),
+            )
+            .finally(() => {
+              queuedOnLogBytes = Math.max(0, queuedOnLogBytes - bytes);
+              maybeArmTerminalResultCleanup();
+              if (onLogBackpressure === "queue") {
+                // Hysteresis: resume once the queue is at or below half the budget.
+                // Always resume after the child exits so any deferred stdio can finish.
+                if (
+                  childExited ||
+                  queuedOnLogBytes <= Math.floor(maxQueuedOnLogBytes / 2)
+                ) {
+                  resumeStreamsAfterOnLogBacklog();
+                }
+              } else {
+                resumeReadable(stream === "stdout" ? child.stdout : child.stderr);
+              }
+            });
         };
 
         const maybeArmTerminalResultCleanup = () => {
@@ -3289,33 +3358,21 @@ export async function runChildProcess(
         child.stdout?.on("data", (chunk: unknown) => {
           const readable = child.stdout;
           if (!readable) return;
-          readable.pause();
+          if (onLogBackpressure === "pause") readable.pause();
           const text = String(chunk);
           stdout = appendWithCap(stdout, text);
           maybeArmTerminalResultCleanup();
-          logChain = logChain
-            .then(() => opts.onLog("stdout", text))
-            .catch((err) => onLogError(err, runId, "failed to append stdout log chunk"))
-            .finally(() => {
-              maybeArmTerminalResultCleanup();
-              resumeReadable(readable);
-            });
+          enqueueOnLog("stdout", text);
         });
 
         child.stderr?.on("data", (chunk: unknown) => {
           const readable = child.stderr;
           if (!readable) return;
-          readable.pause();
+          if (onLogBackpressure === "pause") readable.pause();
           const text = String(chunk);
           stderr = appendWithCap(stderr, text);
           maybeArmTerminalResultCleanup();
-          logChain = logChain
-            .then(() => opts.onLog("stderr", text))
-            .catch((err) => onLogError(err, runId, "failed to append stderr log chunk"))
-            .finally(() => {
-              maybeArmTerminalResultCleanup();
-              resumeReadable(readable);
-            });
+          enqueueOnLog("stderr", text);
         });
 
         const stdin = child.stdin;
@@ -3342,6 +3399,10 @@ export async function runChildProcess(
         });
 
         child.on("exit", () => {
+          childExited = true;
+          if (onLogBackpressure === "queue") {
+            resumeStreamsAfterOnLogBacklog();
+          }
           maybeArmTerminalResultCleanup();
         });
 

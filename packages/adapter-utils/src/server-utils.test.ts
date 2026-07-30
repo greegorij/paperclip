@@ -706,6 +706,164 @@ describe("runChildProcess", () => {
       }
     }
   });
+
+  it.skipIf(process.platform === "win32")(
+    "queue backpressure drains pipe-buffer-sized chunks while onLog is held and preserves order",
+    async () => {
+      const chunkBytes = 64 * 1024;
+      const chunkCount = 4;
+      const logs: Array<{ stream: "stdout" | "stderr"; chunk: string }> = [];
+      let releaseLogs!: () => void;
+      const logsGate = new Promise<void>((resolve) => {
+        releaseLogs = resolve;
+      });
+      let resolveFirstLog!: () => void;
+      const firstLogStarted = new Promise<void>((resolve) => {
+        resolveFirstLog = resolve;
+      });
+      let childPid: number | null = null;
+      let onLogInFlight = 0;
+      let maxOnLogInFlight = 0;
+
+      const script = [
+        `const chunkBytes = ${chunkBytes};`,
+        `const chunkCount = ${chunkCount};`,
+        "const pad = (label, fill) => label + Buffer.alloc(chunkBytes - label.length, fill).toString('utf8');",
+        "const writeSeq = (i) => new Promise((resolve, reject) => {",
+        "  process.stdout.write(pad(`OUT${i}:`, 0x61), (err) => {",
+        "    if (err) return reject(err);",
+        "    process.stderr.write(pad(`ERR${i}:`, 0x62), (err2) => (err2 ? reject(err2) : resolve()));",
+        "  });",
+        "});",
+        "(async () => {",
+        "  for (let i = 0; i < chunkCount; i += 1) await writeSeq(i);",
+        "  process.exit(0);",
+        "})().catch((err) => { console.error(err); process.exit(1); });",
+      ].join("\n");
+
+      const resultPromise = runChildProcess(randomUUID(), process.execPath, ["-e", script], {
+        cwd: process.cwd(),
+        env: {},
+        timeoutSec: 15,
+        graceSec: 1,
+        onLogBackpressure: "queue",
+        maxQueuedOnLogBytes: 16 * 1024 * 1024,
+        onSpawn: async ({ pid }) => {
+          childPid = pid;
+        },
+        onLog: async (stream, chunk) => {
+          onLogInFlight += 1;
+          maxOnLogInFlight = Math.max(maxOnLogInFlight, onLogInFlight);
+          logs.push({ stream, chunk });
+          resolveFirstLog();
+          try {
+            await logsGate;
+          } finally {
+            onLogInFlight -= 1;
+          }
+        },
+      });
+
+      await firstLogStarted;
+      expect(childPid).not.toBeNull();
+
+      // Child must finish writing even though durable onLog is still blocked.
+      expect(await waitForPidExit(childPid!, 5_000)).toBe(true);
+
+      releaseLogs();
+      const result = await resultPromise;
+
+      expect(result.exitCode).toBe(0);
+      expect(result.timedOut).toBe(false);
+      expect(Buffer.byteLength(result.stdout, "utf8")).toBe(chunkCount * chunkBytes);
+      expect(Buffer.byteLength(result.stderr, "utf8")).toBe(chunkCount * chunkBytes);
+      // Shared logChain must serialize onLog; overlapping calls would race persistence order.
+      expect(maxOnLogInFlight).toBe(1);
+
+      let stdoutFromLogs = "";
+      let stderrFromLogs = "";
+      for (const entry of logs) {
+        if (entry.stream === "stdout") stdoutFromLogs += entry.chunk;
+        else stderrFromLogs += entry.chunk;
+      }
+      // Exact reconstruction from ordered onLog payloads (cross-pipe interleaving is not guaranteed).
+      expect(stdoutFromLogs).toBe(result.stdout);
+      expect(stderrFromLogs).toBe(result.stderr);
+      const stdoutLabels = [...stdoutFromLogs.matchAll(/OUT(\d+):/g)].map((m) => Number(m[1]));
+      const stderrLabels = [...stderrFromLogs.matchAll(/ERR(\d+):/g)].map((m) => Number(m[1]));
+      expect(stdoutLabels).toEqual(Array.from({ length: chunkCount }, (_, i) => i));
+      expect(stderrLabels).toEqual(Array.from({ length: chunkCount }, (_, i) => i));
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "queue backpressure pauses streams once the queued onLog byte budget is exceeded",
+    async () => {
+      const chunkBytes = 64 * 1024;
+      const chunkCount = 8;
+      // Budget fits roughly one chunk; later writes must block until onLog drains.
+      const maxQueuedOnLogBytes = chunkBytes + 1024;
+      let releaseLogs!: () => void;
+      const logsGate = new Promise<void>((resolve) => {
+        releaseLogs = resolve;
+      });
+      let resolveFirstLog!: () => void;
+      const firstLogStarted = new Promise<void>((resolve) => {
+        resolveFirstLog = resolve;
+      });
+      let childPid: number | null = null;
+      let logCalls = 0;
+
+      const script = [
+        `const chunkBytes = ${chunkBytes};`,
+        `const chunkCount = ${chunkCount};`,
+        "const payload = Buffer.alloc(chunkBytes, 0x63);",
+        "(async () => {",
+        "  for (let i = 0; i < chunkCount; i += 1) {",
+        "    await new Promise((resolve, reject) => {",
+        "      process.stdout.write(payload, (err) => (err ? reject(err) : resolve()));",
+        "    });",
+        "  }",
+        "  process.exit(0);",
+        "})().catch((err) => { console.error(err); process.exit(1); });",
+      ].join("\n");
+
+      const resultPromise = runChildProcess(randomUUID(), process.execPath, ["-e", script], {
+        cwd: process.cwd(),
+        env: {},
+        timeoutSec: 15,
+        graceSec: 1,
+        onLogBackpressure: "queue",
+        maxQueuedOnLogBytes,
+        onSpawn: async ({ pid }) => {
+          childPid = pid;
+        },
+        onLog: async () => {
+          logCalls += 1;
+          resolveFirstLog();
+          await logsGate;
+        },
+      });
+
+      await firstLogStarted;
+      expect(childPid).not.toBeNull();
+
+      // With a tight queue budget, the child should still be alive (blocked on write)
+      // while onLog remains unresolved — proving the bound applies backpressure.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(isPidAlive(childPid!)).toBe(true);
+      expect(logCalls).toBeGreaterThanOrEqual(1);
+      expect(logCalls).toBeLessThan(chunkCount);
+
+      releaseLogs();
+      const result = await resultPromise;
+
+      expect(result.exitCode).toBe(0);
+      expect(result.timedOut).toBe(false);
+      expect(logCalls).toBeGreaterThanOrEqual(2);
+      expect(Buffer.byteLength(result.stdout, "utf8")).toBe(chunkBytes * chunkCount);
+    },
+  );
 });
 
 describe("renderPaperclipWakePrompt", () => {

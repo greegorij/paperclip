@@ -1170,6 +1170,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           graceSec,
           onSpawn: wrappedOnSpawn,
           onRuntimeProgress: ctx.onRuntimeProgress,
+          // Codex treats EAGAIN on a full stdout pipe as a fatal harness crash
+          // (os error 11). Drain pipes continuously and only apply backpressure
+          // when the queued onLog budget is exceeded.
+          onLogBackpressure: "queue",
           onLog: async (stream, chunk) => {
             monitor?.noteOutputChunk(stream, chunk);
             if (stream === "stdout") {

@@ -133,6 +133,12 @@ export interface AdapterExecutionTargetProcessOptions {
    */
   runLogTail?: SandboxRunLogTailFactory | null;
   localProcessSandbox?: LocalProcessSandboxOptions | null;
+  /**
+   * Local child-process only. `"queue"` drains stdout/stderr independently of
+   * async `onLog` latency (used by codex-local to avoid EAGAIN harness crashes).
+   */
+  onLogBackpressure?: "pause" | "queue";
+  maxQueuedOnLogBytes?: number;
 }
 
 export interface AdapterExecutionTargetShellOptions {
@@ -608,6 +614,8 @@ export async function runAdapterExecutionTargetProcess(
     onLog: options.onLog,
     onSpawn: options.onSpawn,
     terminalResultCleanup: options.terminalResultCleanup,
+    onLogBackpressure: options.onLogBackpressure,
+    maxQueuedOnLogBytes: options.maxQueuedOnLogBytes,
     localProcessSandbox: target?.kind === "local" || !target ? options.localProcessSandbox : null,
     remoteExecution: adapterExecutionTargetToRemoteSpec(target),
   });
