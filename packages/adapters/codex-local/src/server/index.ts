@@ -31,10 +31,13 @@ export {
   fetchCodexQuota,
   fetchCodexRpcQuota,
   mapCodexRpcQuota,
+  minutesToWindowLabel,
   secondsToWindowLabel,
+  toCodexAuthProbeDiagnostics,
   fetchWithTimeout,
   codexHomeDir,
 } from "./quota.js";
+export type { CodexAuthProbeDiagnostics } from "./quota.js";
 import type { AdapterSessionCodec } from "@paperclipai/adapter-utils";
 import { sessionCodec as acpxSessionCodec } from "@paperclipai/adapter-utils/acpx-engine/session-codec";
 

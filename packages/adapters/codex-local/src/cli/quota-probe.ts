@@ -7,6 +7,7 @@ import {
   readCodexAuthInfo,
   readCodexQuotaErrorFamily,
   readCodexToken,
+  toCodexAuthProbeDiagnostics,
 } from "../server/quota.js";
 
 interface ProbeArgs {
@@ -39,11 +40,12 @@ async function main() {
   }
 
   const auth = await readCodexAuthInfo();
+  const authDiagnostics = toCodexAuthProbeDiagnostics(auth);
   const token = await readCodexToken();
 
   const result: Record<string, unknown> = {
     timestamp: new Date().toISOString(),
-    auth,
+    auth: authDiagnostics,
     tokenAvailable: token != null,
   };
 
@@ -108,7 +110,7 @@ async function main() {
     console.log(JSON.stringify({ ok, ...result }, null, 2));
   } else {
     console.log(`timestamp: ${result.timestamp}`);
-    console.log(`auth: ${JSON.stringify(auth)}`);
+    console.log(`auth: ${JSON.stringify(authDiagnostics)}`);
     console.log(`tokenAvailable: ${token != null}`);
     if (result.rpc) console.log(`rpc: ${JSON.stringify(result.rpc, null, 2)}`);
     if (result.wham) console.log(`wham: ${JSON.stringify(result.wham, null, 2)}`);

@@ -218,6 +218,57 @@ export function secondsToWindowLabel(
   return `${Math.round(hours / 24)}d`;
 }
 
+/**
+ * Map a Codex RPC window duration in minutes to a quota row label.
+ * 300 → "5h limit", 10080 → "Weekly limit"; other values stay truthful/deterministic.
+ */
+export function minutesToWindowLabel(
+  minutes: number | null | undefined,
+  fallback: string,
+): string {
+  if (minutes == null || !Number.isFinite(minutes) || minutes <= 0) return fallback;
+  const wholeMinutes = Math.round(minutes);
+  if (wholeMinutes === 10_080) return "Weekly limit";
+
+  const minutesPerDay = 24 * 60;
+  if (wholeMinutes % minutesPerDay === 0) {
+    const days = wholeMinutes / minutesPerDay;
+    return days === 7 ? "Weekly limit" : `${days}d limit`;
+  }
+  if (wholeMinutes % 60 === 0) {
+    return `${wholeMinutes / 60}h limit`;
+  }
+  return `${wholeMinutes}m limit`;
+}
+
+/** Non-secret auth metadata for quota-probe JSON/text diagnostics. */
+export interface CodexAuthProbeDiagnostics {
+  present: true;
+  hasAccessToken: boolean;
+  hasRefreshToken: boolean;
+  hasIdToken: boolean;
+  hasAccountId: boolean;
+  email: string | null;
+  planType: string | null;
+  lastRefresh: string | null;
+}
+
+export function toCodexAuthProbeDiagnostics(
+  auth: CodexAuthInfo | null,
+): CodexAuthProbeDiagnostics | null {
+  if (!auth) return null;
+  return {
+    present: true,
+    hasAccessToken: auth.accessToken.length > 0,
+    hasRefreshToken: auth.refreshToken != null,
+    hasIdToken: auth.idToken != null,
+    hasAccountId: auth.accountId != null,
+    email: auth.email,
+    planType: auth.planType,
+    lastRefresh: auth.lastRefresh,
+  };
+}
+
 /** fetch with an abort-based timeout so a hanging provider api doesn't block the response indefinitely */
 export async function fetchWithTimeout(
   url: string,
@@ -433,11 +484,22 @@ export function mapCodexRpcQuota(result: CodexRpcRateLimitsResult, account?: Cod
       limitId === "codex"
         ? ""
         : `${limit.limitName ?? limitId} · `;
-    const primary = buildCodexRpcWindow(`${prefix}5h limit`, limit.primary);
+    const primary = buildCodexRpcWindow(
+      `${prefix}${minutesToWindowLabel(limit.primary?.windowDurationMins, "5h limit")}`,
+      limit.primary,
+    );
     if (primary) windows.push(primary);
-    const secondary = buildCodexRpcWindow(`${prefix}Weekly limit`, limit.secondary);
+    const secondary = buildCodexRpcWindow(
+      `${prefix}${minutesToWindowLabel(limit.secondary?.windowDurationMins, "Weekly limit")}`,
+      limit.secondary,
+    );
     if (secondary) windows.push(secondary);
-    if (limitId === "codex" && limit.credits && limit.credits.unlimited !== true) {
+    if (
+      limitId === "codex"
+      && limit.credits
+      && limit.credits.hasCredits !== false
+      && limit.credits.unlimited !== true
+    ) {
       windows.push({
         label: "Credits",
         usedPercent: null,

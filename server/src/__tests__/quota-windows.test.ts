@@ -798,6 +798,7 @@ describe("mapCodexRpcQuota", () => {
       rateLimits: {
         limitId: "codex",
         credits: {
+          hasCredits: true,
           unlimited: false,
           balance: "12.34",
         },
