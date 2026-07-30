@@ -2,9 +2,19 @@
 
 > Historia **naszej warstwy** nad `paperclipai/paperclip`. Upstream ma własne wersjonowanie kalendarzowe (`YYYY.MDD.P`) i publikuje do npm — my **nie publikujemy**, hostujemy własną instancję na VPS. Ten plik dokumentuje wyłącznie to, co dokładamy ponad upstream, oraz nasze cutovery.
 >
-> Format: [Keep a Changelog](https://keepachangelog.com/pl/). Tagi: `fork-vX.Y.Z` na `greegorij/paperclip-legacy`, **nigdy pushowane do upstreamu**.
+> Format: [Keep a Changelog](https://keepachangelog.com/pl/). Tagi `fork-vX.Y.Z` są przeznaczone wyłącznie dla prywatnego repozytorium forka.
 
 ## [Unreleased]
+
+## [0.2.9] — 2026-07-30
+
+### Dodane / Wzmocnione
+- **Pełna migawka floty:** snapshot pobiera kompletny rekord każdego z 29 agentów i zachowuje z `runtimeConfig` heartbeat równoległość, stan włączenia, budzenie na żądanie oraz limity dzienne; szczegóły z żywej konfiguracji są źródłem prawdy, a błąd odczytu GET zatrzymuje tworzenie migawki. Naprawę śledzi i zamyka bilet `T-202607-002`.
+- **Zarządzane profile OpenAI (fail-closed):** Recenzent, Zwiadowca Kodu i awaryjny Mięsień Kodu Codex mają utrwalony dokładny model, wysiłek rozumowania, tryb przestrzeni roboczej (RO/RW), sieć, argumenty, brak omijania zabezpieczeń, jedną równoległą pracę i limity dzienne; pełne zastosowanie floty nadal nie przełącza automatycznie adapterów ani tych pól.
+- **Profile wykonawcze:** Zwiadowca Kodu → gpt-5.6-terra medium, przestrzeń robocza tylko do odczytu, maksymalnie 3 uruchomienia dziennie; awaryjny Mięsień Kodu Codex → gpt-5.6-sol high, przestrzeń robocza do zapisu, maksymalnie 1 uruchomienie dziennie; Cursor pozostaje domyślnym wykonawcą.
+
+### Zweryfikowane
+- **Produkcyjny pilot Zwiadowcy Kodu:** jeden przebieg, właściwy plik docelowy, zero zmian, podzadań i nieoczekiwanych zadań, czysty workspace, agent wrócił w stanie wstrzymanym.
 
 ## [0.2.8] — 2026-07-30
 
