@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+## [0.2.15] — 2026-07-31
+
+### Naprawione / Wzmocnione
+- **Kontekst zadania po widocznym identyfikatorze:** zarządzane narzędzie `paperclip-self:get_issue_context` przyjmuje teraz zarówno wewnętrzny UUID, jak i widoczny identyfikator zadania bez rozróżniania wielkości liter, zawsze w granicach uwierzytelnionej firmy; niepoprawny identyfikator nie trafia już do porównania z kolumną UUID i nie powoduje HTTP 500. Kontrakt oraz pięć regresji obejmują też domyślne zadanie sesji, brak wyniku i izolację między firmami. Naprawę śledzi bilet `T-202607-008`.
+
 ## [0.2.14] — 2026-07-30
 
 ### Naprawione / Wzmocnione
