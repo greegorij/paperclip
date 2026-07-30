@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.2.10] — 2026-07-30
+
 ### Dodane / Wzmocnione
 - **Bezpieczny przełącznik profili dostawcy dla floty Jarvis:** nowe `fleet-config profile-switch` (preview/apply/rollback) dla dokładnie 22 ról Anthropic (`20` przenośnych + `summarizer` + `reflection-coach`) z deklaratywnymi profilami `openai-first`/`anthropic-first`, twardą walidacją mapowań, bramą kopii DB, wymogiem świeżej migawki i zerowych aktywnych przebiegów, pełnym `replaceAdapterConfig: true` z zachowaniem wyłącznie pól instrukcji/skill-sync, weryfikacją PATCH→GET oraz automatycznym rollbackiem w odwrotnej kolejności przy pierwszej awarii; backup rollbacku jest prywatny (`0600`) i zachowuje dokładny stan (w tym `secret_ref`) wyłącznie do odtworzenia, podczas gdy raporty/migawki pozostają zredagowane; profile utrwalają limity anty-loop (`maxConcurrentRuns`, heartbeat/wake, `maxDailyRuns`), a `openai-first` wymaga aktualnego źródła instrukcji bossa oraz zgodności wygenerowanego i wersjonowanego artefaktu `AGENTS-CODEX.md`.
 
