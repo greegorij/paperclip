@@ -6,6 +6,12 @@
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-07-30
+
+### Wzmocnione
+- **Trwałe zatrzymanie jałowych ponowień zadania:** po 3 kolejnych zakończonych przebiegach bez widocznego postępu platforma przestaje automatycznie ponawiać to samo zadanie; po 2 takim przebiegu nadal działa chłodzenie, a odblokowanie następuje wyłącznie po nowym wkładzie człowieka lub jawnym wznowieniu.
+- **Transakcyjne limity tworzenia zadań przez agentów:** maksymalnie 6 nowych zadań na przebieg, 12 na agenta w 30 minut, 4 korzenie w 30 minut, głębokość drzewa do 4 i do 12 potomków na korzeń; dodatkowo deduplikacja tytułu, odporność na wyścigi, brak tych limitów dla ludzi oraz prywatny wyjątek wyłącznie dla zatwierdzonego rozkładu planu.
+
 ## [0.2.1] — 2026-07-30
 
 ### Naprawione
