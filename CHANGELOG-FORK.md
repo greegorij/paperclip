@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+## [0.2.13] — 2026-07-30
+
+### Naprawione / Wzmocnione
+- **Bezpieczny pilot floty OpenAI-first:** zarządzane połączenia Codexa używają obsługiwanego pola nagłówków uwierzytelnienia, a bezpośrednie wpisy o tych samych nazwach są usuwane z prywatnego profilu wykonawczego; Codex-Jarvis czyta Boot Manifest przez zarządzane narzędzie vault zamiast niedostępnej ścieżki dyskowej; przerwanie połączenia w izolowanym wykonaniu nie może już wywrócić całej usługi błędem `EPIPE`. Naprawy śledzą bilety `T-202607-005` i `T-202607-006`.
+
 ## [0.2.12] — 2026-07-30
 
 ### Naprawione / Wzmocnione
