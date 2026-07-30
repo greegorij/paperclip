@@ -119,8 +119,14 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
 
   async function runTeardown(input: {
     sandboxAuth: string;
-    hostAuth: string;
-  }): Promise<{ finalHostAuth: string; finalHostMode: number }> {
+    sharedHostAuth: string;
+    externalOverrideAuth?: string;
+  }): Promise<{
+    finalSharedHostAuth: string;
+    finalSharedHostMode: number;
+    finalConfiguredHomeAuth: string;
+    finalConfiguredHomeMode: number;
+  }> {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-e2e-"));
     cleanupDirs.push(rootDir);
     const workspaceDir = path.join(rootDir, "workspace");
@@ -130,8 +136,14 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     const sharedHostHome = path.join(rootDir, "shared-codex-home");
     await mkdir(workspaceDir, { recursive: true });
     await mkdir(sharedHostHome, { recursive: true });
-    const hostAuthPath = path.join(sharedHostHome, "auth.json");
-    await writeFile(hostAuthPath, input.hostAuth, { mode: 0o600 });
+    const sharedHostAuthPath = path.join(sharedHostHome, "auth.json");
+    await writeFile(sharedHostAuthPath, input.sharedHostAuth, { mode: 0o600 });
+    const configuredCodexHome =
+      input.externalOverrideAuth == null ? sharedHostHome : path.join(rootDir, "external-codex-home");
+    if (input.externalOverrideAuth != null) {
+      await mkdir(configuredCodexHome, { recursive: true });
+      await writeFile(path.join(configuredCodexHome, "auth.json"), input.externalOverrideAuth, { mode: 0o600 });
+    }
 
     savedCodexHomeEnv = process.env.CODEX_HOME;
     process.env.CODEX_HOME = sharedHostHome;
@@ -151,8 +163,8 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
         command: "codex",
         engine: "cli",
         // External CODEX_HOME (outside the managed company tree) so no managed
-        // seeding rewrites auth.json before teardown; equals the shared host home.
-        env: { CODEX_HOME: sharedHostHome },
+        // seeding rewrites auth.json before teardown.
+        env: { CODEX_HOME: configuredCodexHome },
       },
       context: {
         paperclipWorkspace: {
@@ -176,15 +188,17 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     });
 
     return {
-      finalHostAuth: await readFile(hostAuthPath, "utf8"),
-      finalHostMode: (await lstat(hostAuthPath)).mode & 0o777,
+      finalSharedHostAuth: await readFile(sharedHostAuthPath, "utf8"),
+      finalSharedHostMode: (await lstat(sharedHostAuthPath)).mode & 0o777,
+      finalConfiguredHomeAuth: await readFile(path.join(configuredCodexHome, "auth.json"), "utf8"),
+      finalConfiguredHomeMode: (await lstat(path.join(configuredCodexHome, "auth.json"))).mode & 0o777,
     };
   }
 
   it("declares a Codex `home` asset carrying both inbound provision and outbound restore contributions", async () => {
     await runTeardown({
       sandboxAuth: subscriptionAuth({ accountId: "acct", lastRefresh: "2026-07-09T01:00:00Z", marker: "s" }),
-      hostAuth: subscriptionAuth({ accountId: "acct", lastRefresh: "2026-07-09T02:00:00Z", marker: "h" }),
+      sharedHostAuth: subscriptionAuth({ accountId: "acct", lastRefresh: "2026-07-09T02:00:00Z", marker: "h" }),
     });
 
     const homeAsset = captured.assets.find((asset) => asset.key === "home");
@@ -199,16 +213,18 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
       lastRefresh: "2026-07-09T02:00:00Z",
       marker: "sandbox-newer",
     });
-    const hostAuth = subscriptionAuth({
+    const sharedHostAuth = subscriptionAuth({
       accountId: "acct-same",
       lastRefresh: "2026-07-09T01:00:00Z",
       marker: "host-older",
     });
 
-    const result = await runTeardown({ sandboxAuth, hostAuth });
+    const result = await runTeardown({ sandboxAuth, sharedHostAuth });
 
-    expect(result.finalHostAuth).toBe(sandboxAuth);
-    expect(result.finalHostMode).toBe(0o600);
+    expect(result.finalConfiguredHomeAuth).toBe(sandboxAuth);
+    expect(result.finalConfiguredHomeMode).toBe(0o600);
+    expect(result.finalSharedHostAuth).toBe(sandboxAuth);
+    expect(result.finalSharedHostMode).toBe(0o600);
   });
 
   it("keeps the host auth.json when the sandbox copy is a tie or older on teardown", async () => {
@@ -216,19 +232,253 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
       {
         name: "tie",
         sandboxAuth: subscriptionAuth({ accountId: "acct-same", lastRefresh: "2026-07-09T02:00:00Z", marker: "s-tie" }),
-        hostAuth: subscriptionAuth({ accountId: "acct-same", lastRefresh: "2026-07-09T02:00:00Z", marker: "h-tie" }),
+        sharedHostAuth: subscriptionAuth({ accountId: "acct-same", lastRefresh: "2026-07-09T02:00:00Z", marker: "h-tie" }),
       },
       {
         name: "older",
         sandboxAuth: subscriptionAuth({ accountId: "acct-same", lastRefresh: "2026-07-09T01:00:00Z", marker: "s-old" }),
-        hostAuth: subscriptionAuth({ accountId: "acct-same", lastRefresh: "2026-07-09T02:00:00Z", marker: "h-new" }),
+        sharedHostAuth: subscriptionAuth({ accountId: "acct-same", lastRefresh: "2026-07-09T02:00:00Z", marker: "h-new" }),
       },
     ];
 
     for (const entry of cases) {
-      const result = await runTeardown({ sandboxAuth: entry.sandboxAuth, hostAuth: entry.hostAuth });
-      expect(result.finalHostAuth, entry.name).toBe(entry.hostAuth);
-      expect(result.finalHostMode, entry.name).toBe(0o600);
+      const result = await runTeardown({ sandboxAuth: entry.sandboxAuth, sharedHostAuth: entry.sharedHostAuth });
+      expect(result.finalConfiguredHomeAuth, entry.name).toBe(entry.sharedHostAuth);
+      expect(result.finalConfiguredHomeMode, entry.name).toBe(0o600);
+      expect(result.finalSharedHostAuth, entry.name).toBe(entry.sharedHostAuth);
+      expect(result.finalSharedHostMode, entry.name).toBe(0o600);
     }
+  });
+
+  it("for external CODEX_HOME override copies back into override home and leaves shared host auth unchanged", async () => {
+    const sandboxAuth = subscriptionAuth({
+      accountId: "acct-external",
+      lastRefresh: "2026-07-10T03:00:00Z",
+      marker: "sandbox-newer",
+    });
+    const sharedHostAuth = subscriptionAuth({
+      accountId: "acct-shared",
+      lastRefresh: "2026-07-10T02:30:00Z",
+      marker: "shared-should-stay",
+    });
+    const externalOverrideAuth = subscriptionAuth({
+      accountId: "acct-external",
+      lastRefresh: "2026-07-10T02:00:00Z",
+      marker: "external-older",
+    });
+
+    const result = await runTeardown({
+      sandboxAuth,
+      sharedHostAuth,
+      externalOverrideAuth,
+    });
+
+    expect(result.finalConfiguredHomeAuth).toBe(sandboxAuth);
+    expect(result.finalConfiguredHomeMode).toBe(0o600);
+    expect(result.finalSharedHostAuth).toBe(sharedHostAuth);
+    expect(result.finalSharedHostMode).toBe(0o600);
+  });
+});
+
+describe("codex execute — local filesystem sandbox staged CODEX_HOME", () => {
+  const cleanupDirs: string[] = [];
+  let savedCodexHomeEnv: string | undefined;
+  let savedPaperclipHomeEnv: string | undefined;
+  let savedPaperclipInstanceIdEnv: string | undefined;
+
+  afterEach(async () => {
+    vi.clearAllMocks();
+    if (savedCodexHomeEnv === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = savedCodexHomeEnv;
+    if (savedPaperclipHomeEnv === undefined) delete process.env.PAPERCLIP_HOME;
+    else process.env.PAPERCLIP_HOME = savedPaperclipHomeEnv;
+    if (savedPaperclipInstanceIdEnv === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+    else process.env.PAPERCLIP_INSTANCE_ID = savedPaperclipInstanceIdEnv;
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (!dir) continue;
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  function subscriptionAuth(input: { accountId: string; lastRefresh: string; marker: string }): string {
+    return JSON.stringify(
+      {
+        tokens: {
+          id_token: `id-token-${input.marker}`,
+          access_token: `access-token-${input.marker}`,
+          refresh_token: `refresh-token-${input.marker}`,
+          account_id: input.accountId,
+        },
+        last_refresh: input.lastRefresh,
+      },
+      null,
+      2,
+    );
+  }
+
+  async function setupLocalSandboxFixture(input: { hostAuth: string }) {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-local-bwrap-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const sharedHostHome = path.join(rootDir, "shared-codex-home");
+    const paperclipHome = path.join(rootDir, "paperclip-home");
+    const managedCodexHome = path.join(
+      paperclipHome,
+      "instances",
+      "default",
+      "companies",
+      "company-1",
+      "codex-home",
+    );
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(sharedHostHome, { recursive: true });
+    const hostAuthPath = path.join(sharedHostHome, "auth.json");
+    await writeFile(hostAuthPath, input.hostAuth, { mode: 0o600 });
+
+    savedCodexHomeEnv = process.env.CODEX_HOME;
+    savedPaperclipHomeEnv = process.env.PAPERCLIP_HOME;
+    savedPaperclipInstanceIdEnv = process.env.PAPERCLIP_INSTANCE_ID;
+    process.env.CODEX_HOME = sharedHostHome;
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    process.env.PAPERCLIP_INSTANCE_ID = "default";
+
+    return { workspaceDir, sharedHostHome, managedCodexHome, hostAuthPath };
+  }
+
+  it("stages a dereferenced auth.json for local bubblewrap and never mounts the shared host home", async () => {
+    const hostAuth = subscriptionAuth({
+      accountId: "acct-same",
+      lastRefresh: "2026-07-30T10:00:00Z",
+      marker: "host-old",
+    });
+    const sandboxNewerAuth = subscriptionAuth({
+      accountId: "acct-same",
+      lastRefresh: "2026-07-30T10:05:00Z",
+      marker: "sandbox-new",
+    });
+    const fixture = await setupLocalSandboxFixture({ hostAuth });
+    let stagedHomePath: string | null = null;
+
+    runChildProcess.mockImplementationOnce(async (...args: unknown[]) => {
+      const options = args[3] as {
+        env: Record<string, string>;
+        localProcessSandbox?: {
+          homeDir?: string | null;
+          managedPaths?: Array<{ path: string; access: "ro" | "rw" }>;
+        } | null;
+      };
+      stagedHomePath = options.localProcessSandbox?.homeDir ?? null;
+      expect(stagedHomePath).toBeTruthy();
+      expect(stagedHomePath).toContain("paperclip-codex-home-sync-");
+      expect(options.env.CODEX_HOME).toBe(stagedHomePath);
+      const managedPaths = options.localProcessSandbox?.managedPaths ?? [];
+      expect(managedPaths).toEqual([{ path: stagedHomePath as string, access: "rw" }]);
+      expect(managedPaths.some((entry) => entry.path === fixture.sharedHostHome)).toBe(false);
+      expect(managedPaths.some((entry) => entry.path === fixture.managedCodexHome)).toBe(false);
+      const stagedAuthPath = path.join(stagedHomePath as string, "auth.json");
+      const stagedAuthStat = await lstat(stagedAuthPath);
+      expect(stagedAuthStat.isSymbolicLink()).toBe(false);
+      expect(await readFile(stagedAuthPath, "utf8")).toBe(hostAuth);
+      await writeFile(stagedAuthPath, sandboxNewerAuth, { mode: 0o600 });
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        pid: 321,
+        startedAt: new Date().toISOString(),
+      };
+    });
+
+    await execute({
+      runId: "run-local-bwrap-stage",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexCoder",
+        adapterType: "codex_local",
+        adapterConfig: {},
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        command: "codex",
+        cwd: fixture.workspaceDir,
+        filesystemScope: "workspace",
+        env: { CODEX_HOME: fixture.managedCodexHome },
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: fixture.workspaceDir,
+          source: "project_primary",
+        },
+      },
+      onLog: async () => {},
+    });
+
+    expect(await readFile(fixture.hostAuthPath, "utf8")).toBe(sandboxNewerAuth);
+    expect(stagedHomePath).toBeTruthy();
+    if (!stagedHomePath) throw new Error("Expected staged CODEX_HOME path to be captured.");
+    await expect(lstat(stagedHomePath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("copies back before cleanup and still removes staged home when the local sandbox run errors", async () => {
+    const hostAuth = subscriptionAuth({
+      accountId: "acct-same",
+      lastRefresh: "2026-07-30T10:00:00Z",
+      marker: "host-old",
+    });
+    const sandboxNewerAuth = subscriptionAuth({
+      accountId: "acct-same",
+      lastRefresh: "2026-07-30T10:06:00Z",
+      marker: "sandbox-newer-on-error",
+    });
+    const fixture = await setupLocalSandboxFixture({ hostAuth });
+    let stagedHomePath: string | null = null;
+
+    runChildProcess.mockImplementationOnce(async (...args: unknown[]) => {
+      const options = args[3] as {
+        localProcessSandbox?: {
+          homeDir?: string | null;
+        } | null;
+      };
+      stagedHomePath = options.localProcessSandbox?.homeDir ?? null;
+      if (!stagedHomePath) throw new Error("Expected staged CODEX_HOME path before write.");
+      await writeFile(path.join(stagedHomePath, "auth.json"), sandboxNewerAuth, { mode: 0o600 });
+      throw new Error("local sandbox spawn failed");
+    });
+
+    await expect(
+      execute({
+        runId: "run-local-bwrap-error",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "CodexCoder",
+          adapterType: "codex_local",
+          adapterConfig: {},
+        },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          command: "codex",
+          cwd: fixture.workspaceDir,
+          filesystemScope: "workspace",
+          env: { CODEX_HOME: fixture.managedCodexHome },
+        },
+        context: {
+          paperclipWorkspace: {
+            cwd: fixture.workspaceDir,
+            source: "project_primary",
+          },
+        },
+        onLog: async () => {},
+      }),
+    ).rejects.toThrow("local sandbox spawn failed");
+
+    expect(await readFile(fixture.hostAuthPath, "utf8")).toBe(sandboxNewerAuth);
+    expect(stagedHomePath).toBeTruthy();
+    if (!stagedHomePath) throw new Error("Expected staged CODEX_HOME path to be captured.");
+    await expect(lstat(stagedHomePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

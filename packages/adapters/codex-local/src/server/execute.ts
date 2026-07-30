@@ -540,6 +540,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
   const defaultCodexHome = resolveManagedCodexHomeDir(process.env, agent.companyId);
   const effectiveCodexHome = configuredCodexHome ?? defaultCodexHome;
+  const codexAuthCopyBackHostPath = path.join(
+    configuredCodexHome != null && !configuredHomeIsManaged
+      ? effectiveCodexHome
+      : resolveSharedCodexHomeDir(process.env),
+    "auth.json",
+  );
   await fs.mkdir(effectiveCodexHome, { recursive: true });
 
   // Never launch a managed CODEX_HOME with no credentials. Without auth.json and
@@ -581,6 +587,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // here so the outer `finally` can remove it on every exit path (teardown and
   // error), never only the happy path.
   let stagedCodexHomeDir: string | null = null;
+  let stagedCodexHomePurpose: "remote-runtime" | "local-filesystem-sandbox" | null = null;
   try {
     for (const note of preparedRuntimeConfig.notes) {
       await onLog("stdout", `[paperclip] ${note}\n`);
@@ -643,6 +650,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           // large runtime state (`sessions/`, `*.sqlite`, `plugins/`, …) that the
           // 4-name denylist missed and that a sandbox run never needs.
           stagedCodexHomeDir = await stageCodexHomeForSync(effectiveCodexHome, { runId });
+          const stagedCodexHomeDirForRuntime = stagedCodexHomeDir;
+          stagedCodexHomePurpose = "remote-runtime";
           return await prepareAdapterExecutionTargetRuntime({
             runId,
             target: executionTarget,
@@ -661,7 +670,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             assets: [
               {
                 key: "home",
-                localDir: stagedCodexHomeDir,
+                localDir: stagedCodexHomeDirForRuntime,
                 followSymlinks: true,
                 // Inbound (host→sandbox) auth-merge contribution: stages the two
                 // merge scripts and runs the merge-extract command so a sandbox
@@ -681,7 +690,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 restore: async ({ assetDir, readFile }) =>
                   void (await copyBackCodexAuth({
                     readSandboxAuth: () => readFile(path.posix.join(assetDir, "auth.json")),
-                    hostAuthPath: path.join(resolveSharedCodexHomeDir(process.env), "auth.json"),
+                    hostAuthPath: codexAuthCopyBackHostPath,
                     log: (line) => onLog("stdout", `${line}\n`),
                   })),
                 // No `exclude` denylist: `stagedCodexHomeDir` already contains
@@ -698,6 +707,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
     const executionTargetIsSandbox =
       runtimeExecutionTarget?.kind === "remote" && runtimeExecutionTarget.transport === "sandbox";
+    const networkScope = parseLocalProcessNetworkScope(config.networkScope);
+    const filesystemScope = parseLocalProcessFilesystemScope(config.filesystemScope);
+    const localFilesystemSandboxEnabled = filesystemScope === "workspace" && !executionTargetIsRemote;
+    let localFilesystemSandboxCodexHome = effectiveCodexHome;
+    if (localFilesystemSandboxEnabled) {
+      // Bubblewrap mounts only explicit managed paths. Stage a curated CODEX_HOME
+      // with dereferenced auth/config/skills so auth.json is a real readable file
+      // inside tmpfs root (never a dangling host-relative symlink).
+      stagedCodexHomeDir = await stageCodexHomeForSync(effectiveCodexHome, { runId });
+      stagedCodexHomePurpose = "local-filesystem-sandbox";
+      localFilesystemSandboxCodexHome = stagedCodexHomeDir;
+    }
     const restoreRemoteWorkspace = preparedExecutionTargetRuntime
       ? () => preparedExecutionTargetRuntime.restoreWorkspace((line) => onLog("stdout", line))
       : null;
@@ -795,7 +816,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (runtimePrimaryUrl) {
       env.PAPERCLIP_RUNTIME_PRIMARY_URL = runtimePrimaryUrl;
     }
-    env.CODEX_HOME = remoteCodexHome ?? effectiveCodexHome;
+    env.CODEX_HOME = remoteCodexHome ?? localFilesystemSandboxCodexHome;
     if (authToken) {
       env.PAPERCLIP_API_KEY = authToken;
     }
@@ -819,20 +840,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ),
     );
     const billingType = resolveCodexBillingType(effectiveEnv);
-    const networkScope = parseLocalProcessNetworkScope(config.networkScope);
-    const filesystemScope = parseLocalProcessFilesystemScope(config.filesystemScope);
     const localProcessSandbox: LocalProcessSandboxOptions | null =
       (filesystemScope || networkScope) && !executionTargetIsRemote
         ? {
             workspaceDir: effectiveExecutionCwd,
             filesystemScope,
-            managedPaths: [{ path: effectiveCodexHome, access: "rw" }],
+            managedPaths: [{ path: localFilesystemSandboxCodexHome, access: "rw" }],
             extraPaths: parseLocalProcessSandboxExtraPaths(config.filesystemExtraPaths),
             pathAliases: targetWorkspaceRealization?.mode === "copy"
               ? targetWorkspaceRealization.pathAliases
               : [],
             outboundRestorePaths: targetWorkspaceRealization?.outboundRestorePaths ?? [],
-            homeDir: filesystemScope ? effectiveCodexHome : null,
+            homeDir: filesystemScope ? localFilesystemSandboxCodexHome : null,
             networkScope,
             networkAllowlist: parseLocalProcessNetworkAllowlist(config.networkAllowlist),
             networkTrustedUrls: [
@@ -1406,27 +1425,38 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
     }
   } finally {
-    // Remove the staged CODEX_HOME allowlist temp dir on every exit path
-    // (teardown AND error), never only the happy path. Cleanup failure is
-    // logged, not fatal — a leaked temp dir must not crash the run.
-    if (stagedCodexHomeDir) {
-      await fs.rm(stagedCodexHomeDir, { recursive: true, force: true }).catch(async (error) => {
-        await onLog(
-          "stderr",
-          `[paperclip] Failed to remove staged Codex home "${stagedCodexHomeDir}": ${
-            error instanceof Error ? error.message : String(error)
-          }\n`,
-        );
-      });
+    try {
+      if (stagedCodexHomeDir && stagedCodexHomePurpose === "local-filesystem-sandbox") {
+        const stagedCodexHomeDirForCopyBack = stagedCodexHomeDir;
+        await copyBackCodexAuth({
+          readSandboxAuth: () => fs.readFile(path.join(stagedCodexHomeDirForCopyBack, "auth.json")),
+          hostAuthPath: codexAuthCopyBackHostPath,
+          log: (line) => onLog("stdout", `${line}\n`),
+        });
+      }
+    } finally {
+      // Remove the staged CODEX_HOME allowlist temp dir on every exit path
+      // (teardown AND error), never only the happy path. Cleanup failure is
+      // logged, not fatal — a leaked temp dir must not crash the run.
+      if (stagedCodexHomeDir) {
+        await fs.rm(stagedCodexHomeDir, { recursive: true, force: true }).catch(async (error) => {
+          await onLog(
+            "stderr",
+            `[paperclip] Failed to remove staged Codex home "${stagedCodexHomeDir}": ${
+              error instanceof Error ? error.message : String(error)
+            }\n`,
+          );
+        });
+      }
+      // Restore the managed config.toml so PAPERCLIP_CODEX_PROVIDERS changes
+      // (or removal) between runs never leave stale provider routing behind. This
+      // finally starts the moment prepareCodexRuntimeConfig returns, so a throw
+      // anywhere in the remaining setup (skill injection, remote runtime
+      // preparation, command building) restores the original config.toml too.
+      // If the process dies before reaching this, the next
+      // prepareCodexRuntimeConfig restores the original from the pre-run backup
+      // written at prepare time.
+      await preparedRuntimeConfig.cleanup();
     }
-    // Restore the managed config.toml so PAPERCLIP_CODEX_PROVIDERS changes
-    // (or removal) between runs never leave stale provider routing behind. This
-    // finally starts the moment prepareCodexRuntimeConfig returns, so a throw
-    // anywhere in the remaining setup (skill injection, remote runtime
-    // preparation, command building) restores the original config.toml too.
-    // If the process dies before reaching this, the next
-    // prepareCodexRuntimeConfig restores the original from the pre-run backup
-    // written at prepare time.
-    await preparedRuntimeConfig.cleanup();
   }
 }
