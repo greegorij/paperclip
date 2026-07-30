@@ -375,6 +375,28 @@ test("generator is deterministic and committed AGENTS-CODEX parity stays exact",
   assert.equal(first.content.includes("Opus"), false);
   assert.equal(first.content.includes("/home/"), false);
   assert.equal(first.content.includes("/Users/"), false);
+  assert.ok(first.content.includes("vault_read"));
+  assert.ok(first.content.includes("01 - Jarvis/Jarvis — Boot Manifest.md"));
+  assert.equal(first.content.includes("${JARVIS_VAULT_ROOT}/"), false);
+  assert.equal(first.content.includes("Zapis — ZAWSZE apply_patch"), false);
+  assert.ok(
+    first.content.includes("deleguj do wyznaczonego agenta vaultu") ||
+      first.content.includes("Kurator Vaultu"),
+  );
+});
+
+test("generator fails closed when legacy direct vault path or write claims remain", () => {
+  assert.throws(
+    () =>
+      generateCodexJarvisInstructions({
+        headlessBossClaude: HEADLESS_BOSS_FIXTURE_CONTENT.replace(
+          "## 🔴 VAULT — JAK PISAĆ (KRYTYCZNE)",
+          "## 🔴 VAULT — JAK ZAPISYWAĆ (KRYTYCZNE)",
+        ),
+        cockpitAgentsMd: JARVIS_COCKPIT_CONTENT,
+      }),
+    /direct vault writes|direct JARVIS_VAULT_ROOT filesystem paths|Boot Manifest/,
+  );
 });
 
 test("preview is fully non-mutating and offline", async () => {

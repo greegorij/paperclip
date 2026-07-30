@@ -13,6 +13,7 @@ import {
   reconcileManagedCodexHome,
   seedManagedCodexHome,
   stageCodexHomeForSync,
+  removeCodexMcpServers,
   writeManagedCodexMcpConfig,
 } from "./codex-home.js";
 
@@ -709,6 +710,82 @@ describe("evaluateCodexCredentialReadiness", () => {
     }
   });
 
+});
+
+describe("writeManagedCodexMcpConfig", () => {
+  it("writes Authorization into Codex-supported http_headers and keeps mode 0600", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-mcp-headers-"));
+    try {
+      const result = await writeManagedCodexMcpConfig({
+        codexHome: root,
+        apiBaseUrl: "https://paperclip.example",
+        gateways: [{
+          name: "alpha",
+          endpointPath: "/api/tool-gateway/gateways/alpha/mcp",
+          bearerToken: "alpha-token",
+        }],
+      });
+
+      const config = await fs.readFile(result.configPath, "utf8");
+      expect(config).toContain('[mcp_servers."alpha"]');
+      expect(config).toContain('http_headers = { Authorization = "Bearer alpha-token" }');
+      expect(config).not.toMatch(/^\s*headers\s*=/m);
+      expect((await fs.stat(result.configPath)).mode & 0o777).toBe(0o600);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("suppresses overlapping unmanaged MCP tables (including nested subtables) and keeps unrelated servers", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-mcp-overlap-"));
+    try {
+      await fs.writeFile(
+        path.join(root, "config.toml"),
+        [
+          'model = "gpt-5"',
+          "",
+          "[mcp_servers.github]",
+          'url = "https://raw.example/mcp"',
+          'command = "bypass"',
+          "",
+          "[mcp_servers.github.env]",
+          'TOKEN = "unmanaged"',
+          "",
+          "[mcp_servers.docs]",
+          'url = "https://docs.example/mcp"',
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const result = await writeManagedCodexMcpConfig({
+        codexHome: root,
+        apiBaseUrl: "https://paperclip.example",
+        gateways: [{
+          name: "github",
+          endpointPath: "/api/tool-gateway/gateways/github/mcp",
+          bearerToken: "managed-token",
+        }],
+      });
+
+      const config = await fs.readFile(result.configPath, "utf8");
+      expect(config).toContain('[mcp_servers."github"]');
+      expect(config).toContain('url = "https://paperclip.example/api/tool-gateway/gateways/github/mcp"');
+      expect(config).toContain('http_headers = { Authorization = "Bearer managed-token" }');
+      expect(config).not.toContain("paperclip-github");
+      expect(config).not.toContain("https://raw.example/mcp");
+      expect(config).not.toContain('command = "bypass"');
+      expect(config).not.toContain("[mcp_servers.github.env]");
+      expect(config).not.toContain('TOKEN = "unmanaged"');
+      expect(config).toContain("[mcp_servers.docs]");
+      expect(config).toContain('url = "https://docs.example/mcp"');
+      expect(result.warnings.some((warning) => warning.includes("suppressing the direct entry"))).toBe(true);
+      expect((await fs.stat(result.configPath)).mode & 0o777).toBe(0o600);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("replaces the managed MCP block and clears stale servers for an empty runtime set", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-mcp-config-"));
     try {
@@ -741,7 +818,7 @@ describe("evaluateCodexCredentialReadiness", () => {
       const alpha = await fs.readFile(path.join(alphaHome, "config.toml"), "utf8");
       const zero = await fs.readFile(path.join(zeroHome, "config.toml"), "utf8");
       expect(alpha).toContain('[mcp_servers."alpha"]');
-      expect(alpha).toContain('Authorization = "Bearer alpha-token"');
+      expect(alpha).toContain('http_headers = { Authorization = "Bearer alpha-token" }');
       expect(zero).not.toContain("mcp_servers.");
       expect(zero).not.toContain("stale-token");
       expect(alphaHome).not.toBe(zeroHome);
@@ -766,6 +843,30 @@ describe("evaluateCodexCredentialReadiness", () => {
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("removeCodexMcpServers preserves non-overlapping tables while dropping nested overlap blocks", () => {
+    const cleaned = removeCodexMcpServers(
+      [
+        "[mcp_servers.keep]",
+        'url = "https://keep.example"',
+        "",
+        '[mcp_servers."drop-me"]',
+        'url = "https://drop.example"',
+        "",
+        '[mcp_servers."drop-me".headers]',
+        'Authorization = "Bearer unmanaged"',
+        "",
+        "[other_table]",
+        'value = "ok"',
+        "",
+      ].join("\n"),
+      ["drop-me"],
+    );
+    expect(cleaned).toContain("[mcp_servers.keep]");
+    expect(cleaned).toContain("[other_table]");
+    expect(cleaned).not.toContain("drop-me");
+    expect(cleaned).not.toContain("drop.example");
   });
 });
 

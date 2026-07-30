@@ -252,13 +252,74 @@ function stripManagedMcpBlock(config: string): string {
   return `${config.slice(0, start)}${config.slice(end + MANAGED_MCP_BLOCK_END.length)}`.trimEnd();
 }
 
+const MCP_SERVER_TABLE_RE =
+  /^\s*\[\[\s*mcp_servers\s*\.\s*(?:"([^"]+)"|'([^']+)'|([^.\s\]]+))(?:\.[^\]]*)?\s*\]\]\s*$|^\s*\[\s*mcp_servers\s*\.\s*(?:"([^"]+)"|'([^']+)'|([^.\s\]]+))(?:\.[^\]]*)?\s*\]\s*$/;
+
+function readCodexMcpServerNameFromTableHeader(line: string): string | null {
+  const match = line.match(MCP_SERVER_TABLE_RE);
+  if (!match) return null;
+  const name = match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5] ?? match[6];
+  return name ? name.trim() : null;
+}
+
 function readCodexMcpServerNames(config: string): Set<string> {
   const names = new Set<string>();
-  for (const match of config.matchAll(/^\s*\[\s*mcp_servers\s*\.\s*(?:"([^"]+)"|'([^']+)'|([^\]\s#]+))\s*\]/gm)) {
-    const name = match[1] ?? match[2] ?? match[3];
-    if (name) names.add(name.trim());
+  for (const line of config.split(/\r?\n/)) {
+    const name = readCodexMcpServerNameFromTableHeader(line);
+    if (name) names.add(name);
   }
   return names;
+}
+
+/**
+ * Removes top-level `[mcp_servers.<name>]` tables and any nested
+ * `[mcp_servers.<name>.*]` / `[[mcp_servers.<name>.*]]` subtables for the given
+ * server names, leaving unrelated MCP servers and non-MCP config intact.
+ */
+export function removeCodexMcpServers(config: string, namesToRemove: Iterable<string>): string {
+  const remove = new Set(
+    [...namesToRemove].map((name) => name.trim()).filter((name) => name.length > 0),
+  );
+  if (remove.size === 0) return config;
+
+  const lines = config.split(/\r?\n/);
+  const kept: string[] = [];
+  let skipping = false;
+
+  for (const line of lines) {
+    const tableMatch = line.match(/^\s*\[\[?([^\]]+)\]\]?\s*$/);
+    if (tableMatch) {
+      const mcpName = readCodexMcpServerNameFromTableHeader(line);
+      if (mcpName && remove.has(mcpName)) {
+        skipping = true;
+        continue;
+      }
+      skipping = false;
+      kept.push(line);
+      continue;
+    }
+    if (!skipping) kept.push(line);
+  }
+
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
+}
+
+function collectOverlappingUnmanagedMcpNames(
+  gateways: ManagedCodexMcpGateway[],
+  existingNames: Set<string>,
+): { overlapNames: Set<string>; warnings: string[] } {
+  const overlapNames = new Set<string>();
+  const warnings: string[] = [];
+  gateways.forEach((gateway, index) => {
+    const baseName = sanitizeMcpServerName(gateway.name, `gateway-${index + 1}`);
+    const matched = [gateway.name, baseName].filter((name) => existingNames.has(name));
+    if (matched.length === 0) return;
+    for (const name of matched) overlapNames.add(name);
+    warnings.push(
+      `Found unmanaged Codex MCP server "${gateway.name}" overlapping a Paperclip-governed gateway; suppressing the direct entry and exposing only the managed gateway "${baseName}".`,
+    );
+  });
+  return { overlapNames, warnings };
 }
 
 function buildManagedMcpBlock(input: {
@@ -274,25 +335,22 @@ function buildManagedMcpBlock(input: {
   ];
   input.gateways.forEach((gateway, index) => {
     const baseName = sanitizeMcpServerName(gateway.name, `gateway-${index + 1}`);
-    const directOverlap = input.existingNames.has(gateway.name) || input.existingNames.has(baseName);
-    let managedName = directOverlap ? `paperclip-${baseName}` : baseName;
+    let managedName = baseName;
     let suffix = 2;
     while (usedNames.has(managedName) || input.existingNames.has(managedName)) {
       managedName = `paperclip-${baseName}-${suffix}`;
       suffix += 1;
     }
     usedNames.add(managedName);
-    if (directOverlap) {
-      warnings.push(
-        `Found unmanaged Codex MCP server "${gateway.name}" overlapping a Paperclip-governed gateway; leaving the direct entry in place and adding managed gateway "${managedName}". Paperclip cannot enforce policies for that direct entry.`,
-      );
-    }
     const url = new URL(gateway.endpointPath, input.apiBaseUrl).toString();
     lines.push(
       "",
       `[mcp_servers.${tomlString(managedName)}]`,
       `url = ${tomlString(url)}`,
-      `headers = { Authorization = ${tomlString(`Bearer ${gateway.bearerToken}`)} }`,
+      // Codex ignores the legacy inline `headers` key; `http_headers` is the
+      // supported field for static Authorization (alongside bearer_token_env_var /
+      // env_http_headers). Keep the bearer literal in the 0600-staged config.
+      `http_headers = { Authorization = ${tomlString(`Bearer ${gateway.bearerToken}`)} }`,
     );
   });
   lines.push(MANAGED_MCP_BLOCK_END);
@@ -311,14 +369,21 @@ export async function writeManagedCodexMcpConfig(input: {
     throw error;
   });
   const unmanagedConfig = stripManagedMcpBlock(existing);
-  const { block, warnings } = buildManagedMcpBlock({
+  const existingNames = readCodexMcpServerNames(unmanagedConfig);
+  const { overlapNames, warnings: overlapWarnings } = collectOverlappingUnmanagedMcpNames(
+    input.gateways,
+    existingNames,
+  );
+  const cleanedUnmanaged = removeCodexMcpServers(unmanagedConfig, overlapNames);
+  const { block, warnings: buildWarnings } = buildManagedMcpBlock({
     gateways: input.gateways,
     apiBaseUrl: input.apiBaseUrl,
-    existingNames: readCodexMcpServerNames(unmanagedConfig),
+    existingNames: readCodexMcpServerNames(cleanedUnmanaged),
   });
+  const warnings = [...overlapWarnings, ...buildWarnings];
   const next = input.gateways.length > 0
-    ? `${unmanagedConfig}${unmanagedConfig ? "\n\n" : ""}${block}\n`
-    : `${unmanagedConfig}${unmanagedConfig ? "\n" : ""}`;
+    ? `${cleanedUnmanaged}${cleanedUnmanaged ? "\n\n" : ""}${block}\n`
+    : `${cleanedUnmanaged}${cleanedUnmanaged ? "\n" : ""}`;
   await fs.writeFile(configPath, next, { mode: 0o600 });
   await fs.chmod(configPath, 0o600);
   return { configPath, warnings };

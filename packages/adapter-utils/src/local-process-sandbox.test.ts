@@ -12,6 +12,7 @@ import {
   parseLocalProcessNetworkAllowlist,
   parseLocalProcessNetworkScope,
   parseLocalProcessSandboxExtraPaths,
+  startNetworkAllowlistProxy,
 } from "./local-process-sandbox.js";
 import { runChildProcess } from "./server-utils.js";
 
@@ -423,6 +424,129 @@ describe("local process sandbox", () => {
     } finally {
       await target.cleanup?.();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("tears down proxy pipes on client disconnect without uncaught EPIPE", async () => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-network-epipe-"));
+    cleanup.push(workspace);
+    const socketPath = path.join(workspace, "proxy.sock");
+
+    let streamInterval: ReturnType<typeof setInterval> | null = null;
+    const upstreamServer = http.createServer((request, response) => {
+      response.writeHead(200, { "Content-Type": "application/octet-stream" });
+      streamInterval = setInterval(() => {
+        response.write(Buffer.alloc(64 * 1024, 0x61));
+      }, 5);
+      const stop = () => {
+        if (streamInterval) {
+          clearInterval(streamInterval);
+          streamInterval = null;
+        }
+      };
+      response.on("close", stop);
+      request.on("close", stop);
+    });
+    await new Promise<void>((resolve) => upstreamServer.listen(0, "127.0.0.1", resolve));
+    const address = upstreamServer.address();
+    if (!address || typeof address === "string") throw new Error("Expected TCP test server address.");
+
+    const proxy = await startNetworkAllowlistProxy(
+      [`127.0.0.1:${address.port}`],
+      [],
+      socketPath,
+    );
+
+    const uncaught: Error[] = [];
+    const onUncaught = (error: Error) => {
+      uncaught.push(error);
+    };
+    process.on("uncaughtException", onUncaught);
+
+    try {
+      await new Promise<void>((resolve) => {
+        const outgoing = http.request({
+          socketPath,
+          path: `http://127.0.0.1:${address.port}/stream`,
+          headers: { host: `127.0.0.1:${address.port}` },
+        }, (incoming) => {
+          incoming.once("data", () => {
+            outgoing.destroy();
+            incoming.destroy();
+            setTimeout(resolve, 250);
+          });
+        });
+        outgoing.on("error", () => {
+          // Expected once the client tears down mid-stream.
+        });
+        outgoing.end();
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(uncaught).toEqual([]);
+    } finally {
+      process.off("uncaughtException", onUncaught);
+      if (streamInterval) clearInterval(streamInterval);
+      await proxy.close();
+      await new Promise<void>((resolve) => upstreamServer.close(() => resolve()));
+    }
+  });
+
+  it("completes successful streaming HTTP proxy responses", async () => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-network-stream-ok-"));
+    cleanup.push(workspace);
+    const socketPath = path.join(workspace, "proxy.sock");
+
+    const chunks = ["alpha-", "bravo-", "charlie-", "delta"];
+    const expectedBody = chunks.join("");
+    const upstreamServer = http.createServer((_request, response) => {
+      response.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+      let index = 0;
+      const writeNext = () => {
+        if (index >= chunks.length) {
+          response.end();
+          return;
+        }
+        const ok = response.write(chunks[index]);
+        index += 1;
+        if (ok) setImmediate(writeNext);
+        else response.once("drain", writeNext);
+      };
+      writeNext();
+    });
+    await new Promise<void>((resolve) => upstreamServer.listen(0, "127.0.0.1", resolve));
+    const address = upstreamServer.address();
+    if (!address || typeof address === "string") throw new Error("Expected TCP test server address.");
+
+    const proxy = await startNetworkAllowlistProxy(
+      [`127.0.0.1:${address.port}`],
+      [],
+      socketPath,
+    );
+
+    try {
+      const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const outgoing = http.request({
+          socketPath,
+          path: `http://127.0.0.1:${address.port}/stream-ok`,
+          headers: { host: `127.0.0.1:${address.port}` },
+        }, (incoming) => {
+          let body = "";
+          incoming.setEncoding("utf8");
+          incoming.on("data", (chunk) => {
+            body += chunk;
+          });
+          incoming.on("end", () => resolve({ status: incoming.statusCode ?? 0, body }));
+          incoming.on("error", reject);
+        });
+        outgoing.on("error", reject);
+        outgoing.end();
+      });
+
+      expect(result).toEqual({ status: 200, body: expectedBody });
+    } finally {
+      await proxy.close();
+      await new Promise<void>((resolve) => upstreamServer.close(() => resolve()));
     }
   });
 

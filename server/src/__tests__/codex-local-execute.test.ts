@@ -219,7 +219,7 @@ describe("codex execute", () => {
     }
   });
 
-  it("writes managed MCP gateways into Codex config and warns on overlapping direct entries without logging tokens", async () => {
+  it("writes managed MCP gateways into Codex config and suppresses overlapping direct entries without logging tokens", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-managed-mcp-"));
     const workspace = path.join(root, "workspace");
     const commandPath = path.join(root, "codex");
@@ -308,15 +308,17 @@ describe("codex execute", () => {
       expect(result.errorMessage).toBeNull();
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
       const configText = capture.codexConfigContents ?? "";
-      expect(configText).toContain("[mcp_servers.github]");
-      expect(configText).toContain("[mcp_servers.\"paperclip-github\"]");
+      expect(configText).toContain('[mcp_servers."github"]');
+      expect(configText).not.toContain("paperclip-github");
+      expect(configText).not.toContain("https://raw.example/mcp");
       expect(configText).toContain('url = "http://paperclip.local:3100/api/tool-gateway/gateways/gateway-1/mcp"');
-      expect(configText).toContain('Authorization = "Bearer pcgw_secret-managed-token"');
+      expect(configText).toContain('http_headers = { Authorization = "Bearer pcgw_secret-managed-token" }');
+      expect(configText).not.toMatch(/^\s*headers\s*=/m);
       expect(logs).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             stream: "stderr",
-            chunk: expect.stringContaining("Paperclip cannot enforce policies for that direct entry"),
+            chunk: expect.stringContaining("suppressing the direct entry"),
           }),
         ]),
       );

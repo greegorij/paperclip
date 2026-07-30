@@ -49,6 +49,8 @@ interface NetworkAllowlistProxy {
   close: () => Promise<void>;
 }
 
+export type { NetworkAllowlistProxy };
+
 const SYSTEM_READ_PATHS = [
   "/usr",
   "/etc/ca-certificates",
@@ -225,6 +227,88 @@ function writeProxyError(response: http.ServerResponse, status: number, code: st
   }).end(body);
 }
 
+/**
+ * Symmetric teardown for a bidirectional socket pair (CONNECT). Error or close
+ * on either side destroys both peers so EPIPE never becomes an uncaught
+ * process-level Socket error. Do not use for HTTP request/response hops —
+ * IncomingMessage `close` is part of a successful lifecycle.
+ */
+function bindProxyPairTeardown(
+  left: { destroy: (error?: Error) => void; on: (event: string, listener: (...args: unknown[]) => void) => void },
+  right: { destroy: (error?: Error) => void; on: (event: string, listener: (...args: unknown[]) => void) => void },
+): void {
+  let closed = false;
+  const closePair = () => {
+    if (closed) return;
+    closed = true;
+    left.destroy();
+    right.destroy();
+  };
+  left.on("error", closePair);
+  right.on("error", closePair);
+  left.on("close", closePair);
+  right.on("close", closePair);
+}
+
+/**
+ * Abort/error-scoped lifecycle for an HTTP reverse-proxy hop.
+ * Normal request completion must finish the upstream request and allow the
+ * full upstream response; only abort, error, or premature downstream close
+ * tears down peers. Error listeners on both pipe sides swallow EPIPE.
+ */
+function bindHttpProxyLifecycle(
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  upstream: http.ClientRequest,
+): { bindUpstreamResponse: (upstreamResponse: http.IncomingMessage) => void } {
+  let upstreamResponse: http.IncomingMessage | undefined;
+
+  const destroyUpstreamSide = () => {
+    if (!upstream.destroyed) upstream.destroy();
+    if (upstreamResponse && !upstreamResponse.destroyed) upstreamResponse.destroy();
+  };
+
+  const onClientAbortOrError = () => {
+    destroyUpstreamSide();
+  };
+
+  request.on("aborted", onClientAbortOrError);
+  request.on("error", onClientAbortOrError);
+  request.on("close", () => {
+    // Premature destroy / disconnect before the full request body arrived.
+    if (!request.complete) destroyUpstreamSide();
+  });
+
+  response.on("error", onClientAbortOrError);
+  response.on("close", () => {
+    // Client disconnected before the proxied response finished writing.
+    if (!response.writableEnded) destroyUpstreamSide();
+  });
+
+  upstream.on("error", () => {
+    if (response.writableEnded || response.destroyed) return;
+    if (!response.headersSent) {
+      writeProxyError(
+        response,
+        502,
+        "upstream_error",
+        "Upstream request failed through the Paperclip sandbox proxy.",
+      );
+    } else {
+      response.destroy();
+    }
+  });
+
+  return {
+    bindUpstreamResponse: (incoming) => {
+      upstreamResponse = incoming;
+      incoming.on("error", () => {
+        if (!response.writableEnded && !response.destroyed) response.destroy();
+      });
+    },
+  };
+}
+
 function connectProxyError(code: string, message: string): string {
   const body = `${JSON.stringify({ error: { code, message } })}\n`;
   return [
@@ -237,7 +321,8 @@ function connectProxyError(code: string, message: string): string {
   ].join("\r\n");
 }
 
-async function startNetworkAllowlistProxy(
+/** Exported for regression tests of proxy pipe teardown (EPIPE / client disconnect). */
+export async function startNetworkAllowlistProxy(
   allowlist: string[],
   trustedUrls: string[],
   socketPath: string,
@@ -272,11 +357,13 @@ async function startNetworkAllowlistProxy(
     const upstream = http.request(target, {
       method: request.method,
       headers: { ...request.headers, host: target.host },
-    }, (upstreamResponse) => {
+    });
+    const lifecycle = bindHttpProxyLifecycle(request, response, upstream);
+    upstream.on("response", (upstreamResponse) => {
+      lifecycle.bindUpstreamResponse(upstreamResponse);
       response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
       upstreamResponse.pipe(response);
     });
-    upstream.on("error", (error) => response.destroy(error));
     request.pipe(upstream);
   });
   server.on("connect", (request, clientSocket, head) => {
@@ -291,13 +378,19 @@ async function startNetworkAllowlistProxy(
       return;
     }
     const upstream = net.connect(Number(port), hostname, () => {
-      clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-      if (head.length > 0) upstream.write(head);
-      upstream.pipe(clientSocket);
-      clientSocket.pipe(upstream);
+      try {
+        clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        if (head.length > 0) upstream.write(head);
+        upstream.pipe(clientSocket);
+        clientSocket.pipe(upstream);
+      } catch {
+        clientSocket.destroy();
+        upstream.destroy();
+      }
     });
-    upstream.on("error", () => clientSocket.destroy());
-    clientSocket.on("close", () => upstream.destroy());
+    // Register before connect completes so a cancelled client cannot EPIPE the
+    // "200 Connection Established" write into an uncaught Socket error.
+    bindProxyPairTeardown(clientSocket, upstream);
   });
   const sockets = new Set<net.Socket>();
   server.on("connection", (socket) => {
