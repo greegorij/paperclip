@@ -433,6 +433,7 @@
       ],
       "expectedRuntimePolicy": {
         "cwdSuffix": ".paperclip/pilot-workspaces/recenzent",
+        "maxConcurrentRuns": 1,
         "adapterConfig": {
           "engine": "cli",
           "search": false,
@@ -440,12 +441,13 @@
           "graceSec": 15,
           "extraArgs": [
             "--sandbox",
-            "read-only",
+            "danger-full-access",
             "--skip-git-repo-check"
           ],
           "timeoutSec": 1200,
           "networkScope": "allowlist",
           "filesystemScope": "workspace",
+          "filesystemWorkspaceAccess": "ro",
           "networkAllowlist": [
             "chatgpt.com",
             "api.openai.com",

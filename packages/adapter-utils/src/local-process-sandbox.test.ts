@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildLocalProcessSandboxSpawnTarget,
   parseLocalProcessFilesystemScope,
+  parseLocalProcessFilesystemWorkspaceAccess,
   parseLocalProcessNetworkAllowlist,
   parseLocalProcessNetworkScope,
   parseLocalProcessSandboxExtraPaths,
@@ -15,6 +16,14 @@ import {
 import { runChildProcess } from "./server-utils.js";
 
 const cleanup: string[] = [];
+
+function mountTriplets(args: string[], flag: "--bind" | "--ro-bind"): Array<[string, string]> {
+  const mounts: Array<[string, string]> = [];
+  for (let index = 0; index < args.length - 2; index += 1) {
+    if (args[index] === flag) mounts.push([args[index + 1], args[index + 2]]);
+  }
+  return mounts;
+}
 
 async function withTmpDir<T>(tmpDir: string, run: () => Promise<T>): Promise<T> {
   const previousTmpDir = process.env.TMPDIR;
@@ -45,6 +54,12 @@ describe("local process sandbox", () => {
     expect(parseLocalProcessFilesystemScope("workspace")).toBe("workspace");
     expect(parseLocalProcessFilesystemScope(undefined)).toBeNull();
     expect(() => parseLocalProcessFilesystemScope("workpace")).toThrow('filesystemScope must be "workspace"');
+    expect(parseLocalProcessFilesystemWorkspaceAccess(undefined)).toBe("rw");
+    expect(parseLocalProcessFilesystemWorkspaceAccess("ro")).toBe("ro");
+    expect(parseLocalProcessFilesystemWorkspaceAccess("rw")).toBe("rw");
+    expect(() => parseLocalProcessFilesystemWorkspaceAccess("read-only")).toThrow(
+      'filesystemWorkspaceAccess must be "ro" or "rw"',
+    );
     expect(parseLocalProcessNetworkScope("deny")).toBe("deny");
     expect(parseLocalProcessNetworkScope("allowlist")).toBe("allowlist");
     expect(parseLocalProcessNetworkScope(undefined)).toBeNull();
@@ -96,6 +111,33 @@ describe("local process sandbox", () => {
     expect(target.args).toContain(workspace);
     expect(target.args).toContain(managedHome);
     expect(target.args.slice(-3)).toEqual([process.execPath, "-e", "console.log('ok')"]);
+  });
+
+  it("supports read-only workspace mount while keeping managed paths writable", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-fs-sandbox-workspace-ro-"));
+    cleanup.push(root);
+    const workspace = path.join(root, "workspace");
+    const managedHome = path.join(root, "managed-home");
+    await fs.mkdir(workspace);
+    await fs.mkdir(managedHome);
+
+    const target = await buildLocalProcessSandboxSpawnTarget({
+      executable: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      cwd: workspace,
+      options: {
+        workspaceDir: workspace,
+        filesystemScope: "workspace",
+        filesystemWorkspaceAccess: "ro",
+        managedPaths: [{ path: managedHome, access: "rw" }],
+      },
+    });
+
+    const roBinds = mountTriplets(target.args, "--ro-bind");
+    const binds = mountTriplets(target.args, "--bind");
+    expect(roBinds).toContainEqual([workspace, workspace]);
+    expect(binds).not.toContainEqual([workspace, workspace]);
+    expect(binds).toContainEqual([managedHome, managedHome]);
   });
 
   it("preserves merged-/usr symlink layout for top-level system paths", async () => {
@@ -226,7 +268,29 @@ describe("local process sandbox", () => {
       },
     });
 
-    expect(target.args).toEqual(expect.arrayContaining(["--bind", workspace, "/app"]));
+    expect(mountTriplets(target.args, "--bind")).toContainEqual([workspace, "/app"]);
+  });
+
+  it("uses read-only mount for workspace aliases when workspace access is read-only", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-fs-alias-ro-"));
+    cleanup.push(root);
+    const workspace = path.join(root, "workspace");
+    await fs.mkdir(workspace);
+
+    const target = await buildLocalProcessSandboxSpawnTarget({
+      executable: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      cwd: workspace,
+      options: {
+        workspaceDir: workspace,
+        filesystemScope: "workspace",
+        filesystemWorkspaceAccess: "ro",
+        pathAliases: [{ path: "/app", target: workspace }],
+      },
+    });
+
+    expect(mountTriplets(target.args, "--ro-bind")).toContainEqual([workspace, "/app"]);
+    expect(mountTriplets(target.args, "--bind")).not.toContainEqual([workspace, "/app"]);
   });
 
   it("rejects writable out-of-tree paths without an outbound restore mapping", async () => {
@@ -247,6 +311,27 @@ describe("local process sandbox", () => {
         extraPaths: [{ path: outside, access: "rw" }],
       },
     })).rejects.toThrow("has no outbound restore mapping");
+  });
+
+  it("rejects writable workspace extra paths when workspace access is read-only", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-fs-workspace-ro-extra-path-"));
+    cleanup.push(root);
+    const workspace = path.join(root, "workspace");
+    const workspaceCache = path.join(workspace, ".cache");
+    await fs.mkdir(workspace);
+    await fs.mkdir(workspaceCache);
+
+    await expect(buildLocalProcessSandboxSpawnTarget({
+      executable: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      cwd: workspace,
+      options: {
+        workspaceDir: workspace,
+        filesystemScope: "workspace",
+        filesystemWorkspaceAccess: "ro",
+        extraPaths: [{ path: workspaceCache, access: "rw" }],
+      },
+    })).rejects.toThrow("is inside read-only workspace");
   });
 
   it("builds a network-only namespace without changing filesystem visibility", async () => {

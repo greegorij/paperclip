@@ -44,6 +44,7 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   parseLocalProcessFilesystemScope,
+  parseLocalProcessFilesystemWorkspaceAccess,
   parseLocalProcessSandboxExtraPaths,
   parseLocalProcessNetworkAllowlist,
   parseLocalProcessNetworkScope,
@@ -709,6 +710,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       runtimeExecutionTarget?.kind === "remote" && runtimeExecutionTarget.transport === "sandbox";
     const networkScope = parseLocalProcessNetworkScope(config.networkScope);
     const filesystemScope = parseLocalProcessFilesystemScope(config.filesystemScope);
+    const filesystemWorkspaceAccess = parseLocalProcessFilesystemWorkspaceAccess(config.filesystemWorkspaceAccess);
     const localFilesystemSandboxEnabled = filesystemScope === "workspace" && !executionTargetIsRemote;
     let localFilesystemSandboxCodexHome = effectiveCodexHome;
     if (localFilesystemSandboxEnabled) {
@@ -845,6 +847,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ? {
             workspaceDir: effectiveExecutionCwd,
             filesystemScope,
+            filesystemWorkspaceAccess,
             managedPaths: [{ path: localFilesystemSandboxCodexHome, access: "rw" }],
             extraPaths: parseLocalProcessSandboxExtraPaths(config.filesystemExtraPaths),
             pathAliases: targetWorkspaceRealization?.mode === "copy"

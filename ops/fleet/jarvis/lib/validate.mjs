@@ -79,6 +79,12 @@ function isScalar(value) {
   return value == null || ["string", "number", "boolean"].includes(typeof value);
 }
 
+const RECENZENT_REQUIRED_EXTRA_ARGS = Object.freeze([
+  "--sandbox",
+  "danger-full-access",
+  "--skip-git-repo-check",
+]);
+
 /**
  * Validate portable package + desired overlays (+ optional live snapshot).
  *
@@ -213,6 +219,46 @@ export function validateFleet({
             code: "codex-not-paused",
             message: `${agent.slug} must have manageStatus:true and status:paused`,
           });
+        }
+        if (agent.slug === "recenzent") {
+          const policy = agent.expectedRuntimePolicy ?? {};
+          const adapterConfig = policy.adapterConfig ?? {};
+          if (policy.maxConcurrentRuns !== 1) {
+            errors.push({
+              code: "recenzent-policy-max-concurrent",
+              message: "recenzent expectedRuntimePolicy.maxConcurrentRuns must equal 1",
+            });
+          }
+          if (adapterConfig.filesystemScope !== "workspace") {
+            errors.push({
+              code: "recenzent-policy-filesystem-scope",
+              message: "recenzent adapterConfig.filesystemScope must equal workspace",
+            });
+          }
+          if (adapterConfig.filesystemWorkspaceAccess !== "ro") {
+            errors.push({
+              code: "recenzent-policy-workspace-access",
+              message: "recenzent adapterConfig.filesystemWorkspaceAccess must equal ro",
+            });
+          }
+          if (adapterConfig.networkScope !== "allowlist") {
+            errors.push({
+              code: "recenzent-policy-network-scope",
+              message: "recenzent adapterConfig.networkScope must equal allowlist",
+            });
+          }
+          if (adapterConfig.dangerouslyBypassApprovalsAndSandbox !== false) {
+            errors.push({
+              code: "recenzent-policy-bypass",
+              message: "recenzent adapterConfig.dangerouslyBypassApprovalsAndSandbox must equal false",
+            });
+          }
+          if (!sameStringArrayInOrder(adapterConfig.extraArgs, RECENZENT_REQUIRED_EXTRA_ARGS)) {
+            errors.push({
+              code: "recenzent-policy-extra-args",
+              message: "recenzent adapterConfig.extraArgs must pin --sandbox danger-full-access --skip-git-repo-check",
+            });
+          }
         }
       } else if (agent.manageStatus === true) {
         warnings.push({
@@ -382,6 +428,14 @@ export function validateFleet({
           errors.push({
             code: "runtime-policy-cwd-mismatch",
             message: `${desiredAgent.slug}: runtime cwd does not match expected policy suffix`,
+          });
+        }
+      }
+      if (typeof policy.maxConcurrentRuns === "number") {
+        if (liveAgent.maxConcurrentRuns !== policy.maxConcurrentRuns) {
+          errors.push({
+            code: "runtime-policy-max-concurrent-mismatch",
+            message: `${desiredAgent.slug}: maxConcurrentRuns mismatch`,
           });
         }
       }

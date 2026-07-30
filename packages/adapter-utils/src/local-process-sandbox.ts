@@ -20,6 +20,7 @@ export interface LocalProcessSandboxPathAlias {
 export interface LocalProcessSandboxOptions {
   workspaceDir: string;
   filesystemScope?: "workspace" | null;
+  filesystemWorkspaceAccess?: LocalProcessSandboxAccess | null;
   managedPaths?: LocalProcessSandboxPath[];
   extraPaths?: LocalProcessSandboxPath[];
   pathAliases?: LocalProcessSandboxPathAlias[];
@@ -161,6 +162,12 @@ export function parseLocalProcessFilesystemScope(value: unknown): "workspace" | 
   if (value == null || value === "") return null;
   if (value === "workspace") return value;
   throw new Error('filesystemScope must be "workspace".');
+}
+
+export function parseLocalProcessFilesystemWorkspaceAccess(value: unknown): LocalProcessSandboxAccess {
+  if (value == null || value === "") return "rw";
+  if (value === "ro" || value === "rw") return value;
+  throw new Error('filesystemWorkspaceAccess must be "ro" or "rw".');
 }
 
 function isNetworkTargetAllowed(hostname: string, port: string, rules: NetworkAllowlistRule[]): boolean {
@@ -351,6 +358,11 @@ export async function buildLocalProcessSandboxSpawnTarget(input: {
     throw new Error("Local process filesystem and network scopes are currently supported only on Linux.");
   }
   const filesystemScope = input.options.filesystemScope ?? null;
+  const filesystemWorkspaceAccessRaw = input.options.filesystemWorkspaceAccess ?? "rw";
+  if (filesystemWorkspaceAccessRaw !== "ro" && filesystemWorkspaceAccessRaw !== "rw") {
+    throw new Error('filesystemWorkspaceAccess must be "ro" or "rw".');
+  }
+  const filesystemWorkspaceAccess: LocalProcessSandboxAccess = filesystemWorkspaceAccessRaw;
   const networkScope = input.options.networkScope ?? null;
   if (!filesystemScope && !networkScope) throw new Error("Local process sandbox requires a filesystem or network scope.");
 
@@ -368,6 +380,11 @@ export async function buildLocalProcessSandboxSpawnTarget(input: {
       const normalizedExtraPath = normalizeAbsolutePath(extraPath.path, `Sandbox extraPaths[${index}].path`);
       const relativeToWorkspace = path.relative(workspaceDir, normalizedExtraPath);
       const synchronized = !relativeToWorkspace.startsWith("..") && !path.isAbsolute(relativeToWorkspace);
+      if (filesystemWorkspaceAccess === "ro" && synchronized) {
+        throw new Error(
+          `Writable sandbox path "${normalizedExtraPath}" is inside read-only workspace "${workspaceDir}".`,
+        );
+      }
       const restored = outboundRestorePaths.some((restorePath) => {
         const relative = path.relative(restorePath, normalizedExtraPath);
         return !relative.startsWith("..") && !path.isAbsolute(relative);
@@ -435,7 +452,7 @@ export async function buildLocalProcessSandboxSpawnTarget(input: {
     }
     for (const managedPath of input.options.managedPaths ?? []) await mount(managedPath.path, managedPath.access);
     for (const extraPath of input.options.extraPaths ?? []) await mount(extraPath.path, extraPath.access);
-    await mount(workspaceDir, "rw");
+    await mount(workspaceDir, filesystemWorkspaceAccess);
     for (const [index, alias] of (input.options.pathAliases ?? []).entries()) {
       const aliasPath = normalizeAbsolutePath(alias.path, `Sandbox pathAliases[${index}].path`);
       const aliasTarget = normalizeAbsolutePath(alias.target, `Sandbox pathAliases[${index}].target`);
@@ -449,7 +466,7 @@ export async function buildLocalProcessSandboxSpawnTarget(input: {
         throw new Error(`Sandbox path alias target "${aliasTarget}" does not exist.`);
       }
       addParentDirectories(args, created, aliasPath);
-      args.push("--bind", aliasTarget, aliasPath);
+      args.push(filesystemWorkspaceAccess === "ro" ? "--ro-bind" : "--bind", aliasTarget, aliasPath);
       created.add(aliasPath);
     }
 

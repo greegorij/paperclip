@@ -365,6 +365,7 @@ describe("codex execute — local filesystem sandbox staged CODEX_HOME", () => {
         env: Record<string, string>;
         localProcessSandbox?: {
           homeDir?: string | null;
+          filesystemWorkspaceAccess?: "ro" | "rw" | null;
           managedPaths?: Array<{ path: string; access: "ro" | "rw" }>;
         } | null;
       };
@@ -373,6 +374,7 @@ describe("codex execute — local filesystem sandbox staged CODEX_HOME", () => {
       expect(stagedHomePath).toContain("paperclip-codex-home-sync-");
       expect(options.env.CODEX_HOME).toBe(stagedHomePath);
       const managedPaths = options.localProcessSandbox?.managedPaths ?? [];
+      expect(options.localProcessSandbox?.filesystemWorkspaceAccess).toBe("ro");
       expect(managedPaths).toEqual([{ path: stagedHomePath as string, access: "rw" }]);
       expect(managedPaths.some((entry) => entry.path === fixture.sharedHostHome)).toBe(false);
       expect(managedPaths.some((entry) => entry.path === fixture.managedCodexHome)).toBe(false);
@@ -406,6 +408,7 @@ describe("codex execute — local filesystem sandbox staged CODEX_HOME", () => {
         command: "codex",
         cwd: fixture.workspaceDir,
         filesystemScope: "workspace",
+        filesystemWorkspaceAccess: "ro",
         env: { CODEX_HOME: fixture.managedCodexHome },
       },
       context: {
@@ -464,6 +467,7 @@ describe("codex execute — local filesystem sandbox staged CODEX_HOME", () => {
           command: "codex",
           cwd: fixture.workspaceDir,
           filesystemScope: "workspace",
+          filesystemWorkspaceAccess: "ro",
           env: { CODEX_HOME: fixture.managedCodexHome },
         },
         context: {

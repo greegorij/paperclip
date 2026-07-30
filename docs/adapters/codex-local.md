@@ -24,6 +24,10 @@ The `codex_local` adapter runs OpenAI's Codex CLI locally. It supports session p
 | `env` | object | No | Environment variables (supports secret refs) |
 | `timeoutSec` | number | No | Process timeout (0 = no timeout) |
 | `graceSec` | number | No | Grace period before force-kill |
+| `filesystemScope` | string | No | Set to `workspace` to run Codex inside Bubblewrap filesystem confinement |
+| `filesystemWorkspaceAccess` | string | No | Workspace mount mode for `filesystemScope=workspace`: `rw` (default) or `ro` |
+| `networkScope` | string | No | Local Bubblewrap network policy (`deny` or `allowlist`) |
+| `networkAllowlist` | string[] | No | Exact hostnames/origins allowed when `networkScope=allowlist` |
 | `fastMode` | boolean | No | Enables Codex Fast mode. Currently supported on `gpt-5.4` only and burns credits faster |
 | `dangerouslyBypassApprovalsAndSandbox` | boolean | No | Skip safety checks (dev only) |
 
@@ -34,6 +38,10 @@ Codex uses `previous_response_id` for session continuity. The adapter serializes
 ## Skills Injection
 
 The adapter symlinks Paperclip skills into the global Codex skills directory (`~/.codex/skills`). Existing user skills are not overwritten.
+
+## Bubblewrap + Codex sandbox layering
+
+When `filesystemScope`/`networkScope` are enabled, Bubblewrap is the hard execution boundary. In this setup you can keep `dangerouslyBypassApprovalsAndSandbox=false` while still passing Codex CLI `--sandbox danger-full-access` through `extraArgs`, so Codex does not add a second inner sandbox on top of Bubblewrap.
 
 ## Fast Mode
 

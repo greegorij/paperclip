@@ -346,6 +346,7 @@
       "name": "Recenzent",
       "slug": "recenzent",
       "status": "paused",
+      "maxConcurrentRuns": 1,
       "adapterType": "codex_local",
       "adapterConfig": {
         "model": "gpt-5.6-sol",
@@ -355,12 +356,13 @@
         "graceSec": 15,
         "extraArgs": [
           "--sandbox",
-          "read-only",
+          "danger-full-access",
           "--skip-git-repo-check"
         ],
         "timeoutSec": 1200,
         "networkScope": "allowlist",
         "filesystemScope": "workspace",
+        "filesystemWorkspaceAccess": "ro",
         "networkAllowlist": [
           "chatgpt.com",
           "api.openai.com",

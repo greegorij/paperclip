@@ -39,7 +39,7 @@ ops/fleet/jarvis/
 - Portable `package/agents/*/AGENTS.md` is export/import-only metadata. Diff/apply never reconcile full live instructions for existing portable agents.
 - All live instruction mutations (portable and built-in, including Summarizer) are outside automated reconciliation.
 - Apply runs full structural validate + skill-key preflight **before** the first mutation; fail-fast after the first write/verify error. `partial=true` if any write succeeded, including write-ok/verify-fail when `completed` is still empty.
-- `Recenzent` is pinned to a read-only Codex pilot profile in `desired/agents.json` (`expectedRuntimePolicy`). Validate hard-fails on adapter drift and runtime policy drift (cwd suffix, scalar adapter config, exact `extraArgs` order, and `networkAllowlist` set equality). Diff/apply never auto-mutate those runtime-policy fields.
+- `Recenzent` is pinned to a Codex profile where outer Bubblewrap enforces workspace/network policy (`filesystemScope=workspace`, `filesystemWorkspaceAccess=ro`, `networkScope=allowlist`, `maxConcurrentRuns=1`) while inner Codex runs with `--sandbox danger-full-access` and `dangerouslyBypassApprovalsAndSandbox=false`. Validate hard-fails on adapter drift and runtime policy drift (cwd suffix, `maxConcurrentRuns`, scalar adapter config, exact `extraArgs` order, and `networkAllowlist` set equality). Diff/apply never auto-mutate those runtime-policy fields.
 - Validator raises contradiction errors for forbidden instruction-state drift, and apply is fail-closed on any instruction change kind before creating API traffic or mutating live state.
 - Every successful write is followed by a confirming GET (model, desired skill keys, routine id+title+triggerId+value). Dry-run skips write-verify GETs.
 
@@ -114,5 +114,5 @@ Restore the verified DB backup taken before apply (orchestrator). Agent config r
 
 - JSON under `desired/` is the only SSOT — no YAML mirrors.
 - Skill content is not in-repo; missing library keys or short-name inputs fail before the first mutation.
-- Codex remains paused; no bubblewrap pilot in this change.
+- Codex/Recenzent remain paused by policy unless explicitly resumed in live operations.
 - Stale `nextRunAt` on paused routines is an API observability limitation — validators do not assert `nextRunAt === null`.

@@ -63,6 +63,7 @@ const liveApplyDrift = (() => {
   assert.ok(alignedRecenzent, "aligned fixture missing recenzent");
   assert.ok(driftRecenzent, "drift fixture missing recenzent");
   driftRecenzent.status = alignedRecenzent.status;
+  driftRecenzent.maxConcurrentRuns = alignedRecenzent.maxConcurrentRuns;
   driftRecenzent.adapterType = alignedRecenzent.adapterType;
   driftRecenzent.adapterConfig = structuredClone(alignedRecenzent.adapterConfig);
   driftRecenzent.model = alignedRecenzent.model;
@@ -252,6 +253,16 @@ test("target models and Codex manageStatus paused are encoded", () => {
   assert.equal(bySlug.recenzent.adapterType, "codex_local");
   assert.equal(bySlug.recenzent.status, "paused");
   assert.equal(bySlug.recenzent.manageStatus, true);
+  assert.equal(bySlug.recenzent.expectedRuntimePolicy.maxConcurrentRuns, 1);
+  assert.equal(bySlug.recenzent.expectedRuntimePolicy.adapterConfig.filesystemScope, "workspace");
+  assert.equal(bySlug.recenzent.expectedRuntimePolicy.adapterConfig.filesystemWorkspaceAccess, "ro");
+  assert.equal(bySlug.recenzent.expectedRuntimePolicy.adapterConfig.networkScope, "allowlist");
+  assert.equal(bySlug.recenzent.expectedRuntimePolicy.adapterConfig.dangerouslyBypassApprovalsAndSandbox, false);
+  assert.deepEqual(bySlug.recenzent.expectedRuntimePolicy.adapterConfig.extraArgs, [
+    "--sandbox",
+    "danger-full-access",
+    "--skip-git-repo-check",
+  ]);
   assert.equal(bySlug["mi-sie-kodu-codex"].status, "paused");
   assert.equal(bySlug["mi-sie-kodu-codex"].manageStatus, true);
   assert.ok(
@@ -356,6 +367,24 @@ test("live Recenzent missing allowlist domain fails validate/apply before API ca
       agent.adapterConfig.networkAllowlist = ["chatgpt.com", "api.openai.com"];
     },
     errorCode: "runtime-policy-network-allowlist-mismatch",
+  });
+});
+
+test("live Recenzent workspace access drift fails validate/apply before API call", async () => {
+  await assertValidateAndApplyRejectsRecenzentDrift({
+    mutate: (agent) => {
+      agent.adapterConfig.filesystemWorkspaceAccess = "rw";
+    },
+    errorCode: "runtime-policy-adapter-config-mismatch",
+  });
+});
+
+test("live Recenzent maxConcurrentRuns drift fails validate/apply before API call", async () => {
+  await assertValidateAndApplyRejectsRecenzentDrift({
+    mutate: (agent) => {
+      agent.maxConcurrentRuns = 2;
+    },
+    errorCode: "runtime-policy-max-concurrent-mismatch",
   });
 });
 
