@@ -1,12 +1,10 @@
-import { loadDesired, loadPackage, skillShortName, redactSecrets } from "./load.mjs";
+import { loadDesired, skillShortName, redactSecrets } from "./load.mjs";
 import { assertBackupGate } from "./backup-gate.mjs";
 import { diffFleet } from "./diff.mjs";
 import { validateFleet } from "./validate.mjs";
 import { createApiClient } from "./api-client.mjs";
-import { applySummarizerInstructionPatch } from "./summarizer-patch.mjs";
 import { preflightSkillKeyResolutions } from "./skill-keys.mjs";
 import {
-  verifyAgentInstructions,
   verifyAgentModel,
   verifyAgentSkills,
   verifyRoutine,
@@ -27,6 +25,28 @@ function finish(report) {
     writesSucceeded: report.writesSucceeded ?? 0,
   };
   return redactSecrets(report);
+}
+
+export function validateApplyChanges(changes) {
+  if (!Array.isArray(changes)) {
+    return {
+      ok: false,
+      error: "preflight requires an array of diff changes",
+      items: [],
+    };
+  }
+  const forbiddenInstructionChanges = changes.filter(
+    (c) => c?.kind === "agent-instructions" || c?.kind === "summarizer-instructions-patch",
+  );
+  if (forbiddenInstructionChanges.length > 0) {
+    return {
+      ok: false,
+      error:
+        "instruction changes are forbidden: live instructions are outside automated reconciliation",
+      items: forbiddenInstructionChanges,
+    };
+  }
+  return { ok: true, items: [] };
 }
 
 /**
@@ -65,7 +85,6 @@ export async function applyFleet({
   }
 
   const desired = loadDesired(desiredDir);
-  const pkg = loadPackage(packageDir);
 
   const validation = validateFleet({
     packageDir,
@@ -85,6 +104,17 @@ export async function applyFleet({
 
   const plan = diffFleet({ packageDir, desiredDir, liveSnapshot });
   report.planned = plan.changes;
+
+  const changePreflight = validateApplyChanges(plan.changes);
+  if (!changePreflight.ok) {
+    report.failed.push({
+      step: "preflight",
+      error: changePreflight.error,
+      items: changePreflight.items,
+    });
+    report.partial = false;
+    return finish(report);
+  }
 
   if (plan.blocking > 0) {
     report.failed.push({
@@ -140,7 +170,7 @@ export async function applyFleet({
       agentId: change.agentId,
     };
     try {
-      if (!change.api && change.kind !== "summarizer-instructions-patch") {
+      if (!change.api) {
         report.skipped.push({ ...step, reason: change.detail ?? "no api action" });
         continue;
       }
@@ -188,29 +218,6 @@ export async function applyFleet({
           );
         }
         report.completed.push({ ...step, result: "applied", verified: { status: "paused" } });
-        continue;
-      }
-
-      if (change.kind === "agent-instructions") {
-        const live = liveBySlug.get(change.target);
-        const pkgAgent = pkg.agentBySlug[change.target];
-        const content = pkgAgent.instructions;
-        const res = await client.put(`/api/agents/${live.id}/instructions-bundle/file`, {
-          path: "AGENTS.md",
-          content,
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        markWriteOk();
-        const verified = await verifyAgentInstructions(client, {
-          agentId: live.id,
-          expectedContent: content,
-        });
-        if (!verified.ok) throw new Error(verified.error);
-        report.completed.push({
-          ...step,
-          result: "applied",
-          verified: { hash: verified.hash },
-        });
         continue;
       }
 
@@ -305,38 +312,6 @@ export async function applyFleet({
           requestBody: body,
           verified,
         });
-        continue;
-      }
-
-      if (change.kind === "summarizer-instructions-patch") {
-        const result = await applySummarizerInstructionPatch({
-          agentId: change.agentId,
-          client,
-          dryRun: false,
-          getContent: null,
-        });
-        if (result.partial) {
-          // PUT succeeded but verify failed — count write for report.partial even if completed is empty
-          markWriteOk();
-          report.failed.push({
-            ...step,
-            error: result.error ?? result.detail,
-            code: result.code,
-            partial: true,
-          });
-          break;
-        }
-        if (!result.ok) {
-          report.failed.push({
-            ...step,
-            error: result.error ?? result.detail,
-            code: result.code,
-            partial: false,
-          });
-          break;
-        }
-        if (result.result === "applied") markWriteOk();
-        report.completed.push({ ...step, result: result.result, detail: result.detail });
         continue;
       }
 

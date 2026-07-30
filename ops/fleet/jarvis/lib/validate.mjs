@@ -45,6 +45,10 @@ function resolveAgentInstructions(agent, liveSnapshot) {
   return null;
 }
 
+function canonicalLiveModel(agent) {
+  return agent?.adapterConfig?.model ?? agent?.model ?? null;
+}
+
 function sameStringArray(a, b) {
   const left = [...(a ?? [])].map(String).sort();
   const right = [...(b ?? [])].map(String).sort();
@@ -230,11 +234,11 @@ export function validateFleet({
     }
   }
 
-  const contradictionResults = checkAllContradictions(
+  const packageContradictionResults = checkAllContradictions(
     desired.contradictions.contradictions,
     ctx,
   );
-  for (const result of contradictionResults) {
+  for (const result of packageContradictionResults) {
     if (result.agentSlug === "summarizer" && !ctx.summarizer) {
       warnings.push({
         code: "summarizer-check-deferred",
@@ -251,6 +255,8 @@ export function validateFleet({
       ok.push({ code: `contradiction:${result.id}`, message: result.description });
     }
   }
+
+  let liveContradictionResults = [];
 
   if (liveSnapshot) {
     const completeness = assertSnapshotCompleteness(liveSnapshot);
@@ -317,6 +323,33 @@ export function validateFleet({
             else errors.push(item);
           }
         }
+      }
+    }
+
+    const liveCtx = {};
+    for (const agent of liveAgents) {
+      const key = builtInKey(agent) ?? agent.slug ?? null;
+      if (!key) continue;
+      liveCtx[key] = {
+        instructions: resolveAgentInstructions(agent, liveSnapshot),
+        model: canonicalLiveModel(agent),
+      };
+    }
+    liveContradictionResults = checkAllContradictions(
+      desired.contradictions.contradictions,
+      liveCtx,
+    );
+    for (const result of liveContradictionResults) {
+      if (!result.ok) {
+        errors.push({
+          code: `live-contradiction:${result.id}`,
+          message: `${result.id}: ${result.hits.map((h) => h.message).join("; ")}`,
+        });
+      } else {
+        ok.push({
+          code: `live-contradiction:${result.id}`,
+          message: result.description,
+        });
       }
     }
 
@@ -492,7 +525,8 @@ export function validateFleet({
     errors,
     warnings,
     okItems: ok,
-    contradictionResults,
+    contradictionResults: packageContradictionResults,
+    liveContradictionResults,
     portableAgentCount: pkg.agents.length,
   };
 }

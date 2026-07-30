@@ -11,7 +11,7 @@ import { validateFleet } from "../lib/validate.mjs";
 import { validateSkillRuntime } from "../lib/skill-state.mjs";
 import { checkAllContradictions } from "../lib/contradictions.mjs";
 import { diffFleet, matchRoutineStrict } from "../lib/diff.mjs";
-import { applyFleet } from "../lib/apply.mjs";
+import { applyFleet, validateApplyChanges } from "../lib/apply.mjs";
 import { assertBackupGate } from "../lib/backup-gate.mjs";
 import { verifyFleet } from "../lib/verify.mjs";
 import { resolveFullSkillKeys, resolveBootstrapSkillKey } from "../lib/skill-keys.mjs";
@@ -32,6 +32,46 @@ const liveAligned = JSON.parse(
 const liveDrift = JSON.parse(
   readFileSync(path.join(FIXTURES_DIR, "live-drift.json"), "utf8"),
 );
+const liveApplyDrift = (() => {
+  const snap = structuredClone(liveDrift);
+  const alignedBySlug = new Map(liveAligned.agents.map((a) => [a.slug, a]));
+  const driftBySlug = new Map(snap.agents.map((a) => [a.slug, a]));
+  const contradictionTargets = [
+    "recenzent",
+    "zwiadowca-kodu",
+    "in-ynier-wdro-e",
+    "senior-programista",
+    "mi-sie-web",
+    "mi-sie-recenzji-glm",
+    "summarizer",
+  ];
+
+  for (const slug of contradictionTargets) {
+    const from = alignedBySlug.get(slug);
+    const to = driftBySlug.get(slug);
+    assert.ok(from, `aligned fixture missing contradiction target: ${slug}`);
+    assert.ok(to, `drift fixture missing contradiction target: ${slug}`);
+    to.instructions = from.instructions;
+    if ("instructionsHash" in from && "instructionsHash" in to) {
+      to.instructionsHash = from.instructionsHash;
+    }
+  }
+
+  const alignedSummarizer = liveAligned.builtIns?.find((b) => b.key === "summarizer");
+  const driftSummarizer = snap.builtIns?.find((b) => b.key === "summarizer");
+  const alignedCanonicalSummarizerAgent = alignedBySlug.get("summarizer");
+  const canonicalSummarizerAgent = driftBySlug.get("summarizer");
+  assert.ok(alignedSummarizer, "aligned fixture missing built-in summarizer row");
+  assert.ok(driftSummarizer, "drift fixture missing built-in summarizer row");
+  assert.ok(alignedCanonicalSummarizerAgent, "aligned fixture missing canonical summarizer agent row");
+  assert.ok(canonicalSummarizerAgent, "drift fixture missing canonical summarizer agent row");
+  driftSummarizer.instructions = canonicalSummarizerAgent.instructions;
+  if ("instructionsHash" in alignedCanonicalSummarizerAgent && "instructionsHash" in driftSummarizer) {
+    driftSummarizer.instructionsHash = alignedCanonicalSummarizerAgent.instructionsHash;
+  }
+
+  return snap;
+})();
 const liveTitleMismatch = JSON.parse(
   readFileSync(path.join(FIXTURES_DIR, "live-routine-title-mismatch.json"), "utf8"),
 );
@@ -293,14 +333,13 @@ test("apply dry-run is offline — no API client / env required", async () => {
     const report = await applyFleet({
       packageDir: PACKAGE_DIR,
       desiredDir: DESIRED_DIR,
-      liveSnapshot: liveDrift,
+      liveSnapshot: liveApplyDrift,
       apply: false,
     });
     assert.equal(report.mode, "dry-run");
     assert.ok(report.planned.length > 0);
     assert.ok(report.ok);
     assert.equal(report.completed.length, 0);
-    assert.ok(report.planned.some((c) => c.kind === "summarizer-instructions-patch"));
     assert.ok(report.planned.some((c) => c.kind === "agent-pause" && c.target === "mi-sie-kodu-codex"));
     assert.ok(!report.planned.some((c) => c.kind === "agent-pause" && c.target !== "mi-sie-kodu-codex"));
   } finally {
@@ -335,6 +374,20 @@ test("apply --apply refuses without backup gate", async () => {
   });
   assert.equal(report.ok, false);
   assert.ok(report.failed.some((f) => f.step === "backup-gate"));
+});
+
+test("preflight rejects crafted instruction change kinds", () => {
+  const crafted = [
+    { kind: "agent-model", target: "mi-sie-web" },
+    { kind: "agent-instructions", target: "mi-sie-web", detail: "crafted" },
+    { kind: "summarizer-instructions-patch", target: "summarizer", detail: "crafted" },
+  ];
+  const result = validateApplyChanges(crafted);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /instruction changes are forbidden/);
+  assert.equal(result.items.length, 2);
+  assert.equal(result.items[0].target, "mi-sie-web");
+  assert.equal(result.items[1].target, "summarizer");
 });
 
 test("missing skillLibrary is a validate error", () => {
@@ -568,11 +621,11 @@ function createStatefulApplyMock({
 }
 
 test("apply writes minimal model patch body and verifies", async () => {
-  const api = createStatefulApplyMock();
+  const api = createStatefulApplyMock({ liveSnapshot: liveApplyDrift });
   const report = await applyFleet({
     packageDir: PACKAGE_DIR,
     desiredDir: DESIRED_DIR,
-    liveSnapshot: liveDrift,
+    liveSnapshot: liveApplyDrift,
     apply: true,
     backupGate: makeBackupGate(),
     api,
@@ -584,15 +637,15 @@ test("apply writes minimal model patch body and verifies", async () => {
     adapterConfig: { model: "claude-haiku-4-5" },
     replaceAdapterConfig: false,
   });
-  assert.ok(report.completed.every((c) => c.verified || c.kind === "summarizer-instructions-patch"));
+  assert.ok(report.completed.every((c) => c.verified));
 });
 
 test("apply fail-fast stops after first mutation error with partial=true", async () => {
-  const api = createStatefulApplyMock({ failOnPatchCall: 2 });
+  const api = createStatefulApplyMock({ failOnPatchCall: 2, liveSnapshot: liveApplyDrift });
   const report = await applyFleet({
     packageDir: PACKAGE_DIR,
     desiredDir: DESIRED_DIR,
-    liveSnapshot: liveDrift,
+    liveSnapshot: liveApplyDrift,
     apply: true,
     backupGate: makeBackupGate(),
     api,
@@ -793,6 +846,35 @@ test("diff compares full skillKeys for all portable agents not only overrides", 
   assert.ok(diff.changes.find((c) => c.target === "badacz").skillKeys[0].includes("/"));
 });
 
+test("diff ignores portable package AGENTS.md drift including frontmatter and host-path placeholders", () => {
+  const snap = structuredClone(liveAligned);
+  const agent = snap.agents.find((a) => a.slug === "badacz");
+  assert.ok(agent, "fixture must include badacz");
+  agent.instructions =
+    "---\nname: \"Badacz\"\nskills:\n  - \"paperclipai/paperclip/paperclip\"\n---\n\nKod jest w `<host-path-redacted>`.\n";
+  agent.instructionsHash = "not-the-package-hash";
+  const diff = diffFleet({ packageDir: PACKAGE_DIR, desiredDir: DESIRED_DIR, liveSnapshot: snap });
+  assert.ok(
+    !diff.changes.some((c) => c.kind === "agent-instructions"),
+    JSON.stringify(diff.changes, null, 2),
+  );
+  assert.equal(diff.changeCount, 0, JSON.stringify(diff.changes, null, 2));
+});
+
+test("diff on liveDrift does not plan any instruction mutation kinds", () => {
+  const diff = diffFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: liveDrift,
+  });
+  assert.ok(
+    !diff.changes.some(
+      (c) => c.kind === "agent-instructions" || c.kind === "summarizer-instructions-patch",
+    ),
+    JSON.stringify(diff.changes, null, 2),
+  );
+});
+
 test("diff plans builtin-skills sync when built-in desiredSkills empty", () => {
   const snap = structuredClone(liveAligned);
   const sum = snap.agents.find((a) => a.id === "agent-summarizer");
@@ -801,6 +883,64 @@ test("diff plans builtin-skills sync when built-in desiredSkills empty", () => {
   if (ss) ss.desiredSkills = [];
   const diff = diffFleet({ packageDir: PACKAGE_DIR, desiredDir: DESIRED_DIR, liveSnapshot: snap });
   assert.ok(diff.changes.some((c) => c.kind === "builtin-skills" && c.target === "summarizer" && c.agentId === "agent-summarizer"));
+});
+
+test("live contradiction fails validate/apply before any API call", async () => {
+  const snap = structuredClone(liveAligned);
+  const summarizer = snap.agents.find((a) => a.id === "agent-summarizer");
+  assert.ok(summarizer, "fixture must include summarizer built-in agent");
+  summarizer.instructions =
+    "This agent will run on the low-cost model profile lane (`cheap`) by default.";
+  // Keep duplicated builtIns fields aligned so this test isolates contradiction logic.
+  const builtInSummarizer = snap.builtIns.find((b) => b.key === "summarizer");
+  assert.ok(builtInSummarizer, "fixture must include summarizer built-in row");
+  builtInSummarizer.instructions = summarizer.instructions;
+
+  const validation = validateFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snap,
+    forApply: true,
+  });
+  assert.equal(validation.ok, false);
+  assert.ok(
+    validation.errors.some((e) => e.code === "live-contradiction:summarizer-cheap-claim"),
+    JSON.stringify(validation.errors, null, 2),
+  );
+
+  let calls = 0;
+  const api = {
+    dryRun: false,
+    async get() {
+      calls += 1;
+      throw new Error("must not call get");
+    },
+    async patch() {
+      calls += 1;
+      throw new Error("must not call patch");
+    },
+    async post() {
+      calls += 1;
+      throw new Error("must not call post");
+    },
+    async put() {
+      calls += 1;
+      throw new Error("must not call put");
+    },
+  };
+  const report = await applyFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snap,
+    apply: true,
+    backupGate: makeBackupGate(),
+    api,
+  });
+  assert.equal(report.ok, false);
+  assert.equal(report.writesSucceeded, 0);
+  assert.equal(report.completed.length, 0);
+  assert.equal(calls, 0);
+  assert.ok(report.failed.some((f) => f.step === "validate"));
 });
 
 test("diff is idempotent against aligned live snapshot", () => {

@@ -3,15 +3,15 @@ import { diffFleet } from "./diff.mjs";
 
 /**
  * Kinds that verify may ignore as remaining (manual / informational only).
- * builtin-model, builtin-skills, summarizer-instructions-patch MUST remain and fail verify.
+ * builtin-model and builtin-skills MUST remain and fail verify.
  */
 const VERIFY_IGNORE_KINDS = new Set([
-  // none currently — built-in model/skills/instructions are required for verify ok
+  // none currently — built-in model/skills are required for verify ok
 ]);
 
 /**
  * Post-apply verification: re-validate desired vs (new) live snapshot and require empty diff
- * for mutable targets including built-in model, skills, and Summarizer instructions.
+ * for mutable targets including built-in model and skills.
  */
 export function verifyFleet({ packageDir, desiredDir, liveSnapshot, includeBuiltInInstructions }) {
   const validation = validateFleet({

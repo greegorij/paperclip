@@ -1,10 +1,5 @@
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { loadDesired, loadPackage } from "./load.mjs";
-import {
-  SUMMARIZER_CHEAP_CLAIM_RE,
-  planSummarizerInstructionPatch,
-} from "./summarizer-patch.mjs";
+import { loadDesired } from "./load.mjs";
 
 function sameStringArray(a, b) {
   const left = [...(a ?? [])].map(String).sort();
@@ -72,8 +67,9 @@ export function matchRoutineStrict(routineDesired, liveRoutines = []) {
  * Never mutates. Does not log secrets.
  */
 export function diffFleet({ packageDir, desiredDir, liveSnapshot }) {
+  // Keep call signature stable for existing callers.
+  void packageDir;
   const desired = loadDesired(desiredDir);
-  const pkg = loadPackage(packageDir);
   const changes = [];
 
   const liveBySlug = new Map();
@@ -122,37 +118,9 @@ export function diffFleet({ packageDir, desiredDir, liveSnapshot }) {
       });
     }
 
-    const pkgAgent = pkg.agentBySlug[agent.slug];
-    if (pkgAgent && live.instructionsHash && pkgAgent.instructions) {
-      const hash = createHash("sha256").update(pkgAgent.instructions).digest("hex");
-      if (hash !== live.instructionsHash) {
-        changes.push({
-          kind: "agent-instructions",
-          target: agent.slug,
-          agentId: live.id,
-          from: live.instructionsHash,
-          to: hash,
-          api: {
-            method: "PUT",
-            path: `/api/agents/${live.id}/instructions-bundle/file`,
-            bodyKeys: ["path", "content"],
-          },
-        });
-      }
-    } else if (pkgAgent && live.instructions != null) {
-      if (live.instructions !== pkgAgent.instructions) {
-        changes.push({
-          kind: "agent-instructions",
-          target: agent.slug,
-          agentId: live.id,
-          api: {
-            method: "PUT",
-            path: `/api/agents/${live.id}/instructions-bundle/file`,
-            bodyKeys: ["path", "content"],
-          },
-        });
-      }
-    }
+    // Portable package AGENTS.md files are export/import artifacts only.
+    // Live reconciliation must never plan full instruction replacement.
+    // Contradiction validation is handled separately for package and live instructions.
 
     // Full skillKeys vs full live desiredSkills for ALL portable agents (not short-name / overrides-only).
     if (Array.isArray(agent.skillKeys) && Array.isArray(live.desiredSkills)) {
@@ -188,7 +156,7 @@ export function diffFleet({ packageDir, desiredDir, liveSnapshot }) {
     }
   }
 
-  // Built-ins: model + skills + controlled Summarizer instructions patch.
+  // Built-ins: model + skills only.
   // Canonical live truth is the agent bound by metadata.paperclipBuiltInAgent.key
   // (after completeness has verified builtIns[key].agentId === that agent.id).
   // Do not trust duplicated builtIns row fields for mutate targeting.
@@ -245,41 +213,6 @@ export function diffFleet({ packageDir, desiredDir, liveSnapshot }) {
       }
     }
 
-    if (biDesired.key === "summarizer") {
-      const instructions = liveAgent.instructions ?? null;
-      if (instructions != null) {
-        const plan = planSummarizerInstructionPatch(instructions);
-        if (plan.ok) {
-          changes.push({
-            kind: "summarizer-instructions-patch",
-            target: "summarizer",
-            agentId,
-            detail: "Exact cheap-lane fragment present; controlled AGENTS.md replace planned",
-            api: {
-              method: "PUT",
-              path: `/api/agents/${agentId}/instructions-bundle/file`,
-              bodyKeys: ["path", "content"],
-            },
-          });
-        } else if (plan.code === "unexpected-drift" || plan.code === "replace-failed") {
-          changes.push({
-            kind: "summarizer-instructions-drift",
-            target: "summarizer",
-            agentId,
-            detail: plan.detail,
-            blocking: true,
-          });
-        } else if (SUMMARIZER_CHEAP_CLAIM_RE.test(instructions) && plan.code !== "already-patched") {
-          changes.push({
-            kind: "summarizer-instructions-drift",
-            target: "summarizer",
-            agentId,
-            detail: plan.detail,
-            blocking: true,
-          });
-        }
-      }
-    }
   }
 
   for (const routineDesired of desired.routines.routines) {

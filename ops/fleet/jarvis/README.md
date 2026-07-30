@@ -36,8 +36,11 @@ ops/fleet/jarvis/
 - Do not treat `GET /agents/:id/skills` `entries.length ≈ 39` as assignment.
 - Snapshot/validate are **fail-closed**: hard invariant **29 = 27 portable + exactly 2 built-in keys** (`summarizer`, `reflection-coach`); `completeness` object required with `complete: true` and counters matching agent/skill arrays; empty AGENTS.md rejected; missing `skillLibrary` aborts. Built-ins are derived from `metadata.paperclipBuiltInAgent.key` (the `/built-in-agents` endpoint may 404 when disabled and must not wipe data).
 - **Diff/verify compare full `skillKeys` vs live `desiredSkills` for all 27 portable agents** (not a four-role override subset). Built-in model/skills drift is included in verify — not ignored.
+- Portable `package/agents/*/AGENTS.md` is export/import-only metadata. Diff/apply never reconcile full live instructions for existing portable agents.
+- All live instruction mutations (portable and built-in, including Summarizer) are outside automated reconciliation.
 - Apply runs full structural validate + skill-key preflight **before** the first mutation; fail-fast after the first write/verify error. `partial=true` if any write succeeded, including write-ok/verify-fail when `completed` is still empty.
-- Every successful write is followed by a confirming GET (model, AGENTS.md content/hash, desired skill keys, routine id+title+triggerId+value). Dry-run skips write-verify GETs.
+- Validator raises contradiction errors for forbidden instruction-state drift, and apply is fail-closed on any instruction change kind before creating API traffic or mutating live state.
+- Every successful write is followed by a confirming GET (model, desired skill keys, routine id+title+triggerId+value). Dry-run skips write-verify GETs.
 
 ## Why no `package/skills/`
 
@@ -72,18 +75,16 @@ Routine IDs and schedule trigger IDs are already filled in `desired/routines.jso
 | Change | API |
 |--------|-----|
 | Model | `PATCH /api/agents/:id` with `{ adapterConfig: { model }, replaceAdapterConfig: false }` only |
-| Portable instructions | `PUT /api/agents/:id/instructions-bundle/file` → GET verify exact content |
 | Desired skills | `POST /api/agents/:id/skills/sync` with full library keys only → GET verify |
 | Pause Codex | `POST /api/agents/:id/pause` (only `manageStatus:true`) → GET status |
 | Routine status | `PATCH /api/routines/:id` → GET `/routines/:id` |
 | Schedule trigger | `PATCH /api/routine-triggers/:id` → GET `/routines/:id` |
-| Summarizer stock claim fix | `GET` then `PUT` then `GET` `/api/agents/:id/instructions-bundle/file` |
 
-Partial failure: report lists **completed** / **failed** / **skipped** and `writesSucceeded`. Exit `3` = partial success (fail-fast; no further mutations). A PUT that passes but fails GET verify still sets `partial=true`.
+Partial failure: report lists **completed** / **failed** / **skipped** and `writesSucceeded`. Exit `3` = partial success (fail-fast; no further mutations).
 
 ## Summarizer (built-in)
 
-Stock template (`server/src/built-ins/agents/summarizer/AGENTS.md`) now states primary model `claude-haiku-4-5` (not a default `cheap` profile lane). Live has `experimental.enableBuiltInAgents=false`, so built-in **reset returns 404**. Snapshot still keeps Summarizer model + instructions from the regular agent list metadata. Apply patches via GET → exact-old fragment → PUT → GET verify: post-write content must equal `plan.next` (or matching SHA-256). `already-patched` requires the exact target section with no cheap-lane claim; partial/corrupted Model wording is refused.
+Stock template (`server/src/built-ins/agents/summarizer/AGENTS.md`) now states primary model `claude-haiku-4-5` (not a default `cheap` profile lane). Live has `experimental.enableBuiltInAgents=false`, so built-in **reset returns 404**. Snapshot still keeps Summarizer model + instructions from the regular agent list metadata. Any live Summarizer instruction drift is handled outside this automated reconciler: validator reports contradictions and apply refuses instruction-change kinds.
 
 ## Skill runtime policy
 

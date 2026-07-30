@@ -1,10 +1,4 @@
-import { createHash } from "node:crypto";
 import { skillShortName } from "./load.mjs";
-
-function extractFileContent(data) {
-  if (typeof data === "string") return data;
-  return data?.content ?? data?.file?.content ?? null;
-}
 
 function sameStringArray(a, b) {
   const left = [...(a ?? [])].map(String).sort();
@@ -29,31 +23,6 @@ export async function verifyAgentModel(client, { agentId, expectedModel }) {
     };
   }
   return { ok: true, got };
-}
-
-export async function verifyAgentInstructions(client, { agentId, expectedContent }) {
-  const res = await client.get(
-    `/api/agents/${agentId}/instructions-bundle/file?path=${encodeURIComponent("AGENTS.md")}`,
-  );
-  if (!res.ok) {
-    return { ok: false, error: `instructions verify GET failed HTTP ${res.status}` };
-  }
-  const got = extractFileContent(res.data);
-  if (got == null) {
-    return { ok: false, error: "instructions verify GET returned empty content" };
-  }
-  if (got !== expectedContent) {
-    const gotHash = createHash("sha256").update(got).digest("hex");
-    const wantHash = createHash("sha256").update(expectedContent).digest("hex");
-    return {
-      ok: false,
-      error: `instructions verify content mismatch (liveHash=${gotHash} expectedHash=${wantHash})`,
-    };
-  }
-  return {
-    ok: true,
-    hash: createHash("sha256").update(got).digest("hex"),
-  };
 }
 
 export async function verifyAgentSkills(client, { agentId, expectedKeys }) {
