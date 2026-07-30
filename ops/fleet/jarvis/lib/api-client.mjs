@@ -97,12 +97,23 @@ export function normalizeLiveSnapshot(raw) {
     };
   });
 
+  const normalizeHeartbeat = (agent) => {
+    const runtimeHeartbeat = agent.runtimeConfig?.heartbeat;
+    const directHeartbeat = agent.heartbeat;
+    return {
+      enabled: runtimeHeartbeat?.enabled ?? directHeartbeat?.enabled ?? null,
+      wakeOnDemand: runtimeHeartbeat?.wakeOnDemand ?? directHeartbeat?.wakeOnDemand ?? null,
+      maxDailyRuns: runtimeHeartbeat?.maxDailyRuns ?? directHeartbeat?.maxDailyRuns ?? null,
+    };
+  };
+
   return {
     capturedAt: raw.capturedAt ?? new Date().toISOString(),
     companyId: raw.companyId ?? null,
     agents: (raw.agents ?? []).map((a) => ({
       maxConcurrentRuns:
         a.runtimeConfig?.heartbeat?.maxConcurrentRuns ?? a.maxConcurrentRuns ?? null,
+      heartbeat: normalizeHeartbeat(a),
       id: a.id,
       name: a.name,
       slug: a.slug ?? a.urlKey ?? null,

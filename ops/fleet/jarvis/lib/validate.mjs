@@ -79,11 +79,194 @@ function isScalar(value) {
   return value == null || ["string", "number", "boolean"].includes(typeof value);
 }
 
-const RECENZENT_REQUIRED_EXTRA_ARGS = Object.freeze([
+function hasExactObjectKeys(value, expectedKeys) {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...expectedKeys].sort();
+  return JSON.stringify(actual) === JSON.stringify(expected);
+}
+
+const REQUIRED_RUNTIME_POLICY_EXTRA_ARGS = Object.freeze([
   "--sandbox",
   "danger-full-access",
   "--skip-git-repo-check",
 ]);
+
+const MANAGED_RUNTIME_POLICY_KEYS = Object.freeze([
+  "status",
+  "maxConcurrentRuns",
+  "adapterType",
+  "model",
+  "adapterConfig",
+  "heartbeat",
+]);
+
+const MANAGED_RUNTIME_ADAPTER_CONFIG_KEYS = Object.freeze([
+  "engine",
+  "model",
+  "modelReasoningEffort",
+  "fastMode",
+  "search",
+  "dangerouslyBypassApprovalsAndSandbox",
+  "filesystemScope",
+  "filesystemWorkspaceAccess",
+  "networkScope",
+  "networkAllowlist",
+  "extraArgs",
+]);
+
+const MANAGED_RUNTIME_HEARTBEAT_KEYS = Object.freeze([
+  "enabled",
+  "wakeOnDemand",
+  "maxDailyRuns",
+]);
+
+function validateExpectedRuntimePolicyShape(agent, errors) {
+  const policy = agent.expectedRuntimePolicy;
+  if (!policy) return;
+  if (policy == null || typeof policy !== "object" || Array.isArray(policy)) {
+    errors.push({
+      code: "runtime-policy-structure",
+      message: `${agent.slug}: expectedRuntimePolicy must be an object`,
+    });
+    return;
+  }
+
+  const isManagedOpenAiPolicy =
+    "status" in policy || "adapterType" in policy || "model" in policy || "heartbeat" in policy;
+
+  if (isManagedOpenAiPolicy) {
+    if (!hasExactObjectKeys(policy, MANAGED_RUNTIME_POLICY_KEYS)) {
+      errors.push({
+        code: "runtime-policy-structure",
+        message: `${agent.slug}: expectedRuntimePolicy must include exactly ${MANAGED_RUNTIME_POLICY_KEYS.join(", ")}`,
+      });
+    }
+    if (agent.manageStatus !== true || agent.status !== "paused") {
+      errors.push({
+        code: "runtime-policy-managed-status",
+        message: `${agent.slug}: manageStatus:true and status:paused are required when expectedRuntimePolicy manages runtime`,
+      });
+    }
+    if (policy.status !== "paused") {
+      errors.push({
+        code: "runtime-policy-status",
+        message: `${agent.slug}: expectedRuntimePolicy.status must equal paused`,
+      });
+    }
+    if (policy.adapterType !== agent.adapterType) {
+      errors.push({
+        code: "runtime-policy-adapter-type",
+        message: `${agent.slug}: expectedRuntimePolicy.adapterType must match desired adapterType`,
+      });
+    }
+    if (policy.model !== (agent.model ?? null)) {
+      errors.push({
+        code: "runtime-policy-model",
+        message: `${agent.slug}: expectedRuntimePolicy.model must match desired model`,
+      });
+    }
+  }
+
+  if (typeof policy.maxConcurrentRuns === "number" && policy.maxConcurrentRuns !== 1) {
+    errors.push({
+      code: "runtime-policy-max-concurrent",
+      message: `${agent.slug}: expectedRuntimePolicy.maxConcurrentRuns must equal 1`,
+    });
+  }
+
+  const adapterConfig = policy.adapterConfig;
+  if (adapterConfig == null || typeof adapterConfig !== "object" || Array.isArray(adapterConfig)) {
+    errors.push({
+      code: "runtime-policy-adapter-config",
+      message: `${agent.slug}: expectedRuntimePolicy.adapterConfig must be an object`,
+    });
+  } else {
+    if (isManagedOpenAiPolicy && !hasExactObjectKeys(adapterConfig, MANAGED_RUNTIME_ADAPTER_CONFIG_KEYS)) {
+      errors.push({
+        code: "runtime-policy-adapter-config-structure",
+        message: `${agent.slug}: expectedRuntimePolicy.adapterConfig must include exactly ${MANAGED_RUNTIME_ADAPTER_CONFIG_KEYS.join(", ")}`,
+      });
+    }
+    if (adapterConfig.filesystemScope !== "workspace") {
+      errors.push({
+        code: "runtime-policy-filesystem-scope",
+        message: `${agent.slug}: adapterConfig.filesystemScope must equal workspace`,
+      });
+    }
+    if (!["ro", "rw"].includes(adapterConfig.filesystemWorkspaceAccess)) {
+      errors.push({
+        code: "runtime-policy-workspace-access",
+        message: `${agent.slug}: adapterConfig.filesystemWorkspaceAccess must be ro or rw`,
+      });
+    }
+    if (adapterConfig.networkScope !== "allowlist") {
+      errors.push({
+        code: "runtime-policy-network-scope",
+        message: `${agent.slug}: adapterConfig.networkScope must equal allowlist`,
+      });
+    }
+    if (adapterConfig.dangerouslyBypassApprovalsAndSandbox !== false) {
+      errors.push({
+        code: "runtime-policy-bypass",
+        message: `${agent.slug}: adapterConfig.dangerouslyBypassApprovalsAndSandbox must equal false`,
+      });
+    }
+    if (!sameStringArrayInOrder(adapterConfig.extraArgs, REQUIRED_RUNTIME_POLICY_EXTRA_ARGS)) {
+      errors.push({
+        code: "runtime-policy-extra-args",
+        message: `${agent.slug}: adapterConfig.extraArgs must pin --sandbox danger-full-access --skip-git-repo-check`,
+      });
+    }
+    if (!Array.isArray(adapterConfig.networkAllowlist) || adapterConfig.networkAllowlist.length === 0) {
+      errors.push({
+        code: "runtime-policy-network-allowlist",
+        message: `${agent.slug}: adapterConfig.networkAllowlist must be a non-empty array`,
+      });
+    }
+  }
+
+  if (policy.heartbeat !== undefined) {
+    if (
+      policy.heartbeat == null ||
+      typeof policy.heartbeat !== "object" ||
+      Array.isArray(policy.heartbeat)
+    ) {
+      errors.push({
+        code: "runtime-policy-heartbeat",
+        message: `${agent.slug}: expectedRuntimePolicy.heartbeat must be an object`,
+      });
+    } else {
+      if (!hasExactObjectKeys(policy.heartbeat, MANAGED_RUNTIME_HEARTBEAT_KEYS)) {
+        errors.push({
+          code: "runtime-policy-heartbeat-structure",
+          message: `${agent.slug}: expectedRuntimePolicy.heartbeat must include exactly ${MANAGED_RUNTIME_HEARTBEAT_KEYS.join(", ")}`,
+        });
+      }
+      if (policy.heartbeat.enabled !== false) {
+        errors.push({
+          code: "runtime-policy-heartbeat-enabled",
+          message: `${agent.slug}: expectedRuntimePolicy.heartbeat.enabled must equal false`,
+        });
+      }
+      if (policy.heartbeat.wakeOnDemand !== true) {
+        errors.push({
+          code: "runtime-policy-heartbeat-wake",
+          message: `${agent.slug}: expectedRuntimePolicy.heartbeat.wakeOnDemand must equal true`,
+        });
+      }
+      if (
+        !Number.isInteger(policy.heartbeat.maxDailyRuns) ||
+        policy.heartbeat.maxDailyRuns < 1
+      ) {
+        errors.push({
+          code: "runtime-policy-heartbeat-max-daily-runs",
+          message: `${agent.slug}: expectedRuntimePolicy.heartbeat.maxDailyRuns must be an integer >= 1`,
+        });
+      }
+    }
+  }
+}
 
 /**
  * Validate portable package + desired overlays (+ optional live snapshot).
@@ -213,52 +396,14 @@ export function validateFleet({
           });
         }
       }
-      if (agent.slug === "mi-sie-kodu-codex" || agent.slug === "recenzent") {
+      if (agent.expectedRuntimePolicy) {
+        validateExpectedRuntimePolicyShape(agent, errors);
+      } else if (agent.slug === "mi-sie-kodu-codex" || agent.slug === "recenzent") {
         if (agent.manageStatus !== true || agent.status !== "paused") {
           errors.push({
             code: "codex-not-paused",
             message: `${agent.slug} must have manageStatus:true and status:paused`,
           });
-        }
-        if (agent.slug === "recenzent") {
-          const policy = agent.expectedRuntimePolicy ?? {};
-          const adapterConfig = policy.adapterConfig ?? {};
-          if (policy.maxConcurrentRuns !== 1) {
-            errors.push({
-              code: "recenzent-policy-max-concurrent",
-              message: "recenzent expectedRuntimePolicy.maxConcurrentRuns must equal 1",
-            });
-          }
-          if (adapterConfig.filesystemScope !== "workspace") {
-            errors.push({
-              code: "recenzent-policy-filesystem-scope",
-              message: "recenzent adapterConfig.filesystemScope must equal workspace",
-            });
-          }
-          if (adapterConfig.filesystemWorkspaceAccess !== "ro") {
-            errors.push({
-              code: "recenzent-policy-workspace-access",
-              message: "recenzent adapterConfig.filesystemWorkspaceAccess must equal ro",
-            });
-          }
-          if (adapterConfig.networkScope !== "allowlist") {
-            errors.push({
-              code: "recenzent-policy-network-scope",
-              message: "recenzent adapterConfig.networkScope must equal allowlist",
-            });
-          }
-          if (adapterConfig.dangerouslyBypassApprovalsAndSandbox !== false) {
-            errors.push({
-              code: "recenzent-policy-bypass",
-              message: "recenzent adapterConfig.dangerouslyBypassApprovalsAndSandbox must equal false",
-            });
-          }
-          if (!sameStringArrayInOrder(adapterConfig.extraArgs, RECENZENT_REQUIRED_EXTRA_ARGS)) {
-            errors.push({
-              code: "recenzent-policy-extra-args",
-              message: "recenzent adapterConfig.extraArgs must pin --sandbox danger-full-access --skip-git-repo-check",
-            });
-          }
         }
       } else if (agent.manageStatus === true) {
         warnings.push({
@@ -422,6 +567,24 @@ export function validateFleet({
       if (!policy) continue;
 
       const liveConfig = liveAgent.adapterConfig ?? {};
+      if (typeof policy.status === "string" && liveAgent.status !== policy.status) {
+        errors.push({
+          code: "runtime-policy-status-mismatch",
+          message: `${desiredAgent.slug}: status mismatch (live=${liveAgent.status}, desired=${policy.status})`,
+        });
+      }
+      if (typeof policy.adapterType === "string" && liveAgent.adapterType !== policy.adapterType) {
+        errors.push({
+          code: "runtime-policy-adapter-type-mismatch",
+          message: `${desiredAgent.slug}: runtime adapterType mismatch`,
+        });
+      }
+      if (typeof policy.model === "string" && canonicalLiveModel(liveAgent) !== policy.model) {
+        errors.push({
+          code: "runtime-policy-model-mismatch",
+          message: `${desiredAgent.slug}: runtime model mismatch`,
+        });
+      }
       if (typeof policy.cwdSuffix === "string") {
         const liveCwd = typeof liveConfig.cwd === "string" ? liveConfig.cwd : "";
         if (!liveCwd.endsWith(policy.cwdSuffix)) {
@@ -436,6 +599,28 @@ export function validateFleet({
           errors.push({
             code: "runtime-policy-max-concurrent-mismatch",
             message: `${desiredAgent.slug}: maxConcurrentRuns mismatch`,
+          });
+        }
+      }
+      const heartbeatPolicy = policy.heartbeat ?? null;
+      if (heartbeatPolicy) {
+        const liveHeartbeat = liveAgent.heartbeat ?? {};
+        if (liveHeartbeat.enabled !== heartbeatPolicy.enabled) {
+          errors.push({
+            code: "runtime-policy-heartbeat-enabled-mismatch",
+            message: `${desiredAgent.slug}: heartbeat.enabled mismatch`,
+          });
+        }
+        if (liveHeartbeat.wakeOnDemand !== heartbeatPolicy.wakeOnDemand) {
+          errors.push({
+            code: "runtime-policy-heartbeat-wake-mismatch",
+            message: `${desiredAgent.slug}: heartbeat.wakeOnDemand mismatch`,
+          });
+        }
+        if (liveHeartbeat.maxDailyRuns !== heartbeatPolicy.maxDailyRuns) {
+          errors.push({
+            code: "runtime-policy-heartbeat-max-daily-runs-mismatch",
+            message: `${desiredAgent.slug}: heartbeat.maxDailyRuns mismatch`,
           });
         }
       }

@@ -263,9 +263,45 @@
       "name": "Mięsień Kodu Codex",
       "role": "engineer",
       "adapterType": "codex_local",
-      "model": null,
+      "model": "gpt-5.6-sol",
       "manageStatus": true,
       "status": "paused",
+      "expectedRuntimePolicy": {
+        "status": "paused",
+        "maxConcurrentRuns": 1,
+        "adapterType": "codex_local",
+        "model": "gpt-5.6-sol",
+        "adapterConfig": {
+          "engine": "cli",
+          "model": "gpt-5.6-sol",
+          "modelReasoningEffort": "high",
+          "fastMode": false,
+          "search": false,
+          "dangerouslyBypassApprovalsAndSandbox": false,
+          "filesystemScope": "workspace",
+          "filesystemWorkspaceAccess": "rw",
+          "networkScope": "allowlist",
+          "networkAllowlist": [
+            "chatgpt.com",
+            "api.openai.com",
+            "auth.openai.com",
+            "github.com",
+            "api.github.com",
+            "objects.githubusercontent.com",
+            "raw.githubusercontent.com"
+          ],
+          "extraArgs": [
+            "--sandbox",
+            "danger-full-access",
+            "--skip-git-repo-check"
+          ]
+        },
+        "heartbeat": {
+          "enabled": false,
+          "wakeOnDemand": true,
+          "maxDailyRuns": 1
+        }
+      },
       "skills": [
         "paperclip",
         "ticket",
@@ -583,9 +619,42 @@
       "slug": "zwiadowca-kodu",
       "name": "Zwiadowca Kodu",
       "role": "researcher",
-      "adapterType": "claude_local",
-      "model": "claude-sonnet-5",
-      "manageStatus": false,
+      "adapterType": "codex_local",
+      "model": "gpt-5.6-terra",
+      "manageStatus": true,
+      "status": "paused",
+      "expectedRuntimePolicy": {
+        "status": "paused",
+        "maxConcurrentRuns": 1,
+        "adapterType": "codex_local",
+        "model": "gpt-5.6-terra",
+        "adapterConfig": {
+          "engine": "cli",
+          "model": "gpt-5.6-terra",
+          "modelReasoningEffort": "medium",
+          "fastMode": false,
+          "search": false,
+          "dangerouslyBypassApprovalsAndSandbox": false,
+          "filesystemScope": "workspace",
+          "filesystemWorkspaceAccess": "ro",
+          "networkScope": "allowlist",
+          "networkAllowlist": [
+            "chatgpt.com",
+            "api.openai.com",
+            "auth.openai.com"
+          ],
+          "extraArgs": [
+            "--sandbox",
+            "danger-full-access",
+            "--skip-git-repo-check"
+          ]
+        },
+        "heartbeat": {
+          "enabled": false,
+          "wakeOnDemand": true,
+          "maxDailyRuns": 3
+        }
+      },
       "skills": [
         "paperclip",
         "research"

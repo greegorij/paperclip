@@ -26,8 +26,12 @@
       "model": "gpt-5.6-sol",
       "adapterType": "codex_local"
     },
+    "zwiadowca-kodu": {
+      "model": "gpt-5.6-terra",
+      "adapterType": "codex_local"
+    },
     "mi-sie-kodu-codex": {
-      "model": null,
+      "model": "gpt-5.6-sol",
       "adapterType": "codex_local",
       "status": "paused"
     }

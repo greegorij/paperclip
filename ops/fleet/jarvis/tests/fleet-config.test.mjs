@@ -27,11 +27,69 @@ import { summarizeExportWarnings } from "../lib/sanitize.mjs";
 const broken = JSON.parse(
   readFileSync(path.join(FIXTURES_DIR, "broken-instructions.json"), "utf8"),
 );
-const liveAligned = JSON.parse(
-  readFileSync(path.join(FIXTURES_DIR, "live-aligned.json"), "utf8"),
+const REQUIRED_POLICY_EXTRA_ARGS = ["--sandbox", "danger-full-access", "--skip-git-repo-check"];
+const OPENAI_SAFE_ALLOWLIST = ["chatgpt.com", "api.openai.com", "auth.openai.com"];
+const OPENAI_SAFE_ALLOWLIST_WITH_GITHUB = [
+  ...OPENAI_SAFE_ALLOWLIST,
+  "github.com",
+  "api.github.com",
+  "objects.githubusercontent.com",
+  "raw.githubusercontent.com",
+];
+
+function applyManagedOpenAiRoleFit(snapshot) {
+  const bySlug = new Map((snapshot.agents ?? []).map((agent) => [agent.slug, agent]));
+  const specs = {
+    "zwiadowca-kodu": {
+      model: "gpt-5.6-terra",
+      effort: "medium",
+      workspaceAccess: "ro",
+      networkAllowlist: OPENAI_SAFE_ALLOWLIST,
+      maxDailyRuns: 3,
+    },
+    "mi-sie-kodu-codex": {
+      model: "gpt-5.6-sol",
+      effort: "high",
+      workspaceAccess: "rw",
+      networkAllowlist: OPENAI_SAFE_ALLOWLIST_WITH_GITHUB,
+      maxDailyRuns: 1,
+    },
+  };
+  for (const [slug, spec] of Object.entries(specs)) {
+    const agent = bySlug.get(slug);
+    assert.ok(agent, `fixture must include ${slug}`);
+    agent.status = "paused";
+    agent.maxConcurrentRuns = 1;
+    agent.adapterType = "codex_local";
+    agent.model = spec.model;
+    agent.heartbeat = {
+      enabled: false,
+      wakeOnDemand: true,
+      maxDailyRuns: spec.maxDailyRuns,
+    };
+    agent.adapterConfig = {
+      ...(agent.adapterConfig ?? {}),
+      engine: "cli",
+      model: spec.model,
+      modelReasoningEffort: spec.effort,
+      fastMode: false,
+      search: false,
+      dangerouslyBypassApprovalsAndSandbox: false,
+      filesystemScope: "workspace",
+      filesystemWorkspaceAccess: spec.workspaceAccess,
+      networkScope: "allowlist",
+      networkAllowlist: [...spec.networkAllowlist],
+      extraArgs: [...REQUIRED_POLICY_EXTRA_ARGS],
+    };
+  }
+  return snapshot;
+}
+
+const liveAligned = applyManagedOpenAiRoleFit(
+  JSON.parse(readFileSync(path.join(FIXTURES_DIR, "live-aligned.json"), "utf8")),
 );
-const liveDrift = JSON.parse(
-  readFileSync(path.join(FIXTURES_DIR, "live-drift.json"), "utf8"),
+const liveDrift = applyManagedOpenAiRoleFit(
+  JSON.parse(readFileSync(path.join(FIXTURES_DIR, "live-drift.json"), "utf8")),
 );
 const liveApplyDrift = (() => {
   const snap = structuredClone(liveDrift);
@@ -84,11 +142,11 @@ const liveApplyDrift = (() => {
 
   return snap;
 })();
-const liveTitleMismatch = JSON.parse(
-  readFileSync(path.join(FIXTURES_DIR, "live-routine-title-mismatch.json"), "utf8"),
+const liveTitleMismatch = applyManagedOpenAiRoleFit(
+  JSON.parse(readFileSync(path.join(FIXTURES_DIR, "live-routine-title-mismatch.json"), "utf8")),
 );
-const liveTriggerMismatch = JSON.parse(
-  readFileSync(path.join(FIXTURES_DIR, "live-routine-trigger-mismatch.json"), "utf8"),
+const liveTriggerMismatch = applyManagedOpenAiRoleFit(
+  JSON.parse(readFileSync(path.join(FIXTURES_DIR, "live-routine-trigger-mismatch.json"), "utf8")),
 );
 const skillOk = JSON.parse(
   readFileSync(path.join(FIXTURES_DIR, "skill-snapshots-ok.json"), "utf8"),
@@ -127,10 +185,17 @@ function createLiveSnapshotFetchMock({
   const list = source.agents.map((agent) => {
     const row = structuredClone(agent);
     delete row.runtimeConfig;
+    delete row.heartbeat;
     if (row.slug === "recenzent" || row.slug === secondSelectedAgentSlug) row.maxConcurrentRuns = null;
     return row;
   });
-  const detailsById = new Map(source.agents.map((agent) => [agent.id, structuredClone(agent)]));
+  const detailsById = new Map(
+    source.agents.map((agent) => {
+      const detail = structuredClone(agent);
+      delete detail.heartbeat;
+      return [agent.id, detail];
+    }),
+  );
   const skillSnapshotsByAgentId = new Map(
     (source.skillSnapshots ?? []).map((snapshot) => [snapshot.agentId, structuredClone(snapshot)]),
   );
@@ -144,6 +209,20 @@ function createLiveSnapshotFetchMock({
   const secondSelectedAgentDetail = detailsById.get(secondSelectedAgent.id);
   secondSelectedAgentDetail.maxConcurrentRuns = null;
   secondSelectedAgentDetail.runtimeConfig = { heartbeat: { maxConcurrentRuns: 0 } };
+  const heartbeatRoleSlugs = ["zwiadowca-kodu", "mi-sie-kodu-codex"];
+  for (const slug of heartbeatRoleSlugs) {
+    const sourceAgent = source.agents.find((agent) => agent.slug === slug);
+    assert.ok(sourceAgent, `fixture must include ${slug}`);
+    const detail = detailsById.get(sourceAgent.id);
+    detail.runtimeConfig = {
+      heartbeat: {
+        enabled: sourceAgent.heartbeat?.enabled ?? null,
+        wakeOnDemand: sourceAgent.heartbeat?.wakeOnDemand ?? null,
+        maxDailyRuns: sourceAgent.heartbeat?.maxDailyRuns ?? null,
+        maxConcurrentRuns: sourceAgent.maxConcurrentRuns ?? null,
+      },
+    };
+  }
 
   return async function fetchMock(url) {
     const parsed = new URL(url);
@@ -347,6 +426,31 @@ test("target models and Codex manageStatus paused are encoded", () => {
   assert.equal(bySlug["mi-sie-kodu-cursor"].model, "auto");
   assert.equal(bySlug["mi-sie-kodu-glm"].model, "openrouter/z-ai/glm-5.2");
   assert.equal(bySlug["mi-sie-web"].model, "openrouter/google/gemini-2.5-flash");
+  assert.equal(bySlug["zwiadowca-kodu"].model, "gpt-5.6-terra");
+  assert.equal(bySlug["zwiadowca-kodu"].adapterType, "codex_local");
+  assert.equal(bySlug["zwiadowca-kodu"].status, "paused");
+  assert.equal(bySlug["zwiadowca-kodu"].manageStatus, true);
+  assert.equal(bySlug["zwiadowca-kodu"].expectedRuntimePolicy.status, "paused");
+  assert.equal(bySlug["zwiadowca-kodu"].expectedRuntimePolicy.maxConcurrentRuns, 1);
+  assert.equal(bySlug["zwiadowca-kodu"].expectedRuntimePolicy.adapterType, "codex_local");
+  assert.equal(bySlug["zwiadowca-kodu"].expectedRuntimePolicy.model, "gpt-5.6-terra");
+  assert.equal(
+    bySlug["zwiadowca-kodu"].expectedRuntimePolicy.adapterConfig.modelReasoningEffort,
+    "medium",
+  );
+  assert.equal(
+    bySlug["zwiadowca-kodu"].expectedRuntimePolicy.adapterConfig.filesystemWorkspaceAccess,
+    "ro",
+  );
+  assert.deepEqual(bySlug["zwiadowca-kodu"].expectedRuntimePolicy.adapterConfig.networkAllowlist, OPENAI_SAFE_ALLOWLIST);
+  assert.deepEqual(
+    bySlug["zwiadowca-kodu"].expectedRuntimePolicy.adapterConfig.extraArgs,
+    REQUIRED_POLICY_EXTRA_ARGS,
+  );
+  assert.equal(bySlug["zwiadowca-kodu"].expectedRuntimePolicy.heartbeat.enabled, false);
+  assert.equal(bySlug["zwiadowca-kodu"].expectedRuntimePolicy.heartbeat.wakeOnDemand, true);
+  assert.equal(bySlug["zwiadowca-kodu"].expectedRuntimePolicy.heartbeat.maxDailyRuns, 3);
+
   assert.equal(bySlug.recenzent.model, "gpt-5.6-sol");
   assert.equal(bySlug.recenzent.adapterType, "codex_local");
   assert.equal(bySlug.recenzent.status, "paused");
@@ -361,19 +465,46 @@ test("target models and Codex manageStatus paused are encoded", () => {
     "danger-full-access",
     "--skip-git-repo-check",
   ]);
+  assert.equal(bySlug["mi-sie-kodu-codex"].model, "gpt-5.6-sol");
+  assert.equal(bySlug["mi-sie-kodu-codex"].adapterType, "codex_local");
   assert.equal(bySlug["mi-sie-kodu-codex"].status, "paused");
   assert.equal(bySlug["mi-sie-kodu-codex"].manageStatus, true);
+  assert.equal(bySlug["mi-sie-kodu-codex"].expectedRuntimePolicy.status, "paused");
+  assert.equal(bySlug["mi-sie-kodu-codex"].expectedRuntimePolicy.maxConcurrentRuns, 1);
+  assert.equal(bySlug["mi-sie-kodu-codex"].expectedRuntimePolicy.adapterType, "codex_local");
+  assert.equal(bySlug["mi-sie-kodu-codex"].expectedRuntimePolicy.model, "gpt-5.6-sol");
+  assert.equal(
+    bySlug["mi-sie-kodu-codex"].expectedRuntimePolicy.adapterConfig.modelReasoningEffort,
+    "high",
+  );
+  assert.equal(
+    bySlug["mi-sie-kodu-codex"].expectedRuntimePolicy.adapterConfig.filesystemWorkspaceAccess,
+    "rw",
+  );
+  assert.deepEqual(
+    bySlug["mi-sie-kodu-codex"].expectedRuntimePolicy.adapterConfig.networkAllowlist,
+    OPENAI_SAFE_ALLOWLIST_WITH_GITHUB,
+  );
+  assert.deepEqual(
+    bySlug["mi-sie-kodu-codex"].expectedRuntimePolicy.adapterConfig.extraArgs,
+    REQUIRED_POLICY_EXTRA_ARGS,
+  );
+  assert.equal(bySlug["mi-sie-kodu-codex"].expectedRuntimePolicy.heartbeat.enabled, false);
+  assert.equal(bySlug["mi-sie-kodu-codex"].expectedRuntimePolicy.heartbeat.wakeOnDemand, true);
+  assert.equal(bySlug["mi-sie-kodu-codex"].expectedRuntimePolicy.heartbeat.maxDailyRuns, 1);
   assert.ok(
-    desired.agents.agents.filter((a) => !["mi-sie-kodu-codex", "recenzent"].includes(a.slug) && a.manageStatus)
-      .length === 0,
+    desired.agents.agents.filter(
+      (a) =>
+        !["mi-sie-kodu-codex", "recenzent", "zwiadowca-kodu"].includes(a.slug) && a.manageStatus,
+    ).length === 0,
   );
 });
 
-async function assertValidateAndApplyRejectsRecenzentDrift({ mutate, errorCode }) {
+async function assertValidateAndApplyRejectsPolicyDrift({ slug, mutate, errorCode }) {
   const snap = structuredClone(liveAligned);
-  const recenzent = snap.agents.find((a) => a.slug === "recenzent");
-  assert.ok(recenzent, "fixture must include recenzent");
-  mutate(recenzent);
+  const agent = snap.agents.find((a) => a.slug === slug);
+  assert.ok(agent, `fixture must include ${slug}`);
+  mutate(agent);
 
   const validation = validateFleet({
     packageDir: PACKAGE_DIR,
@@ -423,68 +554,266 @@ async function assertValidateAndApplyRejectsRecenzentDrift({ mutate, errorCode }
   assert.ok(report.failed.some((f) => f.step === "validate"));
 }
 
-test("live Recenzent adapterType drift fails validate/apply before API call", async () => {
-  await assertValidateAndApplyRejectsRecenzentDrift({
+const policyDriftCases = [
+  {
+    name: "zwiadowca adapterType drift",
+    slug: "zwiadowca-kodu",
     mutate: (agent) => {
       agent.adapterType = "claude_local";
     },
     errorCode: "live-adapter-type-mismatch",
-  });
-});
-
-test("live Recenzent cwd drift fails validate/apply before API call", async () => {
-  await assertValidateAndApplyRejectsRecenzentDrift({
+  },
+  {
+    name: "zwiadowca model drift",
+    slug: "zwiadowca-kodu",
     mutate: (agent) => {
-      agent.adapterConfig.cwd = "/srv/paperclip/production/recenzent-mirror";
+      agent.adapterConfig.model = "gpt-5.6-sol";
+      agent.model = "gpt-5.6-sol";
     },
-    errorCode: "runtime-policy-cwd-mismatch",
-  });
-});
-
-test("live Recenzent sandbox args drift fails validate/apply before API call", async () => {
-  await assertValidateAndApplyRejectsRecenzentDrift({
+    errorCode: "runtime-policy-model-mismatch",
+  },
+  {
+    name: "zwiadowca effort drift",
+    slug: "zwiadowca-kodu",
     mutate: (agent) => {
-      agent.adapterConfig.extraArgs = ["--sandbox", "workspace-write", "--skip-git-repo-check"];
-    },
-    errorCode: "runtime-policy-extra-args-mismatch",
-  });
-});
-
-test("live Recenzent bypass=true fails validate/apply before API call", async () => {
-  await assertValidateAndApplyRejectsRecenzentDrift({
-    mutate: (agent) => {
-      agent.adapterConfig.dangerouslyBypassApprovalsAndSandbox = true;
+      agent.adapterConfig.modelReasoningEffort = "high";
     },
     errorCode: "runtime-policy-adapter-config-mismatch",
-  });
-});
-
-test("live Recenzent missing allowlist domain fails validate/apply before API call", async () => {
-  await assertValidateAndApplyRejectsRecenzentDrift({
-    mutate: (agent) => {
-      agent.adapterConfig.networkAllowlist = ["chatgpt.com", "api.openai.com"];
-    },
-    errorCode: "runtime-policy-network-allowlist-mismatch",
-  });
-});
-
-test("live Recenzent workspace access drift fails validate/apply before API call", async () => {
-  await assertValidateAndApplyRejectsRecenzentDrift({
+  },
+  {
+    name: "zwiadowca workspace access drift",
+    slug: "zwiadowca-kodu",
     mutate: (agent) => {
       agent.adapterConfig.filesystemWorkspaceAccess = "rw";
     },
     errorCode: "runtime-policy-adapter-config-mismatch",
-  });
-});
-
-test("live Recenzent maxConcurrentRuns drift fails validate/apply before API call", async () => {
-  await assertValidateAndApplyRejectsRecenzentDrift({
+  },
+  {
+    name: "zwiadowca extra args drift",
+    slug: "zwiadowca-kodu",
+    mutate: (agent) => {
+      agent.adapterConfig.extraArgs = ["--sandbox", "workspace-write", "--skip-git-repo-check"];
+    },
+    errorCode: "runtime-policy-extra-args-mismatch",
+  },
+  {
+    name: "zwiadowca bypass drift",
+    slug: "zwiadowca-kodu",
+    mutate: (agent) => {
+      agent.adapterConfig.dangerouslyBypassApprovalsAndSandbox = true;
+    },
+    errorCode: "runtime-policy-adapter-config-mismatch",
+  },
+  {
+    name: "zwiadowca maxConcurrentRuns drift",
+    slug: "zwiadowca-kodu",
     mutate: (agent) => {
       agent.maxConcurrentRuns = 2;
     },
     errorCode: "runtime-policy-max-concurrent-mismatch",
+  },
+  {
+    name: "zwiadowca maxDailyRuns drift",
+    slug: "zwiadowca-kodu",
+    mutate: (agent) => {
+      agent.heartbeat.maxDailyRuns = 1;
+    },
+    errorCode: "runtime-policy-heartbeat-max-daily-runs-mismatch",
+  },
+  {
+    name: "zwiadowca status drift",
+    slug: "zwiadowca-kodu",
+    mutate: (agent) => {
+      agent.status = "idle";
+    },
+    errorCode: "runtime-policy-status-mismatch",
+  },
+  {
+    name: "zwiadowca network allowlist drift",
+    slug: "zwiadowca-kodu",
+    mutate: (agent) => {
+      agent.adapterConfig.networkAllowlist = [];
+    },
+    errorCode: "runtime-policy-network-allowlist-mismatch",
+  },
+  {
+    name: "zwiadowca heartbeat enabled drift",
+    slug: "zwiadowca-kodu",
+    mutate: (agent) => {
+      agent.heartbeat.enabled = true;
+    },
+    errorCode: "runtime-policy-heartbeat-enabled-mismatch",
+  },
+  {
+    name: "zwiadowca heartbeat wakeOnDemand drift",
+    slug: "zwiadowca-kodu",
+    mutate: (agent) => {
+      agent.heartbeat.wakeOnDemand = false;
+    },
+    errorCode: "runtime-policy-heartbeat-wake-mismatch",
+  },
+  {
+    name: "mi-sie-kodu-codex adapterType drift",
+    slug: "mi-sie-kodu-codex",
+    mutate: (agent) => {
+      agent.adapterType = "claude_local";
+    },
+    errorCode: "live-adapter-type-mismatch",
+  },
+  {
+    name: "mi-sie-kodu-codex model drift",
+    slug: "mi-sie-kodu-codex",
+    mutate: (agent) => {
+      agent.adapterConfig.model = "gpt-5.6-terra";
+      agent.model = "gpt-5.6-terra";
+    },
+    errorCode: "runtime-policy-model-mismatch",
+  },
+  {
+    name: "mi-sie-kodu-codex effort drift",
+    slug: "mi-sie-kodu-codex",
+    mutate: (agent) => {
+      agent.adapterConfig.modelReasoningEffort = "medium";
+    },
+    errorCode: "runtime-policy-adapter-config-mismatch",
+  },
+  {
+    name: "mi-sie-kodu-codex workspace access drift",
+    slug: "mi-sie-kodu-codex",
+    mutate: (agent) => {
+      agent.adapterConfig.filesystemWorkspaceAccess = "ro";
+    },
+    errorCode: "runtime-policy-adapter-config-mismatch",
+  },
+  {
+    name: "mi-sie-kodu-codex extra args drift",
+    slug: "mi-sie-kodu-codex",
+    mutate: (agent) => {
+      agent.adapterConfig.extraArgs = ["--sandbox", "workspace-write", "--skip-git-repo-check"];
+    },
+    errorCode: "runtime-policy-extra-args-mismatch",
+  },
+  {
+    name: "mi-sie-kodu-codex bypass drift",
+    slug: "mi-sie-kodu-codex",
+    mutate: (agent) => {
+      agent.adapterConfig.dangerouslyBypassApprovalsAndSandbox = true;
+    },
+    errorCode: "runtime-policy-adapter-config-mismatch",
+  },
+  {
+    name: "mi-sie-kodu-codex maxConcurrentRuns drift",
+    slug: "mi-sie-kodu-codex",
+    mutate: (agent) => {
+      agent.maxConcurrentRuns = 2;
+    },
+    errorCode: "runtime-policy-max-concurrent-mismatch",
+  },
+  {
+    name: "mi-sie-kodu-codex maxDailyRuns drift",
+    slug: "mi-sie-kodu-codex",
+    mutate: (agent) => {
+      agent.heartbeat.maxDailyRuns = 2;
+    },
+    errorCode: "runtime-policy-heartbeat-max-daily-runs-mismatch",
+  },
+  {
+    name: "mi-sie-kodu-codex status drift",
+    slug: "mi-sie-kodu-codex",
+    mutate: (agent) => {
+      agent.status = "idle";
+    },
+    errorCode: "runtime-policy-status-mismatch",
+  },
+  {
+    name: "mi-sie-kodu-codex network allowlist drift",
+    slug: "mi-sie-kodu-codex",
+    mutate: (agent) => {
+      agent.adapterConfig.networkAllowlist = [];
+    },
+    errorCode: "runtime-policy-network-allowlist-mismatch",
+  },
+  {
+    name: "mi-sie-kodu-codex heartbeat enabled drift",
+    slug: "mi-sie-kodu-codex",
+    mutate: (agent) => {
+      agent.heartbeat.enabled = true;
+    },
+    errorCode: "runtime-policy-heartbeat-enabled-mismatch",
+  },
+  {
+    name: "mi-sie-kodu-codex heartbeat wakeOnDemand drift",
+    slug: "mi-sie-kodu-codex",
+    mutate: (agent) => {
+      agent.heartbeat.wakeOnDemand = false;
+    },
+    errorCode: "runtime-policy-heartbeat-wake-mismatch",
+  },
+  {
+    name: "recenzent adapterType drift",
+    slug: "recenzent",
+    mutate: (agent) => {
+      agent.adapterType = "claude_local";
+    },
+    errorCode: "live-adapter-type-mismatch",
+  },
+  {
+    name: "recenzent extra args drift",
+    slug: "recenzent",
+    mutate: (agent) => {
+      agent.adapterConfig.extraArgs = ["--sandbox", "workspace-write", "--skip-git-repo-check"];
+    },
+    errorCode: "runtime-policy-extra-args-mismatch",
+  },
+  {
+    name: "recenzent cwd drift",
+    slug: "recenzent",
+    mutate: (agent) => {
+      agent.adapterConfig.cwd = "/srv/paperclip/production/recenzent-mirror";
+    },
+    errorCode: "runtime-policy-cwd-mismatch",
+  },
+  {
+    name: "recenzent bypass drift",
+    slug: "recenzent",
+    mutate: (agent) => {
+      agent.adapterConfig.dangerouslyBypassApprovalsAndSandbox = true;
+    },
+    errorCode: "runtime-policy-adapter-config-mismatch",
+  },
+  {
+    name: "recenzent network allowlist drift",
+    slug: "recenzent",
+    mutate: (agent) => {
+      agent.adapterConfig.networkAllowlist = agent.adapterConfig.networkAllowlist.filter(
+        (host) => host !== "auth.openai.com",
+      );
+    },
+    errorCode: "runtime-policy-network-allowlist-mismatch",
+  },
+  {
+    name: "recenzent workspace access drift",
+    slug: "recenzent",
+    mutate: (agent) => {
+      agent.adapterConfig.filesystemWorkspaceAccess = "rw";
+    },
+    errorCode: "runtime-policy-adapter-config-mismatch",
+  },
+  {
+    name: "recenzent maxConcurrentRuns drift",
+    slug: "recenzent",
+    mutate: (agent) => {
+      agent.maxConcurrentRuns = 2;
+    },
+    errorCode: "runtime-policy-max-concurrent-mismatch",
+  },
+];
+
+for (const driftCase of policyDriftCases) {
+  test(`live ${driftCase.name} fails validate/apply before API call`, async () => {
+    await assertValidateAndApplyRejectsPolicyDrift(driftCase);
   });
-});
+}
 
 test("five routines have exact live ids and trigger ids", () => {
   const desired = loadDesired(DESIRED_DIR);
@@ -582,8 +911,13 @@ test("apply dry-run is offline — no API client / env required", async () => {
     assert.ok(report.planned.length > 0);
     assert.ok(report.ok);
     assert.equal(report.completed.length, 0);
-    assert.ok(report.planned.some((c) => c.kind === "agent-pause" && c.target === "mi-sie-kodu-codex"));
-    assert.ok(!report.planned.some((c) => c.kind === "agent-pause" && c.target !== "mi-sie-kodu-codex"));
+    assert.ok(
+      !report.planned.some(
+        (c) =>
+          c.kind === "agent-pause" &&
+          ["recenzent", "zwiadowca-kodu", "mi-sie-kodu-codex"].includes(c.target),
+      ),
+    );
   } finally {
     if (prevUrl !== undefined) process.env.PAPERCLIP_API_URL = prevUrl;
     else delete process.env.PAPERCLIP_API_URL;
@@ -1173,7 +1507,7 @@ test("missing completeness object is a validate error", () => {
   assert.ok(result.errors.some((e) => e.code === "completeness-missing"));
 });
 
-test("snapshotFleet live path maps runtimeConfig heartbeat maxConcurrentRuns", async () => {
+test("snapshotFleet live path maps runtimeConfig heartbeat fields", async () => {
   const companyId = "company-jarvis";
   const snap = await snapshotFleet({
     companyId,
@@ -1187,6 +1521,20 @@ test("snapshotFleet live path maps runtimeConfig heartbeat maxConcurrentRuns", a
   const jarvis = snap.agents.find((agent) => agent.slug === "jarvis");
   assert.ok(jarvis, "snapshot should include jarvis");
   assert.equal(jarvis.maxConcurrentRuns, 0);
+  const zwiadowca = snap.agents.find((agent) => agent.slug === "zwiadowca-kodu");
+  assert.ok(zwiadowca, "snapshot should include zwiadowca-kodu");
+  assert.deepEqual(zwiadowca.heartbeat, {
+    enabled: false,
+    wakeOnDemand: true,
+    maxDailyRuns: 3,
+  });
+  const codex = snap.agents.find((agent) => agent.slug === "mi-sie-kodu-codex");
+  assert.ok(codex, "snapshot should include mi-sie-kodu-codex");
+  assert.deepEqual(codex.heartbeat, {
+    enabled: false,
+    wakeOnDemand: true,
+    maxDailyRuns: 1,
+  });
 
   const validation = validateFleet({
     packageDir: PACKAGE_DIR,
