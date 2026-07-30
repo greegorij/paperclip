@@ -5506,6 +5506,48 @@ describeEmbeddedPostgres("accepted plan decomposition", () => {
     expect(companyIssues).toHaveLength(2);
   });
 
+  it("allows seven accepted-plan children for one actor run via the decomposition exemption and stays idempotent", async () => {
+    const { companyId, sourceIssueId, acceptedPlanRevisionId, assigneeAgentId } = await seedAcceptedPlanIssue();
+    const actorRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: actorRunId,
+      companyId,
+      agentId: assigneeAgentId,
+      status: "running",
+      invocationSource: "manual",
+    });
+    const children = Array.from({ length: 7 }, (_, index) => ({
+      title: `Accepted decomposition child ${index + 1} ${randomUUID()}`,
+      status: "todo" as const,
+      workMode: "standard" as const,
+      priority: "medium" as const,
+    }));
+
+    const first = await svc.decomposeAcceptedPlan(sourceIssueId, {
+      acceptedPlanRevisionId,
+      children,
+      actorAgentId: assigneeAgentId,
+      actorRunId,
+    });
+    expect(first.childIssueIds).toHaveLength(7);
+    expect(first.newlyCreatedIssues).toHaveLength(7);
+
+    const replay = await svc.decomposeAcceptedPlan(sourceIssueId, {
+      acceptedPlanRevisionId,
+      children,
+      actorAgentId: assigneeAgentId,
+      actorRunId,
+    });
+    expect(replay.childIssueIds).toEqual(first.childIssueIds);
+    expect(replay.newlyCreatedIssues).toHaveLength(0);
+
+    const persistedChildren = await db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(eq(issues.parentId, sourceIssueId));
+    expect(persistedChildren).toHaveLength(7);
+  });
+
   it("rejects a different child set for the same accepted plan fingerprint", async () => {
     const { sourceIssueId, acceptedPlanRevisionId, assigneeAgentId } = await seedAcceptedPlanIssue();
 

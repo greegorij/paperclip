@@ -240,6 +240,43 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(admittedWake).not.toBeNull();
   });
 
+  it("keeps hard-stop active past 6h-old runs and unblocks on fresh issue input", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+
+    await seedTerminalRun({ companyId, agentId, issueId, finishedSecondsAgo: 7 * 60 * 60 + 180 });
+    await seedTerminalRun({ companyId, agentId, issueId, finishedSecondsAgo: 7 * 60 * 60 + 120 });
+    await seedTerminalRun({ companyId, agentId, issueId, finishedSecondsAgo: 7 * 60 * 60 + 60 });
+
+    const hardStoppedWake = await assignmentWake(agentId, issueId);
+    expect(hardStoppedWake).toBeNull();
+
+    const skipped = await latestWakeRequest(agentId);
+    expect(skipped?.status).toBe("skipped");
+    expect(skipped?.reason).toBe("issue_rewake_hard_stopped");
+    const heartbeatSkip = (skipped?.payload as Record<string, unknown> | null)?.heartbeatSkip as
+      | Record<string, unknown>
+      | undefined;
+    expect(heartbeatSkip?.blockKind).toBe("hard_stop");
+    expect(heartbeatSkip?.requestedReason).toBe("issue_assigned");
+    expect(heartbeatSkip?.streak).toBe(3);
+    expect(heartbeatSkip?.retryable).toBe(false);
+    expect(typeof heartbeatSkip?.lastRunFinishedAt).toBe("string");
+    expect(heartbeatSkip?.nextAllowedAt).toBeUndefined();
+
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "user",
+      actorId: "board-user",
+      action: "issue.comment_added",
+      entityType: "issue",
+      entityId: issueId,
+      createdAt: new Date(),
+    });
+
+    const admittedWake = await assignmentWake(agentId, issueId);
+    expect(admittedWake).not.toBeNull();
+  });
+
   it("does not throttle comment-driven wakes even during a no-progress streak", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
 

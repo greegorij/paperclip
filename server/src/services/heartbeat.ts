@@ -111,7 +111,6 @@ import {
 import {
   ISSUE_NEW_INPUT_ACTIVITY_ACTIONS,
   ISSUE_PROGRESS_ACTIVITY_ACTIONS,
-  ISSUE_REWAKE_LOOKBACK_MS,
   ISSUE_REWAKE_RUN_SAMPLE_LIMIT,
   evaluateIssueRewakeThrottle,
   isThrottleCandidateIssueRewake,
@@ -16281,7 +16280,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 eq(heartbeatRuns.companyId, agent.companyId),
                 eq(heartbeatRuns.agentId, agentId),
                 sql`${heartbeatRuns.finishedAt} is not null`,
-                gte(heartbeatRuns.finishedAt, new Date(throttleNow.getTime() - ISSUE_REWAKE_LOOKBACK_MS)),
                 sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
               ),
             )
@@ -16331,23 +16329,39 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             });
 
             if (throttleDecision.blocked) {
-              await tx.insert(agentWakeupRequests).values({
-                companyId: agent.companyId,
-                agentId,
-                source,
-                triggerDetail,
-                reason: "issue_rewake_throttled",
-                payload: {
-                  ...(payload ?? {}),
-                  issueId,
-                  heartbeatSkip: {
+              const skipReason = throttleDecision.blockKind === "hard_stop"
+                ? "issue_rewake_hard_stopped"
+                : "issue_rewake_throttled";
+              const heartbeatSkip = throttleDecision.blockKind === "hard_stop"
+                ? {
+                    reason: skipReason,
+                    blockKind: "hard_stop" as const,
+                    requestedReason: reason,
+                    streak: throttleDecision.noProgressStreak,
+                    lastRunFinishedAt: throttleDecision.lastRunFinishedAt.toISOString(),
+                    retryable: false,
+                    remediation:
+                      "Provide new issue input (for example a new comment/interaction) or request an explicit resume/forceFreshSession wake.",
+                  }
+                : {
                     reason: "issue_rewake_throttled",
+                    blockKind: "cooldown" as const,
                     requestedReason: reason,
                     noProgressStreak: throttleDecision.noProgressStreak,
                     cooldownMs: throttleDecision.cooldownMs,
                     lastRunFinishedAt: throttleDecision.lastRunFinishedAt.toISOString(),
                     nextAllowedAt: throttleDecision.nextAllowedAt.toISOString(),
-                  },
+                  };
+              await tx.insert(agentWakeupRequests).values({
+                companyId: agent.companyId,
+                agentId,
+                source,
+                triggerDetail,
+                reason: skipReason,
+                payload: {
+                  ...(payload ?? {}),
+                  issueId,
+                  heartbeatSkip,
                 },
                 status: "skipped",
                 requestedByActorType: opts.requestedByActorType ?? null,

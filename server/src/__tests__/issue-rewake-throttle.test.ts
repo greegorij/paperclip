@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ISSUE_REWAKE_BASE_COOLDOWN_MS,
+  ISSUE_REWAKE_HARD_STOP_THRESHOLD,
   ISSUE_REWAKE_MAX_COOLDOWN_MS,
   ISSUE_REWAKE_NO_PROGRESS_THRESHOLD,
   computeIssueRewakeCooldownMs,
@@ -102,7 +103,10 @@ describe("evaluateIssueRewakeThrottle", () => {
     });
     expect(decision.blocked).toBe(true);
     if (decision.blocked) {
+      expect(decision.blockKind).toBe("cooldown");
       expect(decision.noProgressStreak).toBe(2);
+      expect("cooldownMs" in decision).toBe(true);
+      expect("nextAllowedAt" in decision).toBe(true);
       expect(decision.cooldownMs).toBe(ISSUE_REWAKE_BASE_COOLDOWN_MS);
       expect(decision.nextAllowedAt.getTime()).toBe(
         NOW.getTime() - 10_000 + ISSUE_REWAKE_BASE_COOLDOWN_MS,
@@ -110,7 +114,7 @@ describe("evaluateIssueRewakeThrottle", () => {
     }
   });
 
-  it("allows again after the cooldown elapses", () => {
+  it("does not hard-stop at streak 2 and allows again after cooldown elapses", () => {
     const decision = evaluateIssueRewakeThrottle({
       now: NOW,
       recentTerminalRuns: [
@@ -123,22 +127,24 @@ describe("evaluateIssueRewakeThrottle", () => {
     expect(decision).toEqual({ blocked: false, noProgressStreak: 2 });
   });
 
-  it("escalates the cooldown as the streak grows", () => {
+  it("hard-stops at streak 3 even long after the newest run", () => {
     const decision = evaluateIssueRewakeThrottle({
       now: NOW,
       recentTerminalRuns: [
-        runSample({ id: "r4", finishedSecondsAgo: 10 }),
-        runSample({ id: "r3", finishedSecondsAgo: 30 }),
-        runSample({ id: "r2", finishedSecondsAgo: 60 }),
-        runSample({ id: "r1", finishedSecondsAgo: 90 }),
+        runSample({ id: "r3", finishedSecondsAgo: 45 * 60 }),
+        runSample({ id: "r2", finishedSecondsAgo: 46 * 60 }),
+        runSample({ id: "r1", finishedSecondsAgo: 47 * 60 }),
       ],
       runIdsWithIssueProgress: new Set(),
       hasNewIssueInputSinceLastRun: false,
     });
     expect(decision.blocked).toBe(true);
     if (decision.blocked) {
-      expect(decision.noProgressStreak).toBe(4);
-      expect(decision.cooldownMs).toBe(ISSUE_REWAKE_BASE_COOLDOWN_MS * 4);
+      expect(decision.blockKind).toBe("hard_stop");
+      expect(decision.noProgressStreak).toBe(ISSUE_REWAKE_HARD_STOP_THRESHOLD);
+      expect(decision.lastRunFinishedAt).toEqual(runSample({ id: "r3", finishedSecondsAgo: 45 * 60 }).finishedAt);
+      expect("cooldownMs" in decision).toBe(false);
+      expect("nextAllowedAt" in decision).toBe(false);
     }
   });
 
@@ -169,12 +175,45 @@ describe("evaluateIssueRewakeThrottle", () => {
     expect(decision).toEqual({ blocked: false, noProgressStreak: 0 });
   });
 
+  it("breaks a hard-stop streak when a failed run appears", () => {
+    const decision = evaluateIssueRewakeThrottle({
+      now: NOW,
+      recentTerminalRuns: [
+        runSample({ id: "r4", finishedSecondsAgo: 10 }),
+        runSample({ id: "r3", finishedSecondsAgo: 40 }),
+        runSample({ id: "r2", status: "failed", finishedSecondsAgo: 70 }),
+        runSample({ id: "r1", finishedSecondsAgo: 100 }),
+      ],
+      runIdsWithIssueProgress: new Set(),
+      hasNewIssueInputSinceLastRun: false,
+    });
+    expect(decision.blocked).toBe(true);
+    if (decision.blocked) {
+      expect(decision.blockKind).toBe("cooldown");
+      expect(decision.noProgressStreak).toBe(2);
+    }
+  });
+
   it("allows when new issue input landed after the last run", () => {
     const decision = evaluateIssueRewakeThrottle({
       now: NOW,
       recentTerminalRuns: [
         runSample({ id: "r2", finishedSecondsAgo: 10 }),
         runSample({ id: "r1", finishedSecondsAgo: 40 }),
+      ],
+      runIdsWithIssueProgress: new Set(),
+      hasNewIssueInputSinceLastRun: true,
+    });
+    expect(decision).toEqual({ blocked: false, noProgressStreak: 0 });
+  });
+
+  it("unblocks hard-stop immediately when new issue input arrives", () => {
+    const decision = evaluateIssueRewakeThrottle({
+      now: NOW,
+      recentTerminalRuns: [
+        runSample({ id: "r3", finishedSecondsAgo: 10 }),
+        runSample({ id: "r2", finishedSecondsAgo: 40 }),
+        runSample({ id: "r1", finishedSecondsAgo: 70 }),
       ],
       runIdsWithIssueProgress: new Set(),
       hasNewIssueInputSinceLastRun: true,

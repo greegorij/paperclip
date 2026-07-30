@@ -10,11 +10,12 @@
  * 2.4x cost for one recovery this way).
  *
  * This module decides when such a wake should be skipped: once an issue has
- * accumulated a streak of consecutive succeeded-but-no-issue-progress runs by
- * the same agent, further event-free wakes are held back for an escalating
- * cooldown anchored to the last run's finish time. Any genuinely new input —
- * a comment wake, fresh issue activity, an explicit resume, forceFreshSession,
- * or an event-carrying wake reason — bypasses the throttle entirely.
+ * accumulated consecutive succeeded-but-no-issue-progress runs by the same
+ * agent, event-free wakes are throttled. At streak 2 the wake is held by an
+ * escalating cooldown anchored to the last run finish; at streak 3+ it is
+ * hard-stopped until new issue input arrives or an explicit resume/
+ * forceFreshSession bypasses the gate. Any genuinely new input — comment wake,
+ * fresh issue activity, or event-carrying wake reason — always passes through.
  *
  * Server-side recovery retries (process-loss retries, missing-comment
  * follow-ups) insert their runs directly and never pass through this gate, so
@@ -25,14 +26,14 @@
 /** Consecutive no-progress runs required before the cooldown engages. */
 export const ISSUE_REWAKE_NO_PROGRESS_THRESHOLD = 2;
 
+/** Consecutive no-progress runs that trigger a hard stop. */
+export const ISSUE_REWAKE_HARD_STOP_THRESHOLD = 3;
+
 /** Cooldown after the threshold streak; doubles per additional no-progress run. */
 export const ISSUE_REWAKE_BASE_COOLDOWN_MS = 120_000;
 
 /** Upper bound for the escalating cooldown. */
 export const ISSUE_REWAKE_MAX_COOLDOWN_MS = 30 * 60_000;
-
-/** Only runs newer than this feed the streak; older history is ignored. */
-export const ISSUE_REWAKE_LOOKBACK_MS = 6 * 60 * 60_000;
 
 /** How many recent terminal runs to sample when computing the streak. */
 export const ISSUE_REWAKE_RUN_SAMPLE_LIMIT = 8;
@@ -134,10 +135,17 @@ export type IssueRewakeThrottleDecision =
   | { blocked: false; noProgressStreak: number }
   | {
       blocked: true;
+      blockKind: "cooldown";
       noProgressStreak: number;
       cooldownMs: number;
       lastRunFinishedAt: Date;
       nextAllowedAt: Date;
+    }
+  | {
+      blocked: true;
+      blockKind: "hard_stop";
+      noProgressStreak: number;
+      lastRunFinishedAt: Date;
     };
 
 export function computeIssueRewakeCooldownMs(noProgressStreak: number): number {
@@ -168,10 +176,26 @@ export function evaluateIssueRewakeThrottle(input: IssueRewakeThrottleInput): Is
   const lastRunFinishedAt = runs[0]?.finishedAt;
   if (!lastRunFinishedAt) return { blocked: false, noProgressStreak };
 
+  if (noProgressStreak >= ISSUE_REWAKE_HARD_STOP_THRESHOLD) {
+    return {
+      blocked: true,
+      blockKind: "hard_stop",
+      noProgressStreak,
+      lastRunFinishedAt,
+    };
+  }
+
   const cooldownMs = computeIssueRewakeCooldownMs(noProgressStreak);
   const nextAllowedAt = new Date(lastRunFinishedAt.getTime() + cooldownMs);
   if (input.now.getTime() < nextAllowedAt.getTime()) {
-    return { blocked: true, noProgressStreak, cooldownMs, lastRunFinishedAt, nextAllowedAt };
+    return {
+      blocked: true,
+      blockKind: "cooldown",
+      noProgressStreak,
+      cooldownMs,
+      lastRunFinishedAt,
+      nextAllowedAt,
+    };
   }
   return { blocked: false, noProgressStreak };
 }

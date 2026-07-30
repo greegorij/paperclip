@@ -139,6 +139,14 @@ const ISSUE_COMMENT_RUN_LOG_DERIVATION_MAX_PARALLEL_READS = 8;
 export const ISSUE_CREATE_IDEMPOTENCY_KEY_RETENTION_DAYS = 7;
 const ISSUE_CREATE_IDEMPOTENCY_KEY_RETENTION_MS = ISSUE_CREATE_IDEMPOTENCY_KEY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 const ISSUE_CREATE_IDEMPOTENCY_KEY_CLEANUP_BATCH_SIZE = 500;
+export const AGENT_ISSUE_CREATION_GUARD_PER_RUN_LIMIT = 6;
+export const AGENT_ISSUE_CREATION_GUARD_AGENT_WAVE_30M_LIMIT = 12;
+export const AGENT_ISSUE_CREATION_GUARD_ROOT_WAVE_30M_LIMIT = 4;
+export const AGENT_ISSUE_CREATION_GUARD_TREE_DEPTH_LIMIT = 4;
+export const AGENT_ISSUE_CREATION_GUARD_ROOT_DESCENDANTS_LIMIT = 12;
+const AGENT_ISSUE_CREATION_GUARD_WINDOW_MS = 30 * 60 * 1000;
+const AGENT_ISSUE_CREATION_GUARD_REMEDIATION =
+  "Do not automatically retry. Consolidate work, or use a newly approved plan decomposition / operator intervention.";
 const DELETED_ISSUE_COMMENT_BODY = "";
 const ISSUE_WAKE_DIAGNOSTICS_ACTIVITY_ACTIONS = ["issue.tree_hold_wakeup_deferred"] as const;
 
@@ -606,6 +614,7 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   trustExplicitResponsibleUserId?: boolean;
   idempotencyKey?: string | null;
   allowDuplicate?: boolean;
+  creationGuardExemption?: "accepted_plan_decomposition";
   onDeduplicated?: (reason: "idempotency_key" | "recent_open_title") => void;
 };
 type IssueChildCreateInput = IssueCreateInput & {
@@ -686,6 +695,28 @@ type IssueSubtreeDiagnosticsWakeRequestResultRow = IssueSubtreeDiagnosticsWakeRe
 type IssueSubtreeDiagnosticsActivityResultRow = IssueSubtreeDiagnosticsActivityRow & {
   rowNumber: number | string;
 };
+type AgentIssueCreationGuardDimension =
+  | "per_run"
+  | "agent_wave_30m"
+  | "root_wave_30m"
+  | "tree_depth"
+  | "root_descendants";
+
+function throwAgentIssueCreationGuardRejected(
+  dimension: AgentIssueCreationGuardDimension,
+  limit: number,
+  observed: number,
+): never {
+  throw unprocessable("Agent issue creation guard rejected the request", {
+    code: "agent_issue_creation_guard",
+    dimension,
+    limit,
+    observed,
+    retryable: false,
+    remediation: AGENT_ISSUE_CREATION_GUARD_REMEDIATION,
+  });
+}
+
 export type IssueDependencyReadiness = {
   issueId: string;
   blockerIssueIds: string[];
@@ -6139,6 +6170,7 @@ export function issueService(db: Db) {
           const createdChild = await issueService(tx as unknown as Db).createChild(sourceIssue.id, {
             ...nextChildInput,
             executionWorkspaceInheritanceMode: "strategy_only",
+            creationGuardExemption: "accepted_plan_decomposition",
           });
           const nextIds = [...existingChildIssueIds, createdChild.issue.id];
           const now = new Date();
@@ -6272,9 +6304,19 @@ export function issueService(db: Db) {
         trustExplicitResponsibleUserId,
         idempotencyKey: rawIdempotencyKey,
         allowDuplicate,
+        creationGuardExemption,
         onDeduplicated,
         ...issueData
       } = data;
+      const isAgentCreated = issueData.createdByAgentId != null;
+      const shouldSkipAgentCreationGuard = creationGuardExemption === "accepted_plan_decomposition";
+      const creationRunId = issueData.originRunId ?? actorRunId ?? null;
+      if (isAgentCreated && issueData.originRunId == null && creationRunId) {
+        issueData.originRunId = creationRunId;
+      }
+      const shouldDeduplicateByTitle =
+        allowDuplicate === false
+        || (isAgentCreated && allowDuplicate === undefined);
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;
@@ -6294,9 +6336,13 @@ export function issueService(db: Db) {
         throw unprocessable("in_progress issues require an assignee");
       }
       return db.transaction(async (tx) => {
+        let actualDepth = 0;
+        let agentRequestDepth = issueData.requestDepth ?? 0;
+        let rootIssueId: string | null = null;
+        const isRootInsert = issueData.parentId == null;
         const idempotencyKey = rawIdempotencyKey?.trim() || null;
         const normalizedTitle = normalizeCreateIssueTitle(issueData.title);
-        if (allowDuplicate === false) {
+        if (shouldDeduplicateByTitle) {
           const titleGuardKey =
             `issue-create:title:${companyId}:${issueData.parentId ?? "root"}:${normalizedTitle}`;
           await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${titleGuardKey}, 0))`);
@@ -6334,7 +6380,7 @@ export function issueService(db: Db) {
             .then((rows) => rows.map((row) => row.issues));
           if (existingIssue) deduplicationReason = "idempotency_key";
         }
-        if (!existingIssue && allowDuplicate === false) {
+        if (!existingIssue && shouldDeduplicateByTitle) {
           [existingIssue] = await tx
             .select()
             .from(issues)
@@ -6361,6 +6407,173 @@ export function issueService(db: Db) {
           const [enriched] = await withIssueLabels(tx, [existingIssue]);
           const [withRelations] = await withIssueRelationSummaries(companyId, [enriched], tx);
           return withRelations;
+        }
+
+        if (isAgentCreated && !shouldSkipAgentCreationGuard) {
+          const agentId = issueData.createdByAgentId;
+          if (!agentId) throw unprocessable("createdByAgentId is required for agent issue creation");
+
+          const agentGuardKey = `issue-create:agent:${companyId}:${agentId}`;
+          await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${agentGuardKey}, 0))`);
+
+          if (issueData.parentId) {
+            const isAncestryRow = (value: unknown): value is { id: string; companyId: string; parentId: string | null } => {
+              if (typeof value !== "object" || value === null) return false;
+              const row = value as { id?: unknown; companyId?: unknown; parentId?: unknown };
+              return (
+                typeof row.id === "string"
+                && typeof row.companyId === "string"
+                && (typeof row.parentId === "string" || row.parentId === null)
+              );
+            };
+            const ancestryRows = Array.from(await tx.execute(sql<{
+              id: string;
+              companyId: string;
+              parentId: string | null;
+            }>`
+              with recursive ancestry as (
+                select
+                  current_issue.id,
+                  current_issue.company_id as "companyId",
+                  current_issue.parent_id as "parentId",
+                  array[current_issue.id] as visited_ids
+                from issues current_issue
+                where current_issue.id = ${issueData.parentId}
+                union all
+                select
+                  parent_issue.id,
+                  parent_issue.company_id as "companyId",
+                  parent_issue.parent_id as "parentId",
+                  ancestry.visited_ids || parent_issue.id
+                from issues parent_issue
+                join ancestry on parent_issue.id = ancestry."parentId"
+                where not parent_issue.id = any(ancestry.visited_ids)
+              )
+              select
+                ancestry.id,
+                ancestry."companyId",
+                ancestry."parentId"
+              from ancestry
+            `)).filter(isAncestryRow);
+            if (ancestryRows.length === 0) throw notFound("Parent issue not found");
+            if (ancestryRows.some((row) => row.companyId !== companyId)) {
+              throw unprocessable("Parent issue must belong to the same company");
+            }
+            const lastAncestor = ancestryRows[ancestryRows.length - 1];
+            if (lastAncestor?.parentId != null) {
+              throw unprocessable("Parent ancestry must resolve to a valid root issue");
+            }
+            actualDepth = ancestryRows.length;
+            rootIssueId = lastAncestor?.id ?? null;
+          }
+
+          if (rootIssueId) {
+            const rootGuardKey = `issue-create:root:${companyId}:${rootIssueId}`;
+            await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${rootGuardKey}, 0))`);
+          }
+          agentRequestDepth = actualDepth;
+
+          if (actualDepth > AGENT_ISSUE_CREATION_GUARD_TREE_DEPTH_LIMIT) {
+            throwAgentIssueCreationGuardRejected(
+              "tree_depth",
+              AGENT_ISSUE_CREATION_GUARD_TREE_DEPTH_LIMIT,
+              actualDepth,
+            );
+          }
+
+          if (creationRunId) {
+            const [{ count: perRunCount }] = await tx
+              .select({ count: sql<number>`count(*)::int` })
+              .from(issues)
+              .where(and(
+                eq(issues.companyId, companyId),
+                eq(issues.createdByAgentId, agentId),
+                eq(issues.originRunId, creationRunId),
+              ));
+            const observedPerRun = perRunCount + 1;
+            if (observedPerRun > AGENT_ISSUE_CREATION_GUARD_PER_RUN_LIMIT) {
+              throwAgentIssueCreationGuardRejected(
+                "per_run",
+                AGENT_ISSUE_CREATION_GUARD_PER_RUN_LIMIT,
+                observedPerRun,
+              );
+            }
+          }
+
+          const cutoff = new Date(Date.now() - AGENT_ISSUE_CREATION_GUARD_WINDOW_MS);
+          const [{ count: agentWaveCount }] = await tx
+            .select({ count: sql<number>`count(*)::int` })
+            .from(issues)
+            .where(and(
+              eq(issues.companyId, companyId),
+              eq(issues.createdByAgentId, agentId),
+              gte(issues.createdAt, cutoff),
+            ));
+          const observedAgentWave = agentWaveCount + 1;
+          if (observedAgentWave > AGENT_ISSUE_CREATION_GUARD_AGENT_WAVE_30M_LIMIT) {
+            throwAgentIssueCreationGuardRejected(
+              "agent_wave_30m",
+              AGENT_ISSUE_CREATION_GUARD_AGENT_WAVE_30M_LIMIT,
+              observedAgentWave,
+            );
+          }
+
+          if (isRootInsert) {
+            const [{ count: rootWaveCount }] = await tx
+              .select({ count: sql<number>`count(*)::int` })
+              .from(issues)
+              .where(and(
+                eq(issues.companyId, companyId),
+                eq(issues.createdByAgentId, agentId),
+                isNull(issues.parentId),
+                gte(issues.createdAt, cutoff),
+              ));
+            const observedRootWave = rootWaveCount + 1;
+            if (observedRootWave > AGENT_ISSUE_CREATION_GUARD_ROOT_WAVE_30M_LIMIT) {
+              throwAgentIssueCreationGuardRejected(
+                "root_wave_30m",
+                AGENT_ISSUE_CREATION_GUARD_ROOT_WAVE_30M_LIMIT,
+                observedRootWave,
+              );
+            }
+          }
+
+          if (rootIssueId) {
+            const isDescendantCountRow = (value: unknown): value is { descendantCount: number | string } => {
+              if (typeof value !== "object" || value === null) return false;
+              const row = value as { descendantCount?: unknown };
+              return typeof row.descendantCount === "number" || typeof row.descendantCount === "string";
+            };
+            const descendantRows = Array.from(await tx.execute(sql<{ descendantCount: number | string }>`
+              with recursive descendants as (
+                select
+                  root_issue.id,
+                  array[root_issue.id] as visited_ids
+                from issues root_issue
+                where root_issue.company_id = ${companyId}
+                  and root_issue.id = ${rootIssueId}
+                union all
+                select
+                  child_issue.id,
+                  descendants.visited_ids || child_issue.id
+                from issues child_issue
+                join descendants on child_issue.parent_id = descendants.id
+                where child_issue.company_id = ${companyId}
+                  and not child_issue.id = any(descendants.visited_ids)
+              )
+              select greatest(count(*) - 1, 0)::int as "descendantCount"
+              from descendants
+            `)).filter(isDescendantCountRow);
+            const descendantCount = Number(descendantRows[0]?.descendantCount ?? 0);
+            const observedRootDescendants = descendantCount + 1;
+            if (observedRootDescendants > AGENT_ISSUE_CREATION_GUARD_ROOT_DESCENDANTS_LIMIT) {
+              throwAgentIssueCreationGuardRejected(
+                "root_descendants",
+                AGENT_ISSUE_CREATION_GUARD_ROOT_DESCENDANTS_LIMIT,
+                observedRootDescendants,
+              );
+            }
+          }
         }
 
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
@@ -6512,7 +6725,9 @@ export function issueService(db: Db) {
         const values = {
           ...issueData,
           responsibleUserId,
-          requestDepth: clampIssueRequestDepth(issueData.requestDepth),
+          requestDepth: isAgentCreated
+            ? clampIssueRequestDepth(agentRequestDepth)
+            : clampIssueRequestDepth(issueData.requestDepth),
           originKind: issueData.originKind ?? "manual",
           goalId: resolveIssueGoalId({
             projectId: issueData.projectId,
