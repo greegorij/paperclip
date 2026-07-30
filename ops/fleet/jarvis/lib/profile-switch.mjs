@@ -775,8 +775,21 @@ async function verifyPatchedAgent(client, expectedStep) {
   if (!deepEqual(liveRuntime, expectedStep.to.runtimeConfig)) {
     return { ok: false, error: `${expectedStep.slug}: runtimeConfig verify mismatch` };
   }
-  const liveSkills = Array.isArray(live.desiredSkills) ? live.desiredSkills : [];
-  if (!deepEqual(liveSkills, expectedStep.from.desiredSkills)) {
+  // GET /api/agents/:id does not include desiredSkills; assignment lives on /skills.
+  const skillsRes = await client.get(`/api/agents/${expectedStep.agentId}/skills`);
+  if (!skillsRes.ok) {
+    return {
+      ok: false,
+      error: `${expectedStep.slug}: desiredSkills verify GET failed HTTP ${skillsRes.status}`,
+    };
+  }
+  if (!Array.isArray(skillsRes.data?.desiredSkills)) {
+    return {
+      ok: false,
+      error: `${expectedStep.slug}: desiredSkills missing from skills verify GET`,
+    };
+  }
+  if (!deepEqual(skillsRes.data.desiredSkills, expectedStep.from.desiredSkills)) {
     return { ok: false, error: `${expectedStep.slug}: desiredSkills drift during profile patch` };
   }
   return { ok: true };

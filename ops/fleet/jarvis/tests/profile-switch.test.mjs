@@ -125,6 +125,9 @@ function createApiMock(
     failBundlePut = null,
     instructionsBundleState = {},
     orderLog = null,
+    omitDesiredSkillsOnAgentGet = false,
+    skillsDesiredSkillsBySlug = null,
+    omitDesiredSkillsArrayOnSkillsGetForSlug = null,
   } = {},
 ) {
   const byId = new Map((snapshot.agents ?? []).map((agent) => [agent.id, structuredClone(agent)]));
@@ -186,24 +189,53 @@ function createApiMock(
           data: { path: requestedPath, content },
         };
       }
+      const skillsMatch = url.match(/^\/api\/agents\/([^/]+)\/skills$/);
+      if (skillsMatch) {
+        const agent = byId.get(skillsMatch[1]);
+        if (!agent) return { ok: false, status: 404, data: null };
+        if (omitDesiredSkillsArrayOnSkillsGetForSlug === agent.slug) {
+          return { ok: true, status: 200, data: { entries: [] } };
+        }
+        if (
+          skillsDesiredSkillsBySlug
+          && Object.prototype.hasOwnProperty.call(skillsDesiredSkillsBySlug, agent.slug)
+        ) {
+          return {
+            ok: true,
+            status: 200,
+            data: { desiredSkills: structuredClone(skillsDesiredSkillsBySlug[agent.slug]) },
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          data: {
+            desiredSkills: Array.isArray(agent.desiredSkills) ? [...agent.desiredSkills] : [],
+          },
+        };
+      }
       const match = url.match(/^\/api\/agents\/([^/]+)$/);
       if (match) {
         const agent = byId.get(match[1]);
         if (!agent) return { ok: false, status: 404, data: null };
+        const payload = structuredClone(agent);
+        if (omitDesiredSkillsOnAgentGet) {
+          delete payload.desiredSkills;
+        }
         if (failVerifyForSlug && agent.slug === failVerifyForSlug) {
           return {
             ok: true,
             status: 200,
             data: {
-              ...agent,
+              ...payload,
               adapterConfig: {
-                ...(agent.adapterConfig ?? {}),
+                ...(payload.adapterConfig ?? {}),
                 model: "wrong-model",
               },
             },
           };
         }
-        return { ok: true, status: 200, data: structuredClone(agent) };
+        return { ok: true, status: 200, data: payload };
       }
       return { ok: false, status: 404, data: null };
     },
@@ -1179,4 +1211,129 @@ test("apply backup keeps exact secret_ref for rollback while report remains reda
 
   const serializedReport = JSON.stringify(report);
   assert.equal(serializedReport.includes(secretRefValue), false);
+});
+
+test("apply verify uses skills GET when agent GET omits desiredSkills", async () => {
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const badacz = snapshot.agents.find((agent) => agent.slug === "badacz");
+  const preservedSkills = [
+    "paperclipai/paperclip/paperclip",
+    "paperclipai/paperclip/paperclip-converting-plans-to-tasks",
+    "local/59da7d4268/research",
+  ];
+  badacz.desiredSkills = [...preservedSkills];
+  badacz.adapterType = "codex_local";
+  badacz.adapterConfig = { model: "wrong-model" };
+  badacz.runtimeConfig = {};
+
+  const api = createApiMock(snapshot, {
+    omitDesiredSkillsOnAgentGet: true,
+  });
+  const backup = makeBackupGate();
+  const stateBackupFile = path.join(mkdtempSync(path.join(os.tmpdir(), "jarvis-state-")), "pre.json");
+  const report = await applyProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    companyId: "company-jarvis",
+    profileName: "anthropic-first",
+    confirmProfile: "anthropic-first",
+    backupGate: backup,
+    stateBackupFile,
+    api,
+    liveSnapshot: snapshot,
+    runtimeEnv: ANTHROPIC_RUNTIME_ENV,
+  });
+  assert.equal(report.ok, true, JSON.stringify(report.failed, null, 2));
+  assert.ok(api.patchCalls.some((call) => call.slug === "badacz" && call.body.adapterType === "claude_local"));
+  assert.ok(
+    api.getCalls.some((call) => String(call.url).match(/^\/api\/agents\/[^/]+\/skills$/)),
+  );
+  assert.ok(api.getCalls.some((call) => String(call.url).match(/^\/api\/agents\/[^/]+$/)));
+  assert.deepEqual(api.peekBySlug("badacz").desiredSkills, preservedSkills);
+});
+
+test("apply fails closed when skills GET drifts from planned desiredSkills", async () => {
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const badacz = snapshot.agents.find((agent) => agent.slug === "badacz");
+  badacz.desiredSkills = [
+    "paperclipai/paperclip/paperclip",
+    "local/59da7d4268/research",
+  ];
+  badacz.adapterType = "codex_local";
+  badacz.adapterConfig = { model: "wrong-model" };
+  badacz.runtimeConfig = {};
+  const baselineBadacz = structuredClone(badacz);
+
+  const api = createApiMock(snapshot, {
+    omitDesiredSkillsOnAgentGet: true,
+    skillsDesiredSkillsBySlug: {
+      badacz: ["paperclipai/paperclip/paperclip"],
+    },
+  });
+  const backup = makeBackupGate();
+  const stateBackupFile = path.join(mkdtempSync(path.join(os.tmpdir(), "jarvis-state-")), "pre.json");
+  const report = await applyProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    companyId: "company-jarvis",
+    profileName: "anthropic-first",
+    confirmProfile: "anthropic-first",
+    backupGate: backup,
+    stateBackupFile,
+    api,
+    liveSnapshot: snapshot,
+    runtimeEnv: ANTHROPIC_RUNTIME_ENV,
+  });
+  assert.equal(report.ok, false);
+  assert.ok(
+    report.failed.some(
+      (item) => item.step === "patch"
+        && item.slug === "badacz"
+        && String(item.error).includes("desiredSkills drift"),
+    ),
+  );
+  assert.ok(report.rolledBack.some((item) => item.slug === "badacz"));
+  assert.deepEqual(api.peekBySlug("badacz"), baselineBadacz);
+});
+
+test("apply fails closed when skills GET is missing desiredSkills array", async () => {
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const badacz = snapshot.agents.find((agent) => agent.slug === "badacz");
+  badacz.desiredSkills = [
+    "paperclipai/paperclip/paperclip",
+    "local/59da7d4268/research",
+  ];
+  badacz.adapterType = "codex_local";
+  badacz.adapterConfig = { model: "wrong-model" };
+  badacz.runtimeConfig = {};
+  const baselineBadacz = structuredClone(badacz);
+
+  const api = createApiMock(snapshot, {
+    omitDesiredSkillsOnAgentGet: true,
+    omitDesiredSkillsArrayOnSkillsGetForSlug: "badacz",
+  });
+  const backup = makeBackupGate();
+  const stateBackupFile = path.join(mkdtempSync(path.join(os.tmpdir(), "jarvis-state-")), "pre.json");
+  const report = await applyProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    companyId: "company-jarvis",
+    profileName: "anthropic-first",
+    confirmProfile: "anthropic-first",
+    backupGate: backup,
+    stateBackupFile,
+    api,
+    liveSnapshot: snapshot,
+    runtimeEnv: ANTHROPIC_RUNTIME_ENV,
+  });
+  assert.equal(report.ok, false);
+  assert.ok(
+    report.failed.some(
+      (item) => item.step === "patch"
+        && item.slug === "badacz"
+        && String(item.error).includes("desiredSkills missing from skills verify GET"),
+    ),
+  );
+  assert.ok(report.rolledBack.some((item) => item.slug === "badacz"));
+  assert.deepEqual(api.peekBySlug("badacz"), baselineBadacz);
 });
