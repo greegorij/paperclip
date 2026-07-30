@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-07-30
+
+### Naprawione
+- **Bezpieczne raportowanie limitów OpenAI/Codex**: etykiety okien wynikają z rzeczywistej długości (`windowDurationMins`), a nie z pozycji `primary`/`secondary`; subskrypcja bez dodatkowych kredytów nie pokazuje mylącego salda `$0.00`, przy zachowanej kompatybilności ze starszym RPC bez `hasCredits`; diagnostyka quota-probe nie eksponuje ani nie serializuje tokenów uwierzytelnienia ani identyfikatora konta (zostawia tylko bezpieczne metadane).
+
 ## [0.2.0] — 2026-07-29
 
 ### Dodane
