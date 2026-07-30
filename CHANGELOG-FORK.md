@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+## [0.2.8] — 2026-07-30
+
+### Dodane / Wzmocnione
+- **Zewnętrzny katalog roboczy tylko do odczytu dla Codexa:** lokalna izolacja Bubblewrap obsługuje teraz jawny tryb `ro`/`rw`; w trybie `ro` blokuje także zapisywalne wyjątki i aliasy prowadzące do katalogu roboczego, pozostawiając zapisywalny wyłącznie prywatny katalog wykonawczy Codexa.
+- **Kontrolowany kanał koordynacji Recenzenta:** Bubblewrap pozostaje twardą granicą plików i sieci, a wewnętrzny sandbox Codexa nie odcina już dozwolonej komunikacji z Paperclip; niebezpieczne ominięcie zatwierdzeń nadal jest wyłączone.
+- **Kontrola dryfu profilu:** walidator floty wymaga dla Recenzenta katalogu tylko do odczytu, zamkniętej listy sieciowej, równoległości 1 oraz dokładnego zestawu argumentów; pełne zastosowanie floty nadal nie nadpisuje automatycznie tych pól.
+
 ## [0.2.7] — 2026-07-30
 
 ### Naprawione / Wzmocnione
