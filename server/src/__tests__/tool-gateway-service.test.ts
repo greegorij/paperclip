@@ -996,4 +996,133 @@ describeEmbeddedPostgres("tool gateway service", () => {
     expect(serialized).not.toContain("sk-secret-value");
     expect(serialized).toContain("***REDACTED***");
   });
+
+  describe("paperclip-self:get_issue_context", () => {
+    async function allowGetIssueContext(companyId: string) {
+      await db.insert(toolPolicies).values({
+        companyId,
+        name: "Allow get issue context",
+        policyType: "allow",
+        selectors: { toolName: "paperclip-self:get_issue_context" },
+      });
+    }
+
+    it("resolves by internal UUID within the authenticated company", async () => {
+      const { company, agent, issue, run } = await createRunFixture(db);
+      await db.update(issues).set({ identifier: `${company.issuePrefix}-850` }).where(eq(issues.id, issue.id));
+      await allowGetIssueContext(company.id);
+      const gateway = createTestToolGatewayService(db);
+      const session = await gateway.createSession({
+        companyId: company.id,
+        agentId: agent.id,
+        runId: run.id,
+      });
+
+      const result = await gateway.executeTool({
+        sessionToken: session.token,
+        tool: "paperclip-self:get_issue_context",
+        parameters: { issueId: issue.id },
+      });
+
+      expect((result.result as { data?: { issue?: { id?: string; identifier?: string; title?: string } } }).data).toMatchObject({
+        issue: {
+          id: issue.id,
+          identifier: `${company.issuePrefix}-850`,
+          title: issue.title,
+        },
+      });
+    });
+
+    it("resolves by visible case-insensitive identifier within the authenticated company", async () => {
+      const { company, agent, issue, run } = await createRunFixture(db);
+      const identifier = `${company.issuePrefix}-850`;
+      await db.update(issues).set({ identifier }).where(eq(issues.id, issue.id));
+      await allowGetIssueContext(company.id);
+      const gateway = createTestToolGatewayService(db);
+      const session = await gateway.createSession({
+        companyId: company.id,
+        agentId: agent.id,
+        runId: run.id,
+      });
+
+      const result = await gateway.executeTool({
+        sessionToken: session.token,
+        tool: "paperclip-self:get_issue_context",
+        parameters: { issueId: identifier.toLowerCase() },
+      });
+
+      expect((result.result as { data?: { issue?: { id?: string; identifier?: string } } }).data).toMatchObject({
+        issue: {
+          id: issue.id,
+          identifier,
+        },
+      });
+    });
+
+    it("falls back to session.issueId when issueId is omitted", async () => {
+      const { company, agent, issue, run } = await createRunFixture(db);
+      await db.update(issues).set({ identifier: `${company.issuePrefix}-850` }).where(eq(issues.id, issue.id));
+      await allowGetIssueContext(company.id);
+      const gateway = createTestToolGatewayService(db);
+      const session = await gateway.createSession({
+        companyId: company.id,
+        agentId: agent.id,
+        runId: run.id,
+      });
+      expect(session.issueId).toBe(issue.id);
+
+      const result = await gateway.executeTool({
+        sessionToken: session.token,
+        tool: "paperclip-self:get_issue_context",
+        parameters: {},
+      });
+
+      expect((result.result as { data?: { issue?: { id?: string } } }).data).toMatchObject({
+        issue: { id: issue.id },
+      });
+    });
+
+    it("returns not found for an unknown reference without a DB 500", async () => {
+      const { company, agent, run } = await createRunFixture(db);
+      await allowGetIssueContext(company.id);
+      const gateway = createTestToolGatewayService(db);
+      const session = await gateway.createSession({
+        companyId: company.id,
+        agentId: agent.id,
+        runId: run.id,
+      });
+
+      await expect(gateway.executeTool({
+        sessionToken: session.token,
+        tool: "paperclip-self:get_issue_context",
+        parameters: { issueId: "GG-99999" },
+      })).rejects.toMatchObject({
+        status: 404,
+        reasonCode: "issue_not_found",
+      } satisfies Partial<ToolGatewayHttpError>);
+    });
+
+    it("returns not found for a cross-company identifier and does not leak data", async () => {
+      const home = await createRunFixture(db);
+      const foreign = await createRunFixture(db);
+      const foreignIdentifier = `${foreign.company.issuePrefix}-850`;
+      await db.update(issues).set({ identifier: foreignIdentifier }).where(eq(issues.id, foreign.issue.id));
+      await allowGetIssueContext(home.company.id);
+      const gateway = createTestToolGatewayService(db);
+      const session = await gateway.createSession({
+        companyId: home.company.id,
+        agentId: home.agent.id,
+        runId: home.run.id,
+      });
+
+      await expect(gateway.executeTool({
+        sessionToken: session.token,
+        tool: "paperclip-self:get_issue_context",
+        parameters: { issueId: foreignIdentifier },
+      })).rejects.toMatchObject({
+        status: 404,
+        reasonCode: "issue_not_found",
+      } satisfies Partial<ToolGatewayHttpError>);
+    });
+  });
 });

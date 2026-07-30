@@ -670,10 +670,20 @@ const BUILTIN_TOOLS: ToolGatewayDescriptor[] = [
   {
     name: "paperclip-self:get_issue_context",
     displayName: "Get issue context",
-    description: "Paperclip self-MCP read fixture that returns scoped issue context and plan document metadata.",
+    description:
+      "Paperclip self-MCP read fixture that returns scoped issue context and plan document metadata. "
+      + "Accepts an internal issue UUID or the visible case-insensitive issue identifier (for example GG-850) "
+      + "within the authenticated company. Prefer omitting issueId in an issue-scoped session so the session issue is used.",
     parametersSchema: {
       type: "object",
-      properties: { issueId: { type: "string" } },
+      properties: {
+        issueId: {
+          type: "string",
+          description:
+            "Optional. Internal issue UUID or visible case-insensitive identifier within the authenticated company. "
+            + "Omit in an issue-scoped session to use session.issueId.",
+        },
+      },
       additionalProperties: false,
     },
     pluginId: "paperclip-self",
@@ -2016,6 +2026,11 @@ export function createToolGatewayService(
       if (!issueId) {
         throw new ToolGatewayHttpError(400, "issueId is required when the session is not issue-scoped", "missing_issue_id");
       }
+      // Guard the UUID column: issues.id is uuid — a visible identifier like "GG-850"
+      // must never be compared to it (Postgres invalid-input-syntax → HTTP 500).
+      const idMatch = uuidPattern.test(issueId)
+        ? eq(issues.id, issueId)
+        : eq(issues.identifier, issueId.toUpperCase());
       const [issue] = await db
         .select({
           id: issues.id,
@@ -2026,7 +2041,7 @@ export function createToolGatewayService(
           priority: issues.priority,
         })
         .from(issues)
-        .where(and(eq(issues.companyId, session.companyId), eq(issues.id, issueId)))
+        .where(and(eq(issues.companyId, session.companyId), idMatch))
         .limit(1);
       if (!issue) {
         throw new ToolGatewayHttpError(404, "Issue not found", "issue_not_found");
