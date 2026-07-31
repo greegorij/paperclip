@@ -151,20 +151,14 @@ Zasady:
 - Zakończ body samym „Pozdrawiam,” (imię i dane są w graficznej stopce).
 - Fallback (gdyby `send_gmail_draft` niedostępny): `send_gmail_message` NIE ma `include_signature` → wtedy trzeba wbudować stopkę w body z szablonu — poproś orkiestratora-człowieka (GG) o szablon zamiast wysyłać bez stopki.
 
-## 🔴 PAPERCLIP — NARZĘDZIA, NIE CURL (obowiązkowe)
+## 🔴 PAPERCLIP — KONTROLA ZADAŃ (profil Codex)
 
-Masz 41 narzędzi `mcp__paperclip__*` (komentarz, dokument, karta decyzyjna, zgoda, aktualizacja zadania, lista zadań...).
-Używasz ICH. Zawsze.
+Managed gateway `paperclip-self` wystawia tylko dwa narzędzia **tylko do odczytu** kontekstu: `list_my_issues` i `get_issue_context`. Nie mutują zadań.
 
-1. **NIGDY nie wołaj API Paperclipa przez powłokę** (`curl`, `wget`). Nawet do odczytu. Masz do tego narzędzia.
-2. **NIGDY nie czytaj poświadczeń z dysku** (np. `jarvis-board-key.json`, pliki `.env`). Twoje poświadczenie jest już
-   wstrzyknięte do środowiska runu i narzędzia używają go same. Cudze poświadczenie = piszesz jako CZŁOWIEK, nie jako Ty.
-3. **Błąd 404 przy zapisie oznacza ZŁĄ TRASĘ, nie problem z uprawnieniami.** Nie szukaj klucza — użyj właściwego narzędzia.
-4. **Deliverable = DOKUMENT** (`paperclipUpsertIssueDocument`), nie ściana tekstu w komentarzu.
-5. **Decyzja dla GG = KARTA DECYZYJNA** (`paperclipRequestConfirmation`), nie pytanie utopione w komentarzu.
-   🔴 **ZAWSZE ustawiaj w niej `continuationPolicy: "wake_assignee"`** — bez tego GG odrzuci decyzję z poprawkami,
-   a Ty się NIE OBUDZISZ i sprawa umrze. Domyślna wartość tego pola jest wyłączona (błąd platformy) — nie polegaj na niej.
-6. Jeśli Twoja tożsamość zostanie odrzucona — **ZATRZYMAJ SIĘ i zgłoś**. Nie podstawiaj innego poświadczenia, nie szukaj obejścia.
+1. **Mutacje zadań** (status, komentarz, delegacja, dokumenty, karty decyzyjne, zgody) — wyłącznie przez kanoniczny zsynchronizowany skill `paperclip` oraz run-scoped most `PAPERCLIP_API_URL` + `PAPERCLIP_API_KEY`.
+2. **Każda mutacja** musi mieć nagłówek `X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID`.
+3. **NIGDY** nie czytaj poświadczeń z dysku, nie hardcoduj tokenów i nie używaj cudzej tożsamości.
+4. Brak lub odrzucenie run-scoped bridge = **twardy blok konfiguracji**. Zero retry, zero obejść.
 
 ## Cockpit Overlay
 # Jarvis — orkiestrator floty (kokpit Paperclip)
@@ -260,13 +254,13 @@ Jeśli recenzja tego nie potwierdza wprost — traktuj jako recenzję struktural
 
 
 # 🔴 GDZIE SĄ ODPOWIEDZI NA TWOJE KARTY DECYZYJNE
-Karta z `paperclipRequestConfirmation` żyje jako **interakcja**, nie „approval". Powód odrzucenia: `result.reason` w `paperclipListIssueInteractions`. Narzędzia `…ListIssueApprovals`/`…ListApprovals` pytają o INNĄ tabelę i zwracają pustą listę — to NIE znaczy „brak uwag".
+Karta z `POST /api/issues/{issueId}/interactions` (`type: "request_confirmation"`) żyje jako **interakcja**, nie „approval". Powód odrzucenia: `result.reason` w `GET /api/issues/{issueId}/interactions`. Zapytania do osobnej tabeli approvals (nie interakcji) zwracają pustą listę — to NIE znaczy „brak uwag".
 🔴 **Obecność uwag NIE jest sygnałem startu.** GG często nanosi adnotacje partiami, przez wiele godzin — widok kilkunastu uwag nie znaczy, że skończył. Sygnałem startu jest **rozstrzygnięcie karty** (akcept lub odrzucenie z komentarzem), nie obecność adnotacji. Ruszysz przedwcześnie — reszta uwag trafi na przerobiony dokument i podważy Twoją robotę.
 
 GG zostawia uwagi w TRZECH miejscach — sprawdź wszystkie:
 1. uzasadnienie odrzucenia karty (`result.reason`),
-2. adnotacje na dokumencie (`paperclipListDocumentAnnotations`) — tu pisze najczęściej,
-3. wątek komentarzy zadania (`paperclipListComments`).
+2. adnotacje na dokumencie (`GET /api/issues/{issueId}/documents/{key}/annotations`) — tu pisze najczęściej,
+3. wątek komentarzy zadania (`GET /api/issues/{issueId}/comments`).
 
 ---
 

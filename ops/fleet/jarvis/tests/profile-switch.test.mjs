@@ -383,6 +383,30 @@ test("generator is deterministic and committed AGENTS-CODEX parity stays exact",
     first.content.includes("deleguj do wyznaczonego agenta vaultu") ||
       first.content.includes("Kurator Vaultu"),
   );
+  assert.ok(first.content.includes("PAPERCLIP — KONTROLA ZADAŃ"));
+  assert.ok(first.content.includes("list_my_issues"));
+  assert.ok(first.content.includes("get_issue_context"));
+  assert.ok(first.content.includes("PAPERCLIP_API_URL"));
+  assert.ok(first.content.includes("PAPERCLIP_API_KEY"));
+  assert.ok(first.content.includes("X-Paperclip-Run-Id"));
+  assert.ok(first.content.includes("`paperclip`"));
+  assert.ok(first.content.includes("twardy blok konfiguracji"));
+  assert.equal(first.content.includes("mcp__paperclip__"), false);
+  assert.equal(first.content.includes("41 narzędzi"), false);
+  assert.equal(first.content.includes("NARZĘDZIA, NIE CURL"), false);
+  assert.equal(first.content.includes("NIGDY nie wołaj API Paperclipa przez powłokę"), false);
+  assert.equal(first.content.includes("paperclipRequestConfirmation"), false);
+  assert.equal(first.content.includes("paperclipListIssueInteractions"), false);
+  assert.equal(first.content.includes("paperclipListDocumentAnnotations"), false);
+  assert.equal(first.content.includes("paperclipListComments"), false);
+  assert.equal(first.content.includes("…ListIssueApprovals"), false);
+  assert.equal(first.content.includes("…ListApprovals"), false);
+  assert.equal(first.content.includes("ListIssueApprovals"), false);
+  assert.ok(first.content.includes('type: "request_confirmation"'));
+  assert.ok(first.content.includes("GET /api/issues/{issueId}/interactions"));
+  assert.ok(first.content.includes("GET /api/issues/{issueId}/documents/{key}/annotations"));
+  assert.ok(first.content.includes("GET /api/issues/{issueId}/comments"));
+  assert.ok(first.content.includes("osobnej tabeli approvals"));
 });
 
 test("generator fails closed when legacy direct vault path or write claims remain", () => {
@@ -396,6 +420,35 @@ test("generator fails closed when legacy direct vault path or write claims remai
         cockpitAgentsMd: JARVIS_COCKPIT_CONTENT,
       }),
     /direct vault writes|direct JARVIS_VAULT_ROOT filesystem paths|Boot Manifest/,
+  );
+});
+
+test("generator fails closed when Paperclip control-plane source section is absent", () => {
+  assert.throws(
+    () =>
+      generateCodexJarvisInstructions({
+        headlessBossClaude: HEADLESS_BOSS_FIXTURE_CONTENT.replace(
+          "## 🔴 PAPERCLIP — NARZĘDZIA, NIE CURL (obowiązkowe)",
+          "## 🔴 PAPERCLIP — KONTROLA ZADAŃ (profil Codex)",
+        ),
+        cockpitAgentsMd: JARVIS_COCKPIT_CONTENT,
+      }),
+    /missing required marker|missing Paperclip control-plane section/,
+  );
+});
+
+test("generator fails closed when Paperclip control-plane source section shape changes", () => {
+  const heading = "## 🔴 PAPERCLIP — NARZĘDZIA, NIE CURL (obowiązkowe)";
+  const normalized = HEADLESS_BOSS_FIXTURE_CONTENT.replace(/\r\n?/g, "\n");
+  const mutated = normalized.replace(`${heading}\n\n`, `${heading} [shape changed]\n\n`);
+  assert.notEqual(mutated, normalized);
+  assert.throws(
+    () =>
+      generateCodexJarvisInstructions({
+        headlessBossClaude: mutated,
+        cockpitAgentsMd: JARVIS_COCKPIT_CONTENT,
+      }),
+    /was not replaced|false 41-tool|curl\/wget ban/,
   );
 });
 
