@@ -139,6 +139,8 @@ export interface AdapterExecutionTargetProcessOptions {
    */
   onLogBackpressure?: "pause" | "queue";
   maxQueuedOnLogBytes?: number;
+  /** Opt-in temporary-file stdout/stderr capture for a local CLI adapter. */
+  outputCapture?: "pipe" | "tempfile";
 }
 
 export interface AdapterExecutionTargetShellOptions {
@@ -616,6 +618,7 @@ export async function runAdapterExecutionTargetProcess(
     terminalResultCleanup: options.terminalResultCleanup,
     onLogBackpressure: options.onLogBackpressure,
     maxQueuedOnLogBytes: options.maxQueuedOnLogBytes,
+    outputCapture: options.outputCapture,
     localProcessSandbox: target?.kind === "local" || !target ? options.localProcessSandbox : null,
     remoteExecution: adapterExecutionTargetToRemoteSpec(target),
   });

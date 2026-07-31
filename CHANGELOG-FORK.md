@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+## [0.2.17] — 2026-07-31
+
+### Naprawione / Wzmocnione
+- **Duży pojedynczy rekord wyjścia Codexa:** adapter Codexa zapisuje stdout/stderr do ograniczonych plików tymczasowych zamiast do linuksowego potoku o pojemności 64 KiB, odczytuje je na bieżąco z zachowaniem hamowania zapisu logów i usuwa po zakończeniu; przekroczenie limitu zatrzymuje proces zamiast pozwolić na wzrost użycia dysku. Regresje obejmują pojedynczy nieblokujący zapis większy niż potok, odczyt w trakcie pracy i twardy limit wyjścia. Uzupełnia ponownie otwarty bilet `T-202607-007`.
+
+## [0.2.16] — 2026-07-31
+
+### Naprawione / Wzmocnione
+- **Prawdziwy kontrakt narzędzi Paperclip dla Codex-Jarvisa:** generowane instrukcje nie obiecują już nieistniejących narzędzi Claude; odczyty korzystają z zarządzanych połączeń, a mutacje z kanonicznego mechanizmu Paperclip i uwierzytelnienia ograniczonego do konkretnego przebiegu. Naprawę śledzi bilet `T-202607-009`.
+
 ## [0.2.15] — 2026-07-31
 
 ### Naprawione / Wzmocnione

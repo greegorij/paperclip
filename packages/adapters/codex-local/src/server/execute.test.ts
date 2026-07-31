@@ -364,6 +364,7 @@ describe("codex execute — local filesystem sandbox staged CODEX_HOME", () => {
       const options = args[3] as {
         env: Record<string, string>;
         onLogBackpressure?: "pause" | "queue";
+        outputCapture?: "pipe" | "tempfile";
         localProcessSandbox?: {
           homeDir?: string | null;
           filesystemWorkspaceAccess?: "ro" | "rw" | null;
@@ -372,6 +373,7 @@ describe("codex execute — local filesystem sandbox staged CODEX_HOME", () => {
       };
       stagedHomePath = options.localProcessSandbox?.homeDir ?? null;
       expect(options.onLogBackpressure).toBe("queue");
+      expect(options.outputCapture).toBe("tempfile");
       expect(stagedHomePath).toBeTruthy();
       expect(stagedHomePath).toContain("paperclip-codex-home-sync-");
       expect(options.env.CODEX_HOME).toBe(stagedHomePath);

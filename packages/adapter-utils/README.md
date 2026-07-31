@@ -5,6 +5,14 @@ injection, sandbox/SSH transport, workspace sync, and the round-trip helpers
 that move code between the local execution-workspace cwd and wherever the
 agent actually runs.
 
+## Process output capture
+
+`runChildProcess` uses pipes by default. An adapter may opt into
+`outputCapture: "tempfile"` for a local CLI whose single stdout/stderr record
+can exceed an operating-system pipe buffer. Output is tailed as the child runs
+and the temporary directory is removed when it exits. This mode is deliberately
+per-adapter; do not enable it globally without a reproducer and regression test.
+
 For the adapter-author guide see
 [`docs/adapters/creating-an-adapter.md`](../../docs/adapters/creating-an-adapter.md)
 and the in-repo notes at [`packages/adapters/AUTHORING.md`](../adapters/AUTHORING.md).

@@ -475,6 +475,77 @@ describe("runChildProcess", () => {
     expect(await waitForPidExit(descendantPid!, 2_000)).toBe(true);
   });
 
+  it("temporary-file capture accepts one non-blocking stdout write larger than a Linux pipe", async () => {
+    const payload = JSON.stringify({
+      type: "item.completed",
+      item: { type: "agent_message", text: "x".repeat(70 * 1024) },
+    }) + "\n";
+    const logs: Array<{ stream: "stdout" | "stderr"; chunk: string }> = [];
+    const script = [
+      'const fs = require("node:fs");',
+      `const payload = ${JSON.stringify(payload)};`,
+      "fs.writeSync(1, payload);",
+    ].join("\n");
+
+    const result = await runChildProcess(randomUUID(), process.execPath, ["-e", script], {
+      cwd: process.cwd(),
+      env: {},
+      timeoutSec: 15,
+      graceSec: 1,
+      outputCapture: "tempfile",
+      onLog: async (stream, chunk) => {
+        logs.push({ stream, chunk });
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.timedOut).toBe(false);
+    expect(result.stdout).toBe(payload);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      type: "item.completed",
+      item: { type: "agent_message" },
+    });
+    expect(logs.filter((entry) => entry.stream === "stdout").map((entry) => entry.chunk).join("")).toBe(payload);
+  });
+
+  it("temporary-file capture tails output before a long-running child exits", async () => {
+    let sawOutput = false;
+    const resultPromise = runChildProcess(randomUUID(), process.execPath, [
+      "-e",
+      "process.stdout.write('ready\\n'); setTimeout(() => process.exit(0), 250);",
+    ], {
+      cwd: process.cwd(),
+      env: {},
+      timeoutSec: 15,
+      graceSec: 1,
+      outputCapture: "tempfile",
+      onLog: async (_stream, chunk) => {
+        if (chunk.includes("ready")) sawOutput = true;
+      },
+    });
+
+    expect(await waitForTextMatch(() => (sawOutput ? "ready" : ""), /ready/, 1_000)).toBeTruthy();
+    expect((await resultPromise).stdout).toBe("ready\n");
+  });
+
+  it("stops a child whose temporary output exceeds the capture safety limit", async () => {
+    const result = await runChildProcess(randomUUID(), process.execPath, [
+      "-e",
+      "require('node:fs').writeSync(1, Buffer.alloc(4 * 1024 * 1024 + 1, 'x')); setInterval(() => {}, 1_000);",
+    ], {
+      cwd: process.cwd(),
+      env: {},
+      timeoutSec: 15,
+      graceSec: 1,
+      outputCapture: "tempfile",
+      onLog: async () => {},
+    });
+
+    expect(result.outputCaptureLimitExceeded).toBe(true);
+    expect(result.signal).toBe("SIGTERM");
+    expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThanOrEqual(4 * 1024 * 1024);
+  });
+
   it.skipIf(process.platform === "win32")(
     "force-kills a child that ignores SIGTERM once the grace window elapses",
     async () => {

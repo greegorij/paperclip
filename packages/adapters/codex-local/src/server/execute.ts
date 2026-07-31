@@ -1174,6 +1174,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           // (os error 11). Drain pipes continuously and only apply backpressure
           // when the queued onLog budget is exceeded.
           onLogBackpressure: "queue",
+          // A single Codex JSONL event can exceed the Linux pipe capacity.
+          // Capture this adapter's output in files so its non-blocking writer
+          // never sees a full stdout/stderr pipe.
+          outputCapture: "tempfile",
           onLog: async (stream, chunk) => {
             monitor?.noteOutputChunk(stream, chunk);
             if (stream === "stdout") {

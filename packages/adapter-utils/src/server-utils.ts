@@ -3,6 +3,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, promises as fs, type Dirent } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  createTempStdioCaptureSession,
+  type ChildStdioCaptureMode,
+} from "./child-stdio-tempfile.js";
 import { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
 import {
   buildLocalProcessSandboxSpawnTarget,
@@ -15,6 +19,8 @@ import type {
   AdapterSkillSnapshot,
 } from "./types.js";
 
+export type { ChildStdioCaptureMode } from "./child-stdio-tempfile.js";
+
 export interface RunProcessResult {
   exitCode: number | null;
   signal: string | null;
@@ -23,6 +29,8 @@ export interface RunProcessResult {
   stderr: string;
   pid: number | null;
   startedAt: string | null;
+  /** True when temporary stdout/stderr capture reached its fixed safety limit. */
+  outputCaptureLimitExceeded?: boolean;
   terminalResultCleanup?: TerminalResultCleanupEvidence | null;
 }
 
@@ -3170,6 +3178,13 @@ export async function runChildProcess(
     onLogBackpressure?: ChildProcessOnLogBackpressure;
     /** Byte budget for queued `onLog` payloads when `onLogBackpressure` is `"queue"`. */
     maxQueuedOnLogBytes?: number;
+    /**
+     * Where the child writes stdout/stderr. Temporary-file capture avoids
+     * exposing a non-blocking pipe to CLIs that can emit one JSONL record
+     * larger than the operating system pipe buffer. It remains opt-in per
+     * adapter and tails output while the child runs.
+     */
+    outputCapture?: ChildStdioCaptureMode;
     remoteExecution?: RemoteExecutionSpec | null;
     localProcessSandbox?: LocalProcessSandboxOptions | null;
   },
@@ -3215,15 +3230,60 @@ export async function runChildProcess(
         for (const [key, value] of Object.entries(childEnv)) {
           if (value === undefined) delete childEnv[key];
         }
-        const child = spawn(target.command, target.args, {
-          cwd: target.cwd ?? opts.cwd,
-          env: childEnv,
-          detached: process.platform !== "win32",
-          shell: false,
-          stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
-        }) as ChildProcessWithEvents;
+        const pendingTempFileChunks: Array<{ stream: "stdout" | "stderr"; text: string }> = [];
+        let consumeTempFileChunk:
+          | ((stream: "stdout" | "stderr", text: string) => void)
+          | null = null;
+        let childForTempCapture: ChildProcessWithEvents | null = null;
+        let processGroupForTempCapture: number | null = null;
+        let outputCaptureLimitExceeded = false;
+        const tempStdioCapture =
+          opts.outputCapture === "tempfile"
+            ? createTempStdioCaptureSession((stream, text) => {
+                if (consumeTempFileChunk) consumeTempFileChunk(stream, text);
+                else pendingTempFileChunks.push({ stream, text });
+              }, {
+                maxBytes: MAX_CAPTURE_BYTES,
+                onLimit: () => {
+                  outputCaptureLimitExceeded = true;
+                  onLogError(
+                    new Error(`temporary child ${MAX_CAPTURE_BYTES}-byte output limit exceeded`),
+                    runId,
+                    "stopping child after temporary output capture reached its safety limit",
+                  );
+                  if (childForTempCapture) {
+                    signalRunningProcess(
+                      { child: childForTempCapture, processGroupId: processGroupForTempCapture },
+                      "SIGTERM",
+                    );
+                  }
+                },
+              })
+            : null;
+        let child: ChildProcessWithEvents;
+        try {
+          child = spawn(target.command, target.args, {
+            cwd: target.cwd ?? opts.cwd,
+            env: childEnv,
+            detached: process.platform !== "win32",
+            shell: false,
+            stdio: tempStdioCapture
+              ? [
+                  opts.stdin != null ? "pipe" : "ignore",
+                  tempStdioCapture.handles.stdoutWriteFd,
+                  tempStdioCapture.handles.stderrWriteFd,
+                ]
+              : [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
+          }) as ChildProcessWithEvents;
+          tempStdioCapture?.releaseWriteFds();
+        } catch (error) {
+          void tempStdioCapture?.finalize();
+          throw error;
+        }
         const startedAt = new Date().toISOString();
         const processGroupId = resolveProcessGroupId(child);
+        childForTempCapture = child;
+        processGroupForTempCapture = processGroupId;
 
         const spawnPersistPromise =
           typeof child.pid === "number" && child.pid > 0 && opts.onSpawn
@@ -3263,6 +3323,7 @@ export async function runChildProcess(
           streamsPausedForOnLogBacklog = true;
           child.stdout?.pause();
           child.stderr?.pause();
+          tempStdioCapture?.pause();
         };
 
         const resumeStreamsAfterOnLogBacklog = () => {
@@ -3270,6 +3331,7 @@ export async function runChildProcess(
           streamsPausedForOnLogBacklog = false;
           resumeReadable(child.stdout);
           resumeReadable(child.stderr);
+          tempStdioCapture?.resume();
         };
 
         const enqueueOnLog = (stream: "stdout" | "stderr", text: string) => {
@@ -3343,6 +3405,18 @@ export async function runChildProcess(
           }, graceMs);
         };
 
+        const recordOutputChunk = (stream: "stdout" | "stderr", text: string) => {
+          if (stream === "stdout") stdout = appendWithCap(stdout, text);
+          else stderr = appendWithCap(stderr, text);
+          maybeArmTerminalResultCleanup();
+          enqueueOnLog(stream, text);
+        };
+
+        consumeTempFileChunk = recordOutputChunk;
+        for (const { stream, text } of pendingTempFileChunks.splice(0)) {
+          recordOutputChunk(stream, text);
+        }
+
         const timeout =
           opts.timeoutSec > 0
             ? setTimeout(() => {
@@ -3359,20 +3433,14 @@ export async function runChildProcess(
           const readable = child.stdout;
           if (!readable) return;
           if (onLogBackpressure === "pause") readable.pause();
-          const text = String(chunk);
-          stdout = appendWithCap(stdout, text);
-          maybeArmTerminalResultCleanup();
-          enqueueOnLog("stdout", text);
+          recordOutputChunk("stdout", String(chunk));
         });
 
         child.stderr?.on("data", (chunk: unknown) => {
           const readable = child.stderr;
           if (!readable) return;
           if (onLogBackpressure === "pause") readable.pause();
-          const text = String(chunk);
-          stderr = appendWithCap(stderr, text);
-          maybeArmTerminalResultCleanup();
-          enqueueOnLog("stderr", text);
+          recordOutputChunk("stderr", String(chunk));
         });
 
         const stdin = child.stdin;
@@ -3389,6 +3457,7 @@ export async function runChildProcess(
           clearTerminalCleanupTimers();
           runningProcesses.delete(runId);
           void target.cleanup?.();
+          void tempStdioCapture?.finalize();
           const errno = (err as NodeJS.ErrnoException).code;
           const pathValue = mergedEnv.PATH ?? mergedEnv.Path ?? "";
           const msg =
@@ -3410,10 +3479,14 @@ export async function runChildProcess(
           if (timeout) clearTimeout(timeout);
           clearTerminalCleanupTimers();
           runningProcesses.delete(runId);
-          void logChain.finally(() => {
-            void Promise.resolve()
-              .then(() => target.cleanup?.())
-              .finally(() => {
+          void Promise.resolve()
+            .then(async () => {
+              await tempStdioCapture?.finalize();
+              await logChain;
+            })
+            .catch((err) => onLogError(err, runId, "failed to finalize temporary child output capture"))
+            .then(() => target.cleanup?.())
+            .finally(() => {
               resolve({
                 exitCode: code,
                 signal,
@@ -3422,6 +3495,7 @@ export async function runChildProcess(
                 stderr,
                 pid: child.pid ?? null,
                 startedAt,
+                outputCaptureLimitExceeded: outputCaptureLimitExceeded || undefined,
                 terminalResultCleanup: terminalCleanupStarted
                   ? {
                     kind: "terminal_result_cleanup",
@@ -3434,8 +3508,7 @@ export async function runChildProcess(
                   }
                   : null,
               });
-              });
-          });
+            });
         });
       })
       .catch(reject);
