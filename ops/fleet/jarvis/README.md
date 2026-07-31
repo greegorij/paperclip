@@ -98,6 +98,9 @@ Safety gates for profile apply/rollback:
 Rollback backup/report handling:
 
 - rollback backup stores the exact private pre-change state needed for restore, including `secret_ref` fields inside adapter/runtime payloads.
+- for `openai-first`, that backup also contains the exact previous private Jarvis instruction file plus its digest; automatic and explicit rollback restore and verify it before treating Jarvis as restored.
+- rollback always leaves every affected agent paused, even when the saved pre-change status was different.
+- older profile-backup files that do not contain the required Jarvis instruction copy are refused for an `openai-first` rollback; use the verified database backup for recovery instead.
 - operator preview/apply reports and standard snapshots are secret-redacted; `secret_ref` values never appear there.
 
 Profile switching uses `replaceAdapterConfig: true`, preserves only managed instruction-bundle fields and `paperclipSkillSync`, and never mutates instructions or skill assignments.
@@ -154,6 +157,27 @@ Stock template (`server/src/built-ins/agents/summarizer/AGENTS.md`) now states p
 |---------|---------------|--------------|
 | `claude_local` / `codex_local` | 1–10 | `configured` |
 | `cursor` / `opencode_local` | 1–5 | `installed` |
+
+## Model policy (shadow, with profile-consistency gate)
+
+`desired/model-policy.shadow.v1.json` is the versioned, secret-free policy
+candidate for all 29 roles. It records each role's primary model, fallback,
+effort, data class, hard safety gates, escalation, independent review and
+per-run limits. `lib/model-policy.mjs` validates the complete role set and
+fails closed on contradictions such as a restricted-data provider without
+sanitization or a high-responsibility role without independent review.
+
+The policy remains a shadow specification: it cannot wake agents, change an
+adapter, or bypass the existing backup and paused-agent gates. `profile-switch`
+does consume it as a **read-only consistency gate** for the 22 switchable
+roles: `openai-first` must equal each role's primary model, effort, workspace
+access and daily limit; `anthropic-first` must equal its first Anthropic
+fallback and daily limit. Both profile versions must equal the policy version.
+
+This validation does not apply a policy and does not turn the policy into a
+router. A live rollout still requires a separate dry-run runner with enforced
+no-write execution and an explicit, reversible mapping from policy to live
+agent configuration.
 
 ## Routines — observability note
 

@@ -17,7 +17,10 @@ import { assertBackupGate } from "./backup-gate.mjs";
 import { createApiClient } from "./api-client.mjs";
 import { generateCodexJarvisInstructions } from "./codex-jarvis-instructions.mjs";
 import { loadDesired, redactSecrets } from "./load.mjs";
+import { DESIRED_DIR } from "./paths.mjs";
 import { snapshotFleet } from "./snapshot.mjs";
+
+const MODEL_POLICY_FILENAME = "model-policy.shadow.v1.json";
 
 const OPENAI_SAFE_ALLOWLIST = Object.freeze([
   "chatgpt.com",
@@ -46,7 +49,7 @@ const REQUIRED_PROFILES = Object.freeze(["openai-first", "anthropic-first"]);
 const PATCH_TIMEOUT_SEC = 1200;
 const PATCH_INACTIVITY_TIMEOUT_MS = 600000;
 const PATCH_GRACE_SEC = 15;
-const BACKUP_SCHEMA_VERSION = 1;
+const BACKUP_SCHEMA_VERSION = 2;
 const EXPECTED_SWITCHABLE_COUNT = 22;
 const ANTHROPIC_WORKER_CONFIG_ENV = "JARVIS_CLAUDE_WORKER_CONFIG_DIR";
 const ANTHROPIC_BOSS_CONFIG_ENV = "JARVIS_CLAUDE_BOSS_CONFIG_DIR";
@@ -77,55 +80,6 @@ const ANTHROPIC_PROFILE_ENTRY_KEYS = Object.freeze([
   "claudeConfigProfile",
 ]);
 
-const OPENAI_EXPECTED = Object.freeze({
-  jarvis: { model: "gpt-5.6-sol", modelReasoningEffort: "high" },
-  "szef-komercyjny": { model: "gpt-5.6-sol", modelReasoningEffort: "high" },
-  "senior-programista": { model: "gpt-5.6-sol", modelReasoningEffort: "high" },
-  krytyk: { model: "gpt-5.6-sol", modelReasoningEffort: "high" },
-  "analityk-biznesowy": { model: "gpt-5.6-sol", modelReasoningEffort: "medium" },
-  badacz: { model: "gpt-5.6-sol", modelReasoningEffort: "medium" },
-  "designer-ui": { model: "gpt-5.6-sol", modelReasoningEffort: "medium" },
-  "konfigurator-systemu": { model: "gpt-5.6-sol", modelReasoningEffort: "medium" },
-  "modelarz-procesow": { model: "gpt-5.6-sol", modelReasoningEffort: "medium" },
-  "specjalista-deck-w": { model: "gpt-5.6-sol", modelReasoningEffort: "medium" },
-  "specjalista-komunikacji-klienckiej": { model: "gpt-5.6-sol", modelReasoningEffort: "medium" },
-  "specjalista-ofert": { model: "gpt-5.6-sol", modelReasoningEffort: "medium" },
-  "czytacz-transkryptow": { model: "gpt-5.6-luna", modelReasoningEffort: "medium" },
-  "in-ynier-wdro-e": { model: "gpt-5.6-luna", modelReasoningEffort: "medium" },
-  "kurator-crm": { model: "gpt-5.6-luna", modelReasoningEffort: "medium" },
-  "kurator-vaultu": { model: "gpt-5.6-luna", modelReasoningEffort: "medium" },
-  "obserwator-upstream": { model: "gpt-5.6-luna", modelReasoningEffort: "medium" },
-  "reflection-coach": { model: "gpt-5.6-luna", modelReasoningEffort: "medium" },
-  "zwiadowca-vaultu": { model: "gpt-5.6-luna", modelReasoningEffort: "medium" },
-  kronikarz: { model: "gpt-5.6-luna", modelReasoningEffort: "low" },
-  "mi-sie-vault": { model: "gpt-5.6-luna", modelReasoningEffort: "low" },
-  summarizer: { model: "gpt-5.6-luna", modelReasoningEffort: "low" },
-});
-
-const ANTHROPIC_EXPECTED_MODELS = Object.freeze({
-  jarvis: "claude-opus-5",
-  "szef-komercyjny": "claude-opus-5",
-  kronikarz: "claude-haiku-4-5",
-  "mi-sie-vault": "claude-haiku-4-5",
-  summarizer: "claude-haiku-4-5",
-  "analityk-biznesowy": "claude-sonnet-5",
-  badacz: "claude-sonnet-5",
-  "czytacz-transkryptow": "claude-sonnet-5",
-  "designer-ui": "claude-sonnet-5",
-  "in-ynier-wdro-e": "claude-sonnet-5",
-  "konfigurator-systemu": "claude-sonnet-5",
-  krytyk: "claude-sonnet-5",
-  "kurator-crm": "claude-sonnet-5",
-  "kurator-vaultu": "claude-sonnet-5",
-  "modelarz-procesow": "claude-sonnet-5",
-  "obserwator-upstream": "claude-sonnet-5",
-  "senior-programista": "claude-sonnet-5",
-  "specjalista-deck-w": "claude-sonnet-5",
-  "specjalista-komunikacji-klienckiej": "claude-sonnet-5",
-  "specjalista-ofert": "claude-sonnet-5",
-  "zwiadowca-vaultu": "claude-sonnet-5",
-  "reflection-coach": "claude-sonnet-5",
-});
 const ANTHROPIC_EXPECTED_MAX_TURNS = Object.freeze({
   jarvis: 20,
   "szef-komercyjny": 40,
@@ -150,7 +104,9 @@ const ANTHROPIC_EXPECTED_MAX_TURNS = Object.freeze({
   "mi-sie-vault": 20,
   summarizer: 10,
 });
-const EXPECTED_SWITCHABLE_SLUGS = Object.freeze(Object.keys(OPENAI_EXPECTED).sort());
+const EXPECTED_SWITCHABLE_SLUGS = Object.freeze(
+  Object.keys(ANTHROPIC_EXPECTED_MAX_TURNS).sort(),
+);
 
 function asRecord(value) {
   if (value == null || typeof value !== "object" || Array.isArray(value)) return null;
@@ -188,6 +144,119 @@ function readProfilesFile(desiredDir) {
     throw new Error(`profiles.json not found: ${filePath}`);
   }
   return JSON.parse(readFileSync(filePath, "utf8"));
+}
+
+function readModelPolicyFile(desiredDir, errors) {
+  const filePath = path.join(desiredDir, MODEL_POLICY_FILENAME);
+  if (!existsSync(filePath)) {
+    errors.push(`${MODEL_POLICY_FILENAME} not found: ${filePath}`);
+    return null;
+  }
+  try {
+    return JSON.parse(readFileSync(filePath, "utf8"));
+  } catch (err) {
+    errors.push(
+      `${MODEL_POLICY_FILENAME}: failed to parse (${err instanceof Error ? err.message : String(err)})`,
+    );
+    return null;
+  }
+}
+
+function firstAnthropicFallbackModel(role, catalog) {
+  if (!Array.isArray(role?.fallback)) return null;
+  for (const entry of role.fallback) {
+    const modelId = entry?.model;
+    if (typeof modelId !== "string" || modelId.trim() === "") continue;
+    if (asRecord(catalog?.[modelId])?.provider === "anthropic") return modelId;
+  }
+  return null;
+}
+
+/**
+ * Derive openai-first / anthropic-first field expectations from shadow model policy.
+ * Fail-closed: missing roles, primary fields, catalog provider/adapter contracts,
+ * anthropic fallback, or limits produce errors.
+ */
+function deriveProfileExpectationsFromPolicy({ slugs, policy, errors }) {
+  const expectations = new Map();
+  if (!policy) return expectations;
+  const catalog = asRecord(policy.modelCatalog) ?? {};
+  const roles = asRecord(policy.roles);
+  if (!roles) {
+    errors.push("model-policy: roles must be an object");
+    return expectations;
+  }
+  for (const slug of slugs) {
+    const role = asRecord(roles[slug]);
+    if (!role) {
+      errors.push(`model-policy: missing role ${slug}`);
+      continue;
+    }
+    const primary = asRecord(role.primary);
+    if (!primary || typeof primary.model !== "string" || primary.model.trim() === "") {
+      errors.push(`model-policy ${slug}: primary.model is required`);
+      continue;
+    }
+    if (primary.workspaceAccess !== "ro" && primary.workspaceAccess !== "rw") {
+      errors.push(`model-policy ${slug}: primary.workspaceAccess must be ro or rw`);
+      continue;
+    }
+    if (!["low", "medium", "high"].includes(role.effort)) {
+      errors.push(`model-policy ${slug}: effort must be low, medium, or high`);
+      continue;
+    }
+    const maxDailyRuns = asRecord(role.limits)?.maxDailyRuns;
+    if (!Number.isInteger(maxDailyRuns) || maxDailyRuns < 1) {
+      errors.push(`model-policy ${slug}: limits.maxDailyRuns must be integer >= 1`);
+      continue;
+    }
+    const primaryEntry = asRecord(catalog[primary.model]);
+    if (!primaryEntry) {
+      errors.push(`model-policy ${slug}: primary.model must exist in modelCatalog`);
+      continue;
+    }
+    if (primaryEntry.provider !== "openai") {
+      errors.push(`model-policy ${slug}: primary modelCatalog provider must be openai`);
+      continue;
+    }
+    if (primaryEntry.adapterType !== "codex_local") {
+      errors.push(`model-policy ${slug}: primary modelCatalog adapterType must be codex_local`);
+      continue;
+    }
+    const anthropicModel = firstAnthropicFallbackModel(role, catalog);
+    if (!anthropicModel) {
+      errors.push(
+        `model-policy ${slug}: fallback must include a model with modelCatalog provider anthropic`,
+      );
+      continue;
+    }
+    const anthropicEntry = asRecord(catalog[anthropicModel]);
+    if (anthropicEntry?.provider !== "anthropic") {
+      errors.push(
+        `model-policy ${slug}: anthropic fallback modelCatalog provider must be anthropic`,
+      );
+      continue;
+    }
+    if (anthropicEntry?.adapterType !== "claude_local") {
+      errors.push(
+        `model-policy ${slug}: anthropic fallback modelCatalog adapterType must be claude_local`,
+      );
+      continue;
+    }
+    expectations.set(slug, {
+      openAi: {
+        model: primary.model,
+        modelReasoningEffort: role.effort,
+        filesystemWorkspaceAccess: primary.workspaceAccess,
+        maxDailyRuns,
+      },
+      anthropic: {
+        model: anthropicModel,
+        maxDailyRuns,
+      },
+    });
+  }
+  return expectations;
 }
 
 function resolveJarvisPath(desiredDir, relativePath) {
@@ -282,7 +351,12 @@ function expectedAnthropicConfigProfile(slug) {
   return slug === JARVIS_SLUG ? "boss" : "worker";
 }
 
-export function validateProviderProfilesDocument({ desired, profilesDoc }) {
+export function validateProviderProfilesDocument({
+  desired,
+  profilesDoc,
+  desiredDir = DESIRED_DIR,
+  modelPolicy = null,
+}) {
   const errors = [];
   if (!Number.isInteger(profilesDoc?.schemaVersion)) {
     errors.push("profiles.json: schemaVersion must be an integer");
@@ -304,6 +378,14 @@ export function validateProviderProfilesDocument({ desired, profilesDoc }) {
     errors,
   });
 
+  const policy = modelPolicy ?? readModelPolicyFile(desiredDir, errors);
+  const policyVersion = typeof policy?.version === "string" && policy.version.trim() !== ""
+    ? policy.version
+    : null;
+  if (policy && !policyVersion) {
+    errors.push("model-policy: version is required");
+  }
+
   for (const profileName of REQUIRED_PROFILES) {
     if (!profilesDoc?.profiles?.[profileName]) {
       errors.push(`profiles.json: missing profile ${profileName}`);
@@ -312,6 +394,10 @@ export function validateProviderProfilesDocument({ desired, profilesDoc }) {
     const profile = profilesDoc.profiles[profileName];
     if (typeof profile.version !== "string" || profile.version.trim() === "") {
       errors.push(`profiles.json ${profileName}: version is required`);
+    } else if (policyVersion && profile.version !== policyVersion) {
+      errors.push(
+        `profiles.json ${profileName}: version must equal model-policy version ${policyVersion}`,
+      );
     }
     if (!Array.isArray(profile.agents)) {
       errors.push(`profiles.json ${profileName}: agents must be an array`);
@@ -325,10 +411,16 @@ export function validateProviderProfilesDocument({ desired, profilesDoc }) {
     });
   }
 
+  const policyExpectations = deriveProfileExpectationsFromPolicy({
+    slugs: expectedSwitchable,
+    policy,
+    errors,
+  });
+
   const openAiBySlug = new Map(
     (profilesDoc?.profiles?.["openai-first"]?.agents ?? []).map((item) => [item.slug, item]),
   );
-  for (const [slug, expected] of Object.entries(OPENAI_EXPECTED)) {
+  for (const slug of expectedSwitchable) {
     const got = openAiBySlug.get(slug);
     if (!got) continue;
     validateUnexpectedEntryKeys({
@@ -341,6 +433,8 @@ export function validateProviderProfilesDocument({ desired, profilesDoc }) {
     if (got.adapterType !== "codex_local") {
       errors.push(`openai-first ${slug}: adapterType must be codex_local`);
     }
+    const expected = policyExpectations.get(slug)?.openAi;
+    if (!expected) continue;
     if (got.model !== expected.model) {
       errors.push(`openai-first ${slug}: model must be ${expected.model}`);
     }
@@ -349,18 +443,20 @@ export function validateProviderProfilesDocument({ desired, profilesDoc }) {
         `openai-first ${slug}: modelReasoningEffort must be ${expected.modelReasoningEffort}`,
       );
     }
-    if (!["ro", "rw"].includes(got.filesystemWorkspaceAccess)) {
-      errors.push(`openai-first ${slug}: filesystemWorkspaceAccess must be ro or rw`);
+    if (got.filesystemWorkspaceAccess !== expected.filesystemWorkspaceAccess) {
+      errors.push(
+        `openai-first ${slug}: filesystemWorkspaceAccess must be ${expected.filesystemWorkspaceAccess}`,
+      );
     }
-    if (!Number.isInteger(got.maxDailyRuns) || got.maxDailyRuns < 1) {
-      errors.push(`openai-first ${slug}: maxDailyRuns must be integer >= 1`);
+    if (got.maxDailyRuns !== expected.maxDailyRuns) {
+      errors.push(`openai-first ${slug}: maxDailyRuns must be ${expected.maxDailyRuns}`);
     }
   }
 
   const anthropicBySlug = new Map(
     (profilesDoc?.profiles?.["anthropic-first"]?.agents ?? []).map((item) => [item.slug, item]),
   );
-  for (const [slug, expectedModel] of Object.entries(ANTHROPIC_EXPECTED_MODELS)) {
+  for (const slug of expectedSwitchable) {
     const got = anthropicBySlug.get(slug);
     if (!got) continue;
     validateUnexpectedEntryKeys({
@@ -373,11 +469,14 @@ export function validateProviderProfilesDocument({ desired, profilesDoc }) {
     if (got.adapterType !== "claude_local") {
       errors.push(`anthropic-first ${slug}: adapterType must be claude_local`);
     }
-    if (got.model !== expectedModel) {
-      errors.push(`anthropic-first ${slug}: model must be ${expectedModel}`);
-    }
-    if (!Number.isInteger(got.maxDailyRuns) || got.maxDailyRuns < 1) {
-      errors.push(`anthropic-first ${slug}: maxDailyRuns must be integer >= 1`);
+    const expected = policyExpectations.get(slug)?.anthropic;
+    if (expected) {
+      if (got.model !== expected.model) {
+        errors.push(`anthropic-first ${slug}: model must be ${expected.model}`);
+      }
+      if (got.maxDailyRuns !== expected.maxDailyRuns) {
+        errors.push(`anthropic-first ${slug}: maxDailyRuns must be ${expected.maxDailyRuns}`);
+      }
     }
     const expectedMaxTurns = ANTHROPIC_EXPECTED_MAX_TURNS[slug];
     if (got.maxTurnsPerRun !== expectedMaxTurns) {
@@ -520,14 +619,42 @@ function getLiveAgentBySlug(liveSnapshot) {
   return new Map((liveSnapshot.agents ?? []).map((agent) => [agent.slug, agent]));
 }
 
-function canonicalLiveModel(agent) {
-  return agent?.adapterConfig?.model ?? agent?.model ?? null;
-}
-
 function extractProfileBySlug(profilesDoc, profileName) {
   return new Map(
     (profilesDoc.profiles?.[profileName]?.agents ?? []).map((entry) => [entry.slug, entry]),
   );
+}
+
+function matchesFullSafeProfileState({ profileName, profileEntry, liveAgent }) {
+  try {
+    const runtimeEnv = {};
+    if (profileName === "anthropic-first") {
+      const configEnvName = profileEntry.claudeConfigProfile === "boss"
+        ? ANTHROPIC_BOSS_CONFIG_ENV
+        : ANTHROPIC_WORKER_CONFIG_ENV;
+      const configBinding = liveAgent?.adapterConfig?.env?.CLAUDE_CONFIG_DIR;
+      if (
+        configBinding?.type !== "plain"
+        || !isNonEmptyAbsolutePath(configBinding?.value)
+      ) {
+        return false;
+      }
+      runtimeEnv[configEnvName] = configBinding.value;
+    }
+    const currentState = normalizeLiveAgentState(liveAgent);
+    const expectedState = normalizeExpectedState(
+      profileName,
+      profileEntry,
+      liveAgent,
+      { runtimeEnv },
+    );
+    return currentState.status === expectedState.status
+      && currentState.adapterType === expectedState.adapterType
+      && deepEqual(currentState.adapterConfig, expectedState.adapterConfig)
+      && deepEqual(currentState.runtimeConfig, expectedState.runtimeConfig);
+  } catch {
+    return false;
+  }
 }
 
 export function detectProviderProfileState({ profilesDoc, liveSnapshot }) {
@@ -548,13 +675,11 @@ export function detectProviderProfileState({ profilesDoc, liveSnapshot }) {
       issues.push({ code: "missing", slug, detail: `missing live switchable agent ${slug}` });
       continue;
     }
-    const liveAdapterType = live.adapterType ?? null;
-    const liveModel = canonicalLiveModel(live);
     const matchedProfiles = [];
     for (const profileName of declaredProfileNames) {
       const entry = profileByName.get(profileName)?.get(slug);
       if (!entry) continue;
-      if ((entry.adapterType ?? null) === liveAdapterType && (entry.model ?? null) === liveModel) {
+      if (matchesFullSafeProfileState({ profileName, profileEntry: entry, liveAgent: live })) {
         matchedProfiles.push(profileName);
       }
     }
@@ -562,8 +687,7 @@ export function detectProviderProfileState({ profilesDoc, liveSnapshot }) {
       issues.push({
         code: "unknown",
         slug,
-        detail: `${slug} state adapterType=${liveAdapterType} model=${liveModel} does not match any declared profile`,
-        live: { adapterType: liveAdapterType, model: liveModel },
+        detail: `${slug} does not match the full safe configuration of any declared profile`,
       });
       continue;
     }
@@ -643,7 +767,7 @@ export function planProviderProfileSwitch({
 }) {
   const desired = loadDesired(desiredDir);
   const profilesDoc = readProfilesFile(desiredDir);
-  const schemaValidation = validateProviderProfilesDocument({ desired, profilesDoc });
+  const schemaValidation = validateProviderProfilesDocument({ desired, profilesDoc, desiredDir });
   if (!schemaValidation.ok) {
     return {
       ok: false,
@@ -799,7 +923,7 @@ async function verifyRestoredAgent(client, step) {
   const res = await client.get(`/api/agents/${step.agentId}`);
   if (!res.ok) return { ok: false, error: `restore verify GET failed HTTP ${res.status}` };
   const live = res.data ?? {};
-  if (live.status !== step.from.status) {
+  if (live.status !== "paused") {
     return { ok: false, error: `${step.slug}: restore status mismatch` };
   }
   if (live.adapterType !== step.from.adapterType) {
@@ -838,6 +962,62 @@ async function putInstructionsBundleFile(client, agentId, fileName, content) {
   const res = await client.put(route, { path: fileName, content });
   if (!res.ok) return { ok: false, writeAttempted: true, error: `bundle PUT failed HTTP ${res.status}` };
   return { ok: true, writeAttempted: true };
+}
+
+async function captureJarvisInstructionsBackup(client, jarvisStep) {
+  const current = await getInstructionsBundleFile(
+    client,
+    jarvisStep.agentId,
+    JARVIS_CODEX_AGENTS_FILE,
+  );
+  if (!current.ok) return current;
+  if (current.missing) {
+    return {
+      ok: false,
+      error: "cannot switch safely: previous Jarvis instruction content is missing",
+    };
+  }
+  return {
+    ok: true,
+    agentId: jarvisStep.agentId,
+    path: JARVIS_CODEX_AGENTS_FILE,
+    content: current.content,
+    sha256: sha256(current.content),
+  };
+}
+
+async function restoreJarvisInstructionsBackup(client, backup) {
+  const expectedHash = sha256(backup.content);
+  if (expectedHash !== backup.sha256) {
+    return { ok: false, error: "Jarvis instruction backup hash mismatch" };
+  }
+  const put = await putInstructionsBundleFile(
+    client,
+    backup.agentId,
+    backup.path,
+    backup.content,
+  );
+  if (!put.ok) return put;
+  const verify = await getInstructionsBundleFile(client, backup.agentId, backup.path);
+  if (!verify.ok) return { ...verify, writeAttempted: true };
+  if (
+    verify.missing
+    || sha256(verify.content) !== backup.sha256
+    || verify.content !== backup.content
+  ) {
+    return {
+      ok: false,
+      writeAttempted: true,
+      error: `Jarvis instruction restore verify mismatch expected=${backup.sha256.slice(0, 12)} got=${hashPrefix(
+        verify.content ?? "",
+      )}`,
+    };
+  }
+  return {
+    ok: true,
+    writeAttempted: true,
+    hashPrefix: backup.sha256.slice(0, 12),
+  };
 }
 
 async function ensureJarvisCodexBundle({
@@ -886,8 +1066,16 @@ async function ensureJarvisCodexBundle({
 }
 
 async function rollbackStep({ client, step, report }) {
+  if (step.instructionsBackup) {
+    const instructionsRestore = await restoreJarvisInstructionsBackup(
+      client,
+      step.instructionsBackup,
+    );
+    if (instructionsRestore.writeAttempted) report.writesSucceeded += 1;
+    if (!instructionsRestore.ok) throw new Error(instructionsRestore.error);
+  }
   const restoreBody = {
-    status: step.from.status,
+    status: "paused",
     adapterType: step.from.adapterType,
     adapterConfig: step.from.adapterConfig,
     runtimeConfig: step.from.runtimeConfig,
@@ -944,8 +1132,14 @@ function writeSwitchBackupFile({ backupPath, payload }) {
   }
 }
 
-function buildStateBackupPayload({ companyId, profileName, allAffected, snapshotCapturedAt }) {
-  return {
+function buildStateBackupPayload({
+  companyId,
+  profileName,
+  allAffected,
+  snapshotCapturedAt,
+  jarvisInstructions = null,
+}) {
+  const payload = {
     schemaVersion: BACKUP_SCHEMA_VERSION,
     kind: "jarvis-provider-profile-backup",
     companyId,
@@ -963,6 +1157,15 @@ function buildStateBackupPayload({ companyId, profileName, allAffected, snapshot
       },
     })),
   };
+  if (jarvisInstructions) {
+    payload.jarvisInstructions = {
+      agentId: jarvisInstructions.agentId,
+      path: jarvisInstructions.path,
+      content: jarvisInstructions.content,
+      sha256: jarvisInstructions.sha256,
+    };
+  }
+  return payload;
 }
 
 function validateRollbackBackupPayload(payload, liveSnapshot, { expectedCompanyId, expectedSlugs }) {
@@ -1010,6 +1213,28 @@ function validateRollbackBackupPayload(payload, liveSnapshot, { expectedCompanyI
   }
   for (const slug of expectedSlugs) {
     if (!seenBySlug.has(slug)) errors.push(`backup missing slug ${slug}`);
+  }
+  if (payload?.profileName === "openai-first") {
+    const jarvisInstructions = asRecord(payload?.jarvisInstructions);
+    const jarvisRow = (payload?.agents ?? []).find((row) => row?.slug === JARVIS_SLUG);
+    if (!jarvisInstructions) {
+      errors.push("backup Jarvis instructions missing");
+    } else {
+      if (jarvisInstructions.agentId !== jarvisRow?.agentId) {
+        errors.push("backup Jarvis instructions agentId mismatch");
+      }
+      if (jarvisInstructions.path !== JARVIS_CODEX_AGENTS_FILE) {
+        errors.push("backup Jarvis instructions path mismatch");
+      }
+      if (typeof jarvisInstructions.content !== "string") {
+        errors.push("backup Jarvis instruction content must be a string");
+      } else if (
+        typeof jarvisInstructions.sha256 !== "string"
+        || sha256(jarvisInstructions.content) !== jarvisInstructions.sha256
+      ) {
+        errors.push("backup Jarvis instruction hash mismatch");
+      }
+    }
   }
   return { ok: errors.length === 0, errors };
 }
@@ -1131,6 +1356,8 @@ export async function applyProviderProfileSwitch({
     to: { adapterType: item.to.adapterType, model: item.to.adapterConfig?.model ?? null },
   }));
   let openAiArtifact = null;
+  let jarvisStep = null;
+  let jarvisInstructionsBackup = null;
   if (profileName === "openai-first") {
     try {
       openAiArtifact = buildOpenAiJarvisArtifact({ desiredDir, runtimeEnv });
@@ -1141,6 +1368,25 @@ export async function applyProviderProfileSwitch({
       });
       return finishReport(report);
     }
+    jarvisStep = plan.allAffected.find((step) => step.slug === JARVIS_SLUG);
+    if (!jarvisStep) {
+      report.failed.push({
+        step: "jarvis-instructions-backup",
+        error: "missing jarvis from profile switch plan",
+      });
+      return finishReport(report);
+    }
+    jarvisInstructionsBackup = await captureJarvisInstructionsBackup(client, jarvisStep);
+    if (!jarvisInstructionsBackup.ok) {
+      report.failed.push({
+        step: "jarvis-instructions-backup",
+        slug: jarvisStep.slug,
+        agentId: jarvisStep.agentId,
+        error: jarvisInstructionsBackup.error,
+      });
+      return finishReport(report);
+    }
+    jarvisStep.instructionsBackup = jarvisInstructionsBackup;
   }
   if (plan.planned.length === 0 && profileName !== "openai-first") {
     return finishReport(report);
@@ -1151,6 +1397,7 @@ export async function applyProviderProfileSwitch({
     profileName,
     allAffected: plan.allAffected,
     snapshotCapturedAt: fresh.capturedAt ?? null,
+    jarvisInstructions: jarvisInstructionsBackup,
   });
   try {
     writeSwitchBackupFile({ backupPath: stateBackupFile, payload: backupPayload });
@@ -1171,14 +1418,6 @@ export async function applyProviderProfileSwitch({
   };
 
   if (profileName === "openai-first") {
-    const jarvisStep = plan.allAffected.find((step) => step.slug === JARVIS_SLUG);
-    if (!jarvisStep) {
-      report.failed.push({
-        step: "jarvis-codex-upload",
-        error: "missing jarvis from profile switch plan",
-      });
-      return finishReport(report);
-    }
     const sync = await ensureJarvisCodexBundle({
       client,
       jarvisStep,
@@ -1343,20 +1582,30 @@ export async function rollbackProviderProfileSwitch({
 
   for (const row of payload.agents) {
     const body = {
-      status: row.state.status,
+      status: "paused",
       adapterType: row.state.adapterType,
       adapterConfig: row.state.adapterConfig,
       runtimeConfig: row.state.runtimeConfig,
       replaceAdapterConfig: true,
     };
     try {
+      let instructionsHashPrefix = null;
+      if (row.slug === JARVIS_SLUG && payload.profileName === "openai-first") {
+        const instructionsRestore = await restoreJarvisInstructionsBackup(
+          client,
+          payload.jarvisInstructions,
+        );
+        if (instructionsRestore.writeAttempted) report.writesSucceeded += 1;
+        if (!instructionsRestore.ok) throw new Error(instructionsRestore.error);
+        instructionsHashPrefix = instructionsRestore.hashPrefix;
+      }
       const res = await client.patch(`/api/agents/${row.agentId}`, body);
       if (!res.ok) throw new Error(`${row.slug}: rollback PATCH failed HTTP ${res.status}`);
       report.writesSucceeded += 1;
       const verify = await client.get(`/api/agents/${row.agentId}`);
       if (!verify.ok) throw new Error(`${row.slug}: rollback verify GET failed HTTP ${verify.status}`);
       const live = verify.data ?? {};
-      if (live.status !== row.state.status) throw new Error(`${row.slug}: rollback status mismatch`);
+      if (live.status !== "paused") throw new Error(`${row.slug}: rollback status mismatch`);
       if (live.adapterType !== row.state.adapterType) {
         throw new Error(`${row.slug}: rollback adapterType mismatch`);
       }
@@ -1366,7 +1615,12 @@ export async function rollbackProviderProfileSwitch({
       if (!deepEqual(asRecord(live.runtimeConfig) ?? {}, row.state.runtimeConfig)) {
         throw new Error(`${row.slug}: rollback runtimeConfig mismatch`);
       }
-      report.completed.push({ slug: row.slug, agentId: row.agentId, result: "restored" });
+      report.completed.push({
+        slug: row.slug,
+        agentId: row.agentId,
+        result: "restored-paused",
+        ...(instructionsHashPrefix ? { instructionsHashPrefix } : {}),
+      });
       report.rolledBack.push({ slug: row.slug, agentId: row.agentId });
     } catch (err) {
       report.failed.push({

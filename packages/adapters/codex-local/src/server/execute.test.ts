@@ -18,6 +18,7 @@ const {
   resolveCommandForLogs,
   prepareAdapterExecutionTargetRuntime,
   startAdapterExecutionTargetPaperclipBridge,
+  writeManagedCodexMcpConfig,
 } = vi.hoisted(() => ({
   runChildProcess: vi.fn(async () => ({
     exitCode: 0,
@@ -32,6 +33,7 @@ const {
   resolveCommandForLogs: vi.fn(async () => "/usr/bin/codex"),
   prepareAdapterExecutionTargetRuntime: vi.fn(),
   startAdapterExecutionTargetPaperclipBridge: vi.fn(async () => null),
+  writeManagedCodexMcpConfig: vi.fn(),
 }));
 
 vi.mock("@paperclipai/adapter-utils/server-utils", async () => {
@@ -54,6 +56,15 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
     ...actual,
     prepareAdapterExecutionTargetRuntime,
     startAdapterExecutionTargetPaperclipBridge,
+  };
+});
+
+vi.mock("./codex-home.js", async () => {
+  const actual = await vi.importActual<typeof import("./codex-home.js")>("./codex-home.js");
+  writeManagedCodexMcpConfig.mockImplementation(actual.writeManagedCodexMcpConfig);
+  return {
+    ...actual,
+    writeManagedCodexMcpConfig,
   };
 });
 
@@ -488,5 +499,278 @@ describe("codex execute — local filesystem sandbox staged CODEX_HOME", () => {
     expect(stagedHomePath).toBeTruthy();
     if (!stagedHomePath) throw new Error("Expected staged CODEX_HOME path to be captured.");
     await expect(lstat(stagedHomePath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("codex execute — shadowReadOnly", () => {
+  const cleanupDirs: string[] = [];
+  let savedCodexHomeEnv: string | undefined;
+  let savedPaperclipApiKeyEnv: string | undefined;
+  let savedPaperclipApiUrlEnv: string | undefined;
+
+  afterEach(async () => {
+    vi.clearAllMocks();
+    if (savedCodexHomeEnv === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = savedCodexHomeEnv;
+    if (savedPaperclipApiKeyEnv === undefined) delete process.env.PAPERCLIP_API_KEY;
+    else process.env.PAPERCLIP_API_KEY = savedPaperclipApiKeyEnv;
+    if (savedPaperclipApiUrlEnv === undefined) delete process.env.PAPERCLIP_API_URL;
+    else process.env.PAPERCLIP_API_URL = savedPaperclipApiUrlEnv;
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  async function createFixture(options: { configToml?: string } = {}) {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-shadow-readonly-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHome = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHome, { recursive: true });
+    await writeFile(
+      path.join(codexHome, "auth.json"),
+      JSON.stringify({ tokens: { access_token: "token", account_id: "account" } }),
+      { mode: 0o600 },
+    );
+    if (options.configToml != null) {
+      await writeFile(path.join(codexHome, "config.toml"), options.configToml, { mode: 0o600 });
+    }
+    savedCodexHomeEnv = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = codexHome;
+    return { workspaceDir, codexHome };
+  }
+
+  function shadowContext(input: {
+    workspaceDir: string;
+    codexHome: string;
+    overrides?: Record<string, unknown>;
+  }) {
+    return {
+      runId: "run-shadow-readonly",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexCoder",
+        adapterType: "codex_local",
+        adapterConfig: {},
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        command: "codex",
+        engine: "cli",
+        cwd: input.workspaceDir,
+        shadowReadOnly: true,
+        networkScope: "allowlist",
+        networkAllowlist: ["api.openai.com"],
+        env: { CODEX_HOME: input.codexHome },
+        ...input.overrides,
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: input.workspaceDir,
+          source: "project_primary",
+        },
+      },
+      authToken: "paperclip-run-token",
+      onLog: async () => {},
+    };
+  }
+
+  it("uses an isolated read-only local sandbox shape without Paperclip credentials or return paths", async () => {
+    const fixture = await createFixture({
+      configToml: [
+        'model = "gpt-5"',
+        "",
+        "# BEGIN PAPERCLIP MANAGED MCP",
+        '[mcp_servers."paperclip-runtime"]',
+        'http_headers = { Authorization = "Bearer managed-mcp-secret" }',
+        "# END PAPERCLIP MANAGED MCP",
+      ].join("\n"),
+    });
+    let stagedHomePath: string | null = null;
+    const getServers = vi.fn(() => [
+      { name: "runtime", url: "https://runtime.invalid", token: "token", connectionId: "connection-1" },
+    ]);
+    savedPaperclipApiKeyEnv = process.env.PAPERCLIP_API_KEY;
+    savedPaperclipApiUrlEnv = process.env.PAPERCLIP_API_URL;
+    process.env.PAPERCLIP_API_KEY = "inherited-paperclip-secret";
+    process.env.PAPERCLIP_API_URL = "https://paperclip.invalid/api";
+
+    runChildProcess.mockImplementationOnce(async (...args: unknown[]) => {
+      const options = args[3] as {
+        env: Record<string, string>;
+        localProcessSandbox: {
+          workspaceDir: string;
+          filesystemScope: string | null;
+          filesystemWorkspaceAccess: string | null;
+          managedPaths: Array<{ path: string; access: string }>;
+          extraPaths: unknown[];
+          pathAliases: unknown[];
+          outboundRestorePaths: unknown[];
+          homeDir: string | null;
+          networkScope: string | null;
+          networkAllowlist: string[];
+          networkTrustedUrls: string[];
+        };
+      };
+      const sandbox = options.localProcessSandbox;
+      stagedHomePath = sandbox.homeDir;
+      expect(stagedHomePath).toContain("paperclip-codex-home-sync-");
+      expect(options.env.CODEX_HOME).toBe(stagedHomePath);
+      expect(Object.keys(options.env).filter((key) => /^PAPERCLIP_/.test(key))).toEqual([]);
+      expect(await readFile(path.join(stagedHomePath as string, "config.toml"), "utf8")).toBe('model = "gpt-5"\n');
+      expect(sandbox.workspaceDir).toBe(fixture.workspaceDir);
+      expect(sandbox.filesystemScope).toBe("workspace");
+      expect(sandbox.filesystemWorkspaceAccess).toBe("ro");
+      expect(sandbox.managedPaths).toEqual([{ path: stagedHomePath, access: "rw" }]);
+      expect(sandbox.extraPaths).toEqual([]);
+      expect(sandbox.pathAliases).toEqual([]);
+      expect(sandbox.outboundRestorePaths).toEqual([]);
+      expect(sandbox.networkScope).toBe("allowlist");
+      expect(sandbox.networkAllowlist).toEqual(["api.openai.com"]);
+      expect(sandbox.networkTrustedUrls).toEqual([]);
+      await writeFile(path.join(stagedHomePath as string, "auth.json"), "sandbox-mutated-auth");
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        pid: 321,
+        startedAt: new Date().toISOString(),
+      };
+    });
+
+    await execute({
+      ...shadowContext(fixture),
+      runtimeMcp: { getServers },
+    });
+
+    expect(getServers).not.toHaveBeenCalled();
+    expect(writeManagedCodexMcpConfig).not.toHaveBeenCalled();
+    expect(await readFile(path.join(fixture.codexHome, "auth.json"), "utf8")).not.toBe("sandbox-mutated-auth");
+    expect(await readFile(path.join(fixture.codexHome, "config.toml"), "utf8")).toContain("managed-mcp-secret");
+    if (!stagedHomePath) throw new Error("Expected staged CODEX_HOME path.");
+    await expect(lstat(stagedHomePath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("never resumes a saved runtimeSessionId and starts a fresh session", async () => {
+    const fixture = await createFixture();
+    const savedSessionId = "session-shadow-saved-123";
+    let stagedHomePath: string | null = null;
+
+    // Seed host session state that a naive resume/reuse path could otherwise pick up.
+    await mkdir(path.join(fixture.codexHome, "sessions"), { recursive: true });
+    await writeFile(
+      path.join(fixture.codexHome, "sessions", `${savedSessionId}.json`),
+      JSON.stringify({ id: savedSessionId, prior: true }),
+      { mode: 0o600 },
+    );
+
+    runChildProcess.mockImplementationOnce(async (...args: unknown[]) => {
+      const commandArgs = args[2] as string[];
+      const options = args[3] as {
+        env: Record<string, string>;
+        localProcessSandbox?: { homeDir?: string | null };
+      };
+      stagedHomePath = options.localProcessSandbox?.homeDir ?? null;
+      expect(commandArgs).not.toContain("resume");
+      expect(commandArgs).not.toContain(savedSessionId);
+      expect(commandArgs.at(-1)).toBe("-");
+      expect(options.env.CODEX_HOME).toBe(stagedHomePath);
+      expect(options.env.CODEX_HOME).not.toBe(fixture.codexHome);
+      await expect(lstat(path.join(stagedHomePath as string, "sessions"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        pid: 321,
+        startedAt: new Date().toISOString(),
+      };
+    });
+
+    const result = await execute({
+      ...shadowContext(fixture),
+      runtime: {
+        sessionId: savedSessionId,
+        sessionParams: {
+          sessionId: savedSessionId,
+          cwd: fixture.workspaceDir,
+        },
+        sessionDisplayId: savedSessionId,
+        taskKey: null,
+      },
+    });
+
+    expect(result.sessionId).toBeNull();
+    expect(result.sessionParams).toBeNull();
+    expect(result.clearSession).toBe(false);
+    if (!stagedHomePath) throw new Error("Expected staged CODEX_HOME path.");
+    await expect(lstat(stagedHomePath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("removes the isolated home when shadow spawn fails", async () => {
+    const fixture = await createFixture();
+    let stagedHomePath: string | null = null;
+    runChildProcess.mockImplementationOnce(async (...args: unknown[]) => {
+      const options = args[3] as {
+        env: Record<string, string>;
+        localProcessSandbox?: { homeDir?: string | null };
+      };
+      stagedHomePath = options.localProcessSandbox?.homeDir ?? null;
+      expect(options.env.PAPERCLIP_API_KEY).toBeUndefined();
+      throw new Error("shadow spawn failed");
+    });
+
+    await expect(execute(shadowContext(fixture))).rejects.toThrow("shadow spawn failed");
+
+    if (!stagedHomePath) throw new Error("Expected staged CODEX_HOME path.");
+    await expect(lstat(stagedHomePath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects ACP before spawn", async () => {
+    const fixture = await createFixture();
+    await expect(execute(shadowContext({ ...fixture, overrides: { engine: "acp" } }))).rejects.toThrow(
+      "ACP confinement is not supported",
+    );
+    expect(runChildProcess).not.toHaveBeenCalled();
+  });
+
+  it("rejects remote execution before spawn", async () => {
+    const fixture = await createFixture();
+    await expect(
+      execute({
+        ...shadowContext(fixture),
+        executionTransport: {
+          remoteExecution: {
+            host: "127.0.0.1",
+            port: 2222,
+            username: "fixture",
+            remoteWorkspacePath: "/remote/workspace",
+            remoteCwd: "/remote/workspace",
+            privateKey: "PRIVATE KEY",
+            knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+            strictHostKeyChecking: true,
+          },
+        },
+      }),
+    ).rejects.toThrow("remote execution is not permitted");
+    expect(runChildProcess).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ networkScope: "full" }, 'networkScope must be "deny" or "allowlist"'],
+    [{ networkAllowlist: [] }, "nonempty networkAllowlist"],
+    [{ filesystemExtraPaths: ["/tmp"] }, "filesystemExtraPaths"],
+  ])("rejects unsafe sandbox configuration %o before spawn", async (overrides, message) => {
+    const fixture = await createFixture();
+    await expect(execute(shadowContext({ ...fixture, overrides }))).rejects.toThrow(message);
+    expect(runChildProcess).not.toHaveBeenCalled();
   });
 });

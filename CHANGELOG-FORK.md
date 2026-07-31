@@ -6,6 +6,9 @@
 
 ## [Unreleased]
 
+### Naprawione / Wzmocnione
+- **Profile dostawców zgodne z polityką modeli:** przełącznik porównuje teraz oba profile z wersjonowaną polityką 29 ról jeszcze przed przygotowaniem zmiany. Wariant OpenAI musi odzwierciedlać model podstawowy, poziom namysłu, dostęp do katalogu roboczego i limit dzienny; wariant Anthropic — pierwszy dozwolony zapas tego dostawcy oraz limit. Rozjazd modelu, limitu lub wersji twardo zatrzymuje operację. Sama polityka nadal nie zmienia floty ani nie omija istniejącej kopii, pauzy i wycofania.
+
 ## [0.2.17] — 2026-07-31
 
 ### Naprawione / Wzmocnione

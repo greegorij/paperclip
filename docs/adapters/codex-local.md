@@ -28,6 +28,7 @@ The `codex_local` adapter runs OpenAI's Codex CLI locally. It supports session p
 | `filesystemWorkspaceAccess` | string | No | Workspace mount mode for `filesystemScope=workspace`: `rw` (default) or `ro` |
 | `networkScope` | string | No | Local Bubblewrap network policy (`deny` or `allowlist`) |
 | `networkAllowlist` | string[] | No | Exact hostnames/origins allowed when `networkScope=allowlist` |
+| `shadowReadOnly` | boolean | No | Runs a local, disposable read-only evaluation lane; rejects ACP, remote targets, empty allowlists, and extra filesystem paths |
 | `fastMode` | boolean | No | Enables Codex Fast mode. Currently supported on `gpt-5.4` only and burns credits faster |
 | `dangerouslyBypassApprovalsAndSandbox` | boolean | No | Skip safety checks (dev only) |
 
@@ -42,6 +43,14 @@ The adapter symlinks Paperclip skills into the global Codex skills directory (`~
 ## Bubblewrap + Codex sandbox layering
 
 When `filesystemScope`/`networkScope` are enabled, Bubblewrap is the hard execution boundary. In this setup you can keep `dangerouslyBypassApprovalsAndSandbox=false` while still passing Codex CLI `--sandbox danger-full-access` through `extraArgs`, so Codex does not add a second inner sandbox on top of Bubblewrap.
+
+## Read-only shadow evaluation
+
+Set `shadowReadOnly=true` only for offline evaluation or shadow comparisons, not for normal agent work. The adapter fails closed unless it can use the local Codex CLI, mount the workspace read-only, and apply a non-empty network allowlist. ACP, remote execution, and additional filesystem paths are rejected.
+
+Each shadow run uses a disposable `CODEX_HOME`. It keeps only the provider credential/configuration needed by Codex, removes Paperclip-managed MCP configuration, and is deleted when the run ends—even after a spawn failure. The child process receives no `PAPERCLIP_*` environment variables, Paperclip API token, runtime MCP, bridge, workspace restore path, or auth copy-back path. This makes the lane suitable for measurement, not for operating the Paperclip control plane.
+
+Shadow runs also always start a fresh Codex session: a saved response or session identifier is neither passed to the CLI nor recovered from the disposable home.
 
 ## Fast Mode
 

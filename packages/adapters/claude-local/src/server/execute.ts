@@ -71,6 +71,7 @@ import {
   isClaudeModelNotFoundError,
 } from "./parse.js";
 import {
+  createDisposableClaudeConfigDir,
   materializeRemoteClaudeConfig,
   prepareClaudeConfigSeed,
   resolveManagedClaudeRuntimeStateDir,
@@ -100,6 +101,7 @@ interface ClaudeExecutionInput {
   runtimeCommandSpec?: AdapterExecutionContext["runtimeCommandSpec"];
   executionTarget?: ReturnType<typeof readAdapterExecutionTarget>;
   authToken?: string;
+  shadowReadOnly?: boolean;
   onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
 }
 
@@ -188,6 +190,7 @@ function buildLocalSandboxTrustedNetworkUrls(input: {
 
 async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<ClaudeRuntimeConfig> {
   const { runId, agent, config, context, runtimeCommandSpec, executionTarget, authToken } = input;
+  const shadowReadOnly = input.shadowReadOnly === true;
   const onLog = input.onLog ?? (async () => {});
 
   const command = asString(config.command, "claude");
@@ -230,7 +233,7 @@ async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<Cl
     executionTargetIsRemote,
     executionCwd: effectiveExecutionCwd,
   });
-  await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
+  await ensureAbsoluteDirectory(cwd, { createIfMissing: !shadowReadOnly });
 
   const envConfig = parseObject(config.env);
   const env: Record<string, string> = { ...buildPaperclipEnv(agent) };
@@ -420,7 +423,30 @@ export async function runClaudeLogin(input: {
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  const shadowReadOnly = ctx.config.shadowReadOnly === true;
   const engineSelection = await resolveClaudeExecutionEngineForRun(ctx);
+  if (shadowReadOnly) {
+    const shadowExecutionTarget = readAdapterExecutionTarget({
+      executionTarget: ctx.executionTarget,
+      legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
+    });
+    const shadowNetworkScope = parseLocalProcessNetworkScope(ctx.config.networkScope);
+    const shadowNetworkAllowlist = parseLocalProcessNetworkAllowlist(ctx.config.networkAllowlist);
+    const shadowFilesystemExtraPaths = parseLocalProcessSandboxExtraPaths(ctx.config.filesystemExtraPaths);
+
+    if (engineSelection.engine !== "cli") {
+      throw new Error("shadowReadOnly requires local Claude CLI execution; ACP is not permitted.");
+    }
+    if (adapterExecutionTargetIsRemote(shadowExecutionTarget)) {
+      throw new Error("shadowReadOnly requires local Claude CLI execution; remote execution is not permitted.");
+    }
+    if (shadowNetworkScope !== "allowlist" || shadowNetworkAllowlist.length === 0) {
+      throw new Error("shadowReadOnly requires networkScope=allowlist with a nonempty networkAllowlist.");
+    }
+    if (shadowFilesystemExtraPaths.length > 0) {
+      throw new Error("shadowReadOnly does not permit filesystemExtraPaths.");
+    }
+  }
   if (engineSelection.engine === "acp") {
     try {
       return await executeClaudeAcp(ctx);
@@ -482,6 +508,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     runtimeCommandSpec: ctx.runtimeCommandSpec,
     executionTarget,
     authToken,
+    shadowReadOnly,
     onLog,
   });
   const {
@@ -538,7 +565,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     instructionsContents: combinedInstructionsContents,
     onLog,
   });
-  const runtimeMcpServers = ctx.runtimeMcp?.getServers() ?? [];
+  const runtimeMcpServers = shadowReadOnly ? [] : (ctx.runtimeMcp?.getServers() ?? []);
   const runtimeMcpIdentity = JSON.stringify(
     runtimeMcpServers.map(({ name, url, connectionId }) => ({ name, url, connectionId })),
   );
@@ -548,40 +575,62 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     agent.id,
   );
   const sharedClaudeConfigDir = resolveSharedClaudeConfigDir(effectiveEnv);
-  const localMcpConfigPath = await writePaperclipClaudeMcpConfig({
-    stateDir: claudeRuntimeStateDir,
-    runId,
-    servers: runtimeMcpServers,
-    // Profile paths/secrets are host-local; do not merge into remote-bound mcp-config.
-    claudeConfigDir: executionTargetIsRemote ? undefined : sharedClaudeConfigDir,
-  });
-  const localMcpConfigDir = path.dirname(localMcpConfigPath);
+  let disposableClaudeConfigDir: string | null = null;
+  let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
+  let restoreRemoteWorkspace: (() => Promise<unknown>) | null = null;
+  try {
+  if (shadowReadOnly) {
+    disposableClaudeConfigDir = await createDisposableClaudeConfigDir(sharedClaudeConfigDir);
+  }
+  const effectiveClaudeConfigDir = disposableClaudeConfigDir ?? sharedClaudeConfigDir;
+  let localMcpConfigPath = "";
+  let localMcpConfigDir = "";
+  if (!shadowReadOnly) {
+    localMcpConfigPath = await writePaperclipClaudeMcpConfig({
+      stateDir: claudeRuntimeStateDir,
+      runId,
+      servers: runtimeMcpServers,
+      // Profile paths/secrets are host-local; do not merge into remote-bound mcp-config.
+      claudeConfigDir: executionTargetIsRemote ? undefined : sharedClaudeConfigDir,
+    });
+    localMcpConfigDir = path.dirname(localMcpConfigPath);
+  }
   const networkScope = parseLocalProcessNetworkScope(config.networkScope);
-  const filesystemScope = parseLocalProcessFilesystemScope(config.filesystemScope);
+  const filesystemScope = shadowReadOnly
+    ? "workspace"
+    : parseLocalProcessFilesystemScope(config.filesystemScope);
   const localProcessSandbox: LocalProcessSandboxOptions | null =
     (filesystemScope || networkScope) && !executionTargetIsRemote
       ? {
           workspaceDir: effectiveExecutionCwd,
           filesystemScope,
-          managedPaths: [
-            { path: sharedClaudeConfigDir, access: "rw" },
-            { path: path.join(path.dirname(sharedClaudeConfigDir), ".claude.json"), access: "rw" },
-            { path: promptBundle.addDir, access: "ro" },
-            { path: localMcpConfigDir, access: "ro" },
-          ],
-          extraPaths: parseLocalProcessSandboxExtraPaths(config.filesystemExtraPaths),
-          homeDir: filesystemScope ? path.dirname(sharedClaudeConfigDir) : null,
+          ...(shadowReadOnly ? { filesystemWorkspaceAccess: "ro" as const } : {}),
+          managedPaths: shadowReadOnly
+            ? [
+                { path: effectiveClaudeConfigDir, access: "rw" as const },
+                { path: promptBundle.addDir, access: "ro" as const },
+              ]
+            : [
+                { path: sharedClaudeConfigDir, access: "rw" as const },
+                { path: path.join(path.dirname(sharedClaudeConfigDir), ".claude.json"), access: "rw" as const },
+                { path: promptBundle.addDir, access: "ro" as const },
+                { path: localMcpConfigDir, access: "ro" as const },
+              ],
+          extraPaths: shadowReadOnly ? [] : parseLocalProcessSandboxExtraPaths(config.filesystemExtraPaths),
+          homeDir: filesystemScope ? path.dirname(effectiveClaudeConfigDir) : null,
           networkScope,
           networkAllowlist: parseLocalProcessNetworkAllowlist(config.networkAllowlist),
-          networkTrustedUrls: buildLocalSandboxTrustedNetworkUrls({
-            paperclipApiUrl: env.PAPERCLIP_API_URL,
-            runtimeMcpServers,
-          }),
+          networkTrustedUrls: shadowReadOnly
+            ? []
+            : buildLocalSandboxTrustedNetworkUrls({
+                paperclipApiUrl: env.PAPERCLIP_API_URL,
+                runtimeMcpServers,
+              }),
           command: asString(config.filesystemSandboxCommand, "bwrap"),
         }
       : null;
   if (localProcessSandbox) {
-    if (filesystemScope) env.CLAUDE_CONFIG_DIR = sharedClaudeConfigDir;
+    if (filesystemScope) env.CLAUDE_CONFIG_DIR = effectiveClaudeConfigDir;
     const scopes = [filesystemScope ? "workspace filesystem" : null, networkScope ? `${networkScope} network` : null]
       .filter(Boolean)
       .join(" and ");
@@ -591,50 +640,52 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
   }
   const useManagedRemoteClaudeConfig =
+    !shadowReadOnly &&
     executionTargetIsRemote &&
     adapterExecutionTargetUsesManagedHome(executionTarget) &&
     !hasExplicitClaudeConfigDir;
   const claudeConfigSeedDir = useManagedRemoteClaudeConfig
     ? await prepareClaudeConfigSeed(process.env, onLog, agent.companyId)
     : null;
-  const preparedExecutionTargetRuntime = executionTargetIsRemote
-    ? await (async () => {
-        await onLog(
-          "stdout",
-          `[paperclip] Syncing workspace and Claude runtime assets to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
-        );
-        return await prepareAdapterExecutionTargetRuntime({
-          runId,
-          target: executionTarget,
-          adapterKey: "claude",
-          timeoutSec,
-          workspaceLocalDir: cwd,
-          installCommand: SANDBOX_INSTALL_COMMAND,
-          detectCommand: command,
-          onProgress: (line) => onLog("stdout", line),
-          onRuntimeProgress: ctx.onRuntimeProgress,
-          assets: [
-            {
-              key: "skills",
-              localDir: promptBundle.addDir,
-              followSymlinks: true,
-            },
-            {
-              key: "mcp-config",
-              localDir: localMcpConfigDir,
-              followSymlinks: true,
-            },
-            ...(claudeConfigSeedDir
-              ? [{
-                key: "config-seed",
-                localDir: claudeConfigSeedDir,
+  const preparedExecutionTargetRuntime =
+    !shadowReadOnly && executionTargetIsRemote
+      ? await (async () => {
+          await onLog(
+            "stdout",
+            `[paperclip] Syncing workspace and Claude runtime assets to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
+          );
+          return await prepareAdapterExecutionTargetRuntime({
+            runId,
+            target: executionTarget,
+            adapterKey: "claude",
+            timeoutSec,
+            workspaceLocalDir: cwd,
+            installCommand: SANDBOX_INSTALL_COMMAND,
+            detectCommand: command,
+            onProgress: (line) => onLog("stdout", line),
+            onRuntimeProgress: ctx.onRuntimeProgress,
+            assets: [
+              {
+                key: "skills",
+                localDir: promptBundle.addDir,
                 followSymlinks: true,
-              }]
-              : []),
-          ],
-        });
-      })()
-    : null;
+              },
+              {
+                key: "mcp-config",
+                localDir: localMcpConfigDir,
+                followSymlinks: true,
+              },
+              ...(claudeConfigSeedDir
+                ? [{
+                  key: "config-seed",
+                  localDir: claudeConfigSeedDir,
+                  followSymlinks: true,
+                }]
+                : []),
+            ],
+          });
+        })()
+      : null;
   if (preparedExecutionTargetRuntime?.workspaceRemoteDir) {
     effectiveExecutionCwd = preparedExecutionTargetRuntime.workspaceRemoteDir;
   }
@@ -655,9 +706,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     executionTargetIsRemote,
     executionCwd: effectiveExecutionCwd,
   });
-  const restoreRemoteWorkspace = preparedExecutionTargetRuntime
-    ? () => preparedExecutionTargetRuntime.restoreWorkspace((line) => onLog("stdout", line))
-    : null;
+  if (shadowReadOnly && disposableClaudeConfigDir) {
+    env.CLAUDE_CONFIG_DIR = disposableClaudeConfigDir;
+    loggedEnv.CLAUDE_CONFIG_DIR = disposableClaudeConfigDir;
+  }
+  restoreRemoteWorkspace =
+    !shadowReadOnly && preparedExecutionTargetRuntime
+      ? () => preparedExecutionTargetRuntime.restoreWorkspace((line) => onLog("stdout", line))
+      : null;
   const effectivePromptBundleAddDir = executionTargetIsRemote
     ? preparedExecutionTargetRuntime?.assetDirs.skills ??
       path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "claude", "skills")
@@ -706,8 +762,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       },
     });
   }
-  let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
-  if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
+  if (
+    !shadowReadOnly &&
+    executionTargetIsRemote &&
+    adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)
+  ) {
     paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
       runId,
       target: runtimeExecutionTarget,
@@ -729,6 +788,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         loggedEnv.CLAUDE_CONFIG_DIR = remoteClaudeConfigDir;
       }
     }
+  }
+  if (shadowReadOnly && env.CLAUDE_CONFIG_DIR) {
+    loggedEnv.CLAUDE_CONFIG_DIR = env.CLAUDE_CONFIG_DIR;
   }
   let effectiveEffort = effort;
   if (executionTargetIsSandbox && effort) {
@@ -764,6 +826,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       : runtimeMcpServerIdentity === runtimeMcpIdentity;
   const isValidUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(runtimeSessionId);
   const canResumeSession =
+    !shadowReadOnly &&
     runtimeSessionId.length > 0 &&
     isValidUuid &&
     hasMatchingPromptBundle &&
@@ -946,9 +1009,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
     }
 
+    const preparedRuntimeEnv = Object.fromEntries(
+      Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
+    // Shadow contract: no Paperclip API path/bridge/token/MCP. After PATH prep,
+    // drop every PAPERCLIP_* key while keeping provider auth and disposable CLAUDE_CONFIG_DIR.
+    const childEnv = shadowReadOnly
+      ? Object.fromEntries(
+          Object.entries(preparedRuntimeEnv).filter(([key]) => !key.startsWith("PAPERCLIP_")),
+        )
+      : env;
+
     const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
       cwd,
-      env,
+      env: childEnv,
       stdin: prompt,
       timeoutSec,
       graceSec,
@@ -1272,7 +1348,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
-  try {
     const initial = await runAttempt(sessionId ?? null);
     const sessionErrorKind =
       sessionId &&
@@ -1334,6 +1409,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `[paperclip] Restoring workspace changes from ${describeAdapterExecutionTarget(executionTarget)}.\n`,
       );
       await restoreRemoteWorkspace();
+    }
+    if (disposableClaudeConfigDir) {
+      await fs.rm(disposableClaudeConfigDir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 }

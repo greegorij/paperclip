@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { prepareClaudeConfigSeed, writePaperclipClaudeMcpConfig } from "./claude-config.js";
+import { prepareClaudeConfigSeed, writePaperclipClaudeMcpConfig, createDisposableClaudeConfigDir } from "./claude-config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -593,5 +593,130 @@ describe("prepareClaudeConfigSeed", () => {
       .rejects.toMatchObject({ code: "ENOENT" });
     await expect(fs.readFile(path.join(seedDir, "CLAUDE.md"), "utf8"))
       .resolves.toBe("local instructions");
+  });
+});
+
+describe("createDisposableClaudeConfigDir", () => {
+  const cleanupDirs: string[] = [];
+
+  afterEach(async () => {
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (!dir) continue;
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  async function makeSourceDir(): Promise<string> {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-disposable-src-"));
+    cleanupDirs.push(root);
+    const sourceDir = path.join(root, ".claude");
+    await fs.mkdir(sourceDir, { recursive: true });
+    return sourceDir;
+  }
+
+  it("copies credentials and CLAUDE.md into a unique disposable directory", async () => {
+    const sourceDir = await makeSourceDir();
+    await fs.writeFile(path.join(sourceDir, ".credentials.json"), JSON.stringify({ token: "dot" }), "utf8");
+    await fs.writeFile(path.join(sourceDir, "credentials.json"), JSON.stringify({ token: "plain" }), "utf8");
+    await fs.writeFile(path.join(sourceDir, "CLAUDE.md"), "shadow instructions", "utf8");
+
+    const disposableDir = await createDisposableClaudeConfigDir(sourceDir);
+    cleanupDirs.push(disposableDir);
+
+    expect(disposableDir).not.toBe(sourceDir);
+    await expect(fs.readFile(path.join(disposableDir, ".credentials.json"), "utf8"))
+      .resolves.toBe(JSON.stringify({ token: "dot" }));
+    await expect(fs.readFile(path.join(disposableDir, "credentials.json"), "utf8"))
+      .resolves.toBe(JSON.stringify({ token: "plain" }));
+    await expect(fs.readFile(path.join(disposableDir, "CLAUDE.md"), "utf8"))
+      .resolves.toBe("shadow instructions");
+
+    const dirStat = await fs.stat(disposableDir);
+    expect(dirStat.mode & 0o777).toBe(0o700);
+    const fileStat = await fs.stat(path.join(disposableDir, ".credentials.json"));
+    expect(fileStat.mode & 0o777).toBe(0o600);
+  });
+
+  it("sanitizes unsafe settings.json while leaving the source unchanged", async () => {
+    const sourceDir = await makeSourceDir();
+    const unsafeSettings = {
+      theme: "dark",
+      permissions: {
+        defaultMode: "dontAsk",
+        allow: ["Bash(op item *)"],
+      },
+      hooks: { PreToolUse: [{ matcher: "*" }] },
+      mcpServers: { local: { command: "secret-local-server" } },
+      permissionMode: "dontAsk",
+      skipDangerousModePermissionPrompt: true,
+    };
+    await fs.writeFile(path.join(sourceDir, "settings.json"), JSON.stringify(unsafeSettings), "utf8");
+    await fs.writeFile(path.join(sourceDir, "CLAUDE.md"), "keep me", "utf8");
+
+    const disposableDir = await createDisposableClaudeConfigDir(sourceDir);
+    cleanupDirs.push(disposableDir);
+
+    const stagedSettings = JSON.parse(await fs.readFile(path.join(disposableDir, "settings.json"), "utf8"));
+    expect(stagedSettings).toEqual({
+      theme: "dark",
+      permissions: { defaultMode: "default" },
+    });
+    expect(stagedSettings.hooks).toBeUndefined();
+    expect(stagedSettings.mcpServers).toBeUndefined();
+    expect(stagedSettings.permissionMode).toBeUndefined();
+    expect(stagedSettings.skipDangerousModePermissionPrompt).toBeUndefined();
+
+    await expect(fs.readFile(path.join(sourceDir, "settings.json"), "utf8"))
+      .resolves.toBe(JSON.stringify(unsafeSettings));
+    await expect(fs.readFile(path.join(sourceDir, "CLAUDE.md"), "utf8"))
+      .resolves.toBe("keep me");
+  });
+
+  it("does not copy non-whitelisted files, sessions, projects, or .claude.json", async () => {
+    const sourceDir = await makeSourceDir();
+    await fs.writeFile(path.join(sourceDir, "settings.json"), JSON.stringify({ theme: "light" }), "utf8");
+    await fs.writeFile(path.join(sourceDir, "CLAUDE.md"), "ok", "utf8");
+    await fs.writeFile(path.join(sourceDir, ".credentials.json"), JSON.stringify({ token: "x" }), "utf8");
+    await fs.writeFile(path.join(sourceDir, "settings.local.json"), JSON.stringify({ secret: true }), "utf8");
+    await fs.writeFile(path.join(sourceDir, ".claude.json"), JSON.stringify({ mcpServers: {} }), "utf8");
+    await fs.mkdir(path.join(sourceDir, "sessions"), { recursive: true });
+    await fs.writeFile(path.join(sourceDir, "sessions", "session.json"), "{}", "utf8");
+    await fs.mkdir(path.join(sourceDir, "projects"), { recursive: true });
+    await fs.writeFile(path.join(sourceDir, "projects", "proj.json"), "{}", "utf8");
+    await fs.writeFile(
+      path.join(path.dirname(sourceDir), ".claude.json"),
+      JSON.stringify({ sibling: true }),
+      "utf8",
+    );
+
+    const disposableDir = await createDisposableClaudeConfigDir(sourceDir);
+    cleanupDirs.push(disposableDir);
+
+    const stagedNames = (await fs.readdir(disposableDir)).sort();
+    expect(stagedNames).toEqual([".credentials.json", "CLAUDE.md", "settings.json"]);
+    await expect(fs.access(path.join(disposableDir, "settings.local.json")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.access(path.join(disposableDir, ".claude.json")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.access(path.join(disposableDir, "sessions")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.access(path.join(disposableDir, "projects")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("removes the partial temp directory when an unexpected copy error occurs", async () => {
+    const sourceDir = await makeSourceDir();
+    await fs.writeFile(path.join(sourceDir, ".credentials.json"), JSON.stringify({ token: "partial" }), "utf8");
+    // Directory where a file is expected → readFile throws EISDIR after credentials are staged.
+    await fs.mkdir(path.join(sourceDir, "settings.json"));
+
+    const before = new Set(await fs.readdir(os.tmpdir()));
+    await expect(createDisposableClaudeConfigDir(sourceDir)).rejects.toMatchObject({ code: "EISDIR" });
+    const after = await fs.readdir(os.tmpdir());
+    const leaked = after.filter(
+      (name) => name.startsWith("paperclip-claude-disposable-") && !before.has(name),
+    );
+    expect(leaked).toEqual([]);
   });
 });

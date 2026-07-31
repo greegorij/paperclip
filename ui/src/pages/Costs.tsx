@@ -19,6 +19,7 @@ import { EmptyState } from "../components/EmptyState";
 import { FinanceBillerCard } from "../components/FinanceBillerCard";
 import { FinanceKindCard } from "../components/FinanceKindCard";
 import { FinanceTimelineCard } from "../components/FinanceTimelineCard";
+import { FleetModelPolicyCard } from "../components/FleetModelPolicyCard";
 import { Identity } from "../components/Identity";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PageTabBar } from "../components/PageTabBar";
@@ -953,6 +954,10 @@ export function Costs() {
         </TabsContent>
 
         <TabsContent value="providers" className="mt-4 space-y-4">
+          <FleetModelPolicyCard
+            companyId={selectedCompanyId}
+            isProviderTabActive={mainTab === "providers"}
+          />
           {showCustomPrompt ? (
             <p className="text-sm text-muted-foreground">Select a start and end date to load data.</p>
           ) : (

@@ -824,6 +824,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/companies/{companyId}/tools/policies/{policyId}/duplicate",
   "PATCH /api/companies/{companyId}/tools/policies/{policyId}",
   "DELETE /api/companies/{companyId}/tools/policies/{policyId}",
+  "GET /api/companies/{companyId}/fleet-model-policy",
   "POST /api/companies/{companyId}/tools/action-requests/{actionRequestId}/trust-rule",
   "POST /api/companies/{companyId}/tools/trust-rules/{policyId}/revoke",
   "GET /api/companies/{companyId}/tools/stdio-templates",
@@ -4288,6 +4289,64 @@ registry.registerPath({
   summary: "Get the effective company skill policy",
   request: { params: z.object({ companyId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+const fleetModelPolicyRoleSchema = z.object({
+  primary: z.object({
+    model: z.string().min(1),
+    workspaceAccess: z.string().min(1).optional(),
+  }).strict(),
+  fallback: z.array(z.object({ model: z.string().min(1) }).strict()),
+  effort: z.string().min(1).optional(),
+  dataClass: z.string().min(1).optional(),
+  hardGates: z.array(z.string()).optional(),
+  escalation: z.object({
+    max: z.number().finite().optional(),
+    when: z.array(z.string()).optional(),
+    target: z.string().min(1).optional(),
+  }).strict().optional(),
+  validator: z.string().min(1).optional(),
+  limits: z.object({
+    maxAttempts: z.number().finite().optional(),
+    maxEscalations: z.number().finite().optional(),
+    maxDailyRuns: z.number().finite().optional(),
+    maxTokensPerRun: z.number().finite().optional(),
+    maxRunSeconds: z.number().finite().optional(),
+    maxDailyTokens: z.number().finite().optional(),
+  }).strict().optional(),
+}).strict();
+
+const fleetModelPolicyProjectionSchema = z.object({
+  policyId: z.string().min(1),
+  version: z.string().min(1),
+  mode: z.string().min(1),
+  roles: z.record(fleetModelPolicyRoleSchema),
+  profiles: z.record(z.object({
+    version: z.string().min(1),
+    agents: z.array(z.object({
+      slug: z.string().min(1),
+      model: z.string().min(1),
+      modelReasoningEffort: z.string().min(1).optional(),
+    }).strict()),
+  }).strict()),
+}).strict();
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/fleet-model-policy",
+  tags: ["companies"],
+  summary: "Get the fleet model policy projection",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: {
+    200: r.ok(fleetModelPolicyProjectionSchema),
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    503: {
+      description: "Fleet model policy unavailable",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+  },
 });
 
 registry.registerPath({

@@ -23,6 +23,21 @@ The `claude_local` adapter runs Anthropic's Claude Code CLI locally. It supports
 | `graceSec` | number | No | Grace period before force-kill |
 | `maxTurnsPerRun` | number | No | Max agentic turns per heartbeat (defaults to `300`) |
 | `dangerouslySkipPermissions` | boolean | No | Skip permission prompts (default: `true`); required for headless runs where interactive approval is impossible |
+| `shadowReadOnly` | boolean | No | Runs a local, disposable, read-only evaluation lane; rejects ACP, remote targets, empty network allowlists, and extra filesystem paths |
+
+## Read-only shadow runs
+
+Set `shadowReadOnly=true` only for a comparison or evaluation run, never for
+normal agent work. The adapter fails closed unless it can use the local Claude
+CLI, mount the workspace read-only, and apply a non-empty network allowlist.
+ACP, remote execution, and additional filesystem paths are rejected.
+
+The run receives a private temporary Claude configuration containing only
+provider credentials, sanitized settings, and optional Claude instructions. It
+does not receive Paperclip environment variables, a Paperclip API token,
+managed MCP connections, a Paperclip bridge, saved session state, or a
+workspace restore path. The temporary configuration is removed on success and
+when process launch fails; no state is copied back to the host configuration.
 
 ## Prompt Templates
 

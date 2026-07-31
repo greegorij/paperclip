@@ -70,6 +70,7 @@ import {
   seedManagedCodexHome,
   stageCodexHomeForSync,
   mergeManagedCodexMcpGateways,
+  writeApiKeyAuthJson,
   writeManagedCodexMcpConfig,
   type ManagedCodexMcpGateway,
 } from "./codex-home.js";
@@ -289,6 +290,28 @@ function managedMcpGatewaysFromContext(context: Record<string, unknown>): Manage
     .filter((gateway): gateway is ManagedCodexMcpGateway => Boolean(gateway));
 }
 
+const MANAGED_MCP_BLOCK_START = "# BEGIN PAPERCLIP MANAGED MCP";
+const MANAGED_MCP_BLOCK_END = "# END PAPERCLIP MANAGED MCP";
+
+async function removeManagedMcpConfigFromStagedCodexHome(codexHome: string): Promise<void> {
+  const configPath = path.join(codexHome, "config.toml");
+  const config = await fs.readFile(configPath, "utf8").catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  });
+  if (config == null) return;
+
+  const start = config.indexOf(MANAGED_MCP_BLOCK_START);
+  if (start < 0) return;
+  const end = config.indexOf(MANAGED_MCP_BLOCK_END, start);
+  const sanitized =
+    end < 0
+      ? config.slice(0, start).trimEnd()
+      : `${config.slice(0, start)}${config.slice(end + MANAGED_MCP_BLOCK_END.length)}`.trimEnd();
+  await fs.writeFile(configPath, sanitized ? `${sanitized}\n` : "", { mode: 0o600 });
+  await fs.chmod(configPath, 0o600);
+}
+
 type ResolvedExecutionTarget = ReturnType<typeof readAdapterExecutionTarget>;
 type MaybeResolvedExecutionTarget = ResolvedExecutionTarget | undefined;
 
@@ -445,6 +468,29 @@ export async function ensureCodexSkillsInjected(
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const engineSelection = await resolveCodexExecutionEngineForRun(ctx);
+  const shadowReadOnly = ctx.config.shadowReadOnly === true;
+  if (shadowReadOnly) {
+    const shadowExecutionTarget = readAdapterExecutionTarget({
+      executionTarget: ctx.executionTarget,
+      legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
+    });
+    const shadowNetworkScope = parseLocalProcessNetworkScope(ctx.config.networkScope);
+    const shadowNetworkAllowlist = parseLocalProcessNetworkAllowlist(ctx.config.networkAllowlist);
+    const shadowFilesystemExtraPaths = parseLocalProcessSandboxExtraPaths(ctx.config.filesystemExtraPaths);
+
+    if (engineSelection.engine !== "cli") {
+      throw new Error("shadowReadOnly requires local Codex CLI execution; ACP is not permitted.");
+    }
+    if (adapterExecutionTargetIsRemote(shadowExecutionTarget)) {
+      throw new Error("shadowReadOnly requires local Codex CLI execution; remote execution is not permitted.");
+    }
+    if (shadowNetworkScope !== "allowlist" || shadowNetworkAllowlist.length === 0) {
+      throw new Error("shadowReadOnly requires networkScope=allowlist with a nonempty networkAllowlist.");
+    }
+    if (shadowFilesystemExtraPaths.length > 0) {
+      throw new Error("shadowReadOnly does not permit filesystemExtraPaths.");
+    }
+  }
   if (engineSelection.engine === "acp") {
     try {
       return await executeCodexAcp(ctx);
@@ -516,7 +562,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const codexSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredSkillNames = resolveCodexDesiredSkillNames(config, codexSkillEntries);
   if (!executionTargetIsRemote) {
-    await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
+    await ensureAbsoluteDirectory(cwd, { createIfMissing: !shadowReadOnly });
   }
   const configuredOpenAiApiKey =
     typeof envConfig.OPENAI_API_KEY === "string" && envConfig.OPENAI_API_KEY.trim().length > 0
@@ -530,104 +576,132 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const configuredHomeIsManaged =
     configuredCodexHome != null &&
     isManagedCodexHomePath(process.env, agent.companyId, configuredCodexHome);
-  if (configuredCodexHome == null) {
-    await prepareManagedCodexHome(process.env, onLog, agent.companyId, {
-      apiKey: configuredOpenAiApiKey,
-    });
-  } else if (configuredHomeIsManaged) {
-    await seedManagedCodexHome(configuredCodexHome, process.env, onLog, {
-      apiKey: configuredOpenAiApiKey,
-    });
-  }
-  const defaultCodexHome = resolveManagedCodexHomeDir(process.env, agent.companyId);
-  const effectiveCodexHome = configuredCodexHome ?? defaultCodexHome;
-  const codexAuthCopyBackHostPath = path.join(
-    configuredCodexHome != null && !configuredHomeIsManaged
-      ? effectiveCodexHome
-      : resolveSharedCodexHomeDir(process.env),
-    "auth.json",
-  );
-  await fs.mkdir(effectiveCodexHome, { recursive: true });
-
-  // Never launch a managed CODEX_HOME with no credentials. Without auth.json and
-  // with OPENAI_API_KEY="" the provider rejects every request with
-  // "401 Missing bearer"; fail fast with a clear adapter error instead of
-  // emitting unauthenticated calls. External overrides manage their own auth.
-  // This is the execute-time backstop for the control plane's pre-dispatch
-  // configuration-incomplete gate (see server heartbeat) — both decide
-  // readiness through the same `evaluateCodexCredentialReadiness` predicate, so
-  // they cannot drift.
-  const credentialReadiness = await evaluateCodexCredentialReadiness({
-    env: process.env,
-    companyId: agent.companyId,
-    configuredCodexHome,
-    configuredApiKey: configuredOpenAiApiKey,
-  });
-  if (credentialReadiness.managed && !credentialReadiness.ready) {
-    throw new Error(
-      `no Codex credentials provisioned for managed home "${effectiveCodexHome}" ` +
-        `(no usable auth.json and OPENAI_API_KEY is empty). ` +
-        `Sign in to Codex on the host with a ChatGPT subscription, or configure a per-agent ` +
-        `OPENAI_API_KEY.`,
-    );
-  }
-  // Merge custom model providers (PAPERCLIP_CODEX_PROVIDERS) into the managed
-  // CODEX_HOME's config.toml BEFORE the home is shipped to a remote execution
-  // target, so both local and sandboxed Codex processes pick up the routing.
-  // An explicit env.CODEX_HOME override is treated as user-managed and skipped.
   const envConfigStrings = Object.fromEntries(
     Object.entries(envConfig).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
-  const preparedRuntimeConfig = await prepareCodexRuntimeConfig({
-    env: envConfigStrings,
-    codexHome: configuredCodexHome ? null : effectiveCodexHome,
-  });
   // Curated allowlist dir staged for the remote `home` asset (see below). Held
   // here so the outer `finally` can remove it on every exit path (teardown and
   // error), never only the happy path.
   let stagedCodexHomeDir: string | null = null;
   let stagedCodexHomePurpose: "remote-runtime" | "local-filesystem-sandbox" | null = null;
+  let effectiveCodexHome = "";
+  let codexAuthCopyBackHostPath = "";
+  let preparedRuntimeConfig: Awaited<ReturnType<typeof prepareCodexRuntimeConfig>> = {
+    notes: [],
+    cleanup: async () => {},
+  };
   try {
+    if (shadowReadOnly) {
+      // Shadow runs must never prepare, seed, or otherwise write a normal managed
+      // home. Build their complete per-run state in a private staged home from
+      // the outset, then remove any persisted Paperclip MCP bearer configuration.
+      const shadowSourceCodexHome = configuredCodexHome ?? resolveSharedCodexHomeDir(process.env);
+      stagedCodexHomeDir = await stageCodexHomeForSync(shadowSourceCodexHome, { runId });
+      stagedCodexHomePurpose = "local-filesystem-sandbox";
+      await removeManagedMcpConfigFromStagedCodexHome(stagedCodexHomeDir);
+      if (configuredOpenAiApiKey) {
+        await writeApiKeyAuthJson(stagedCodexHomeDir, configuredOpenAiApiKey);
+      }
+      effectiveCodexHome = stagedCodexHomeDir;
+      if (!configuredOpenAiApiKey && !(await codexHomeHasUsableAuth(effectiveCodexHome))) {
+        throw new Error(
+          `no usable Codex credentials available for shadow home "${effectiveCodexHome}" ` +
+            `(no usable auth.json and OPENAI_API_KEY is empty).`,
+        );
+      }
+    } else {
+      if (configuredCodexHome == null) {
+        await prepareManagedCodexHome(process.env, onLog, agent.companyId, {
+          apiKey: configuredOpenAiApiKey,
+        });
+      } else if (configuredHomeIsManaged) {
+        await seedManagedCodexHome(configuredCodexHome, process.env, onLog, {
+          apiKey: configuredOpenAiApiKey,
+        });
+      }
+      const defaultCodexHome = resolveManagedCodexHomeDir(process.env, agent.companyId);
+      effectiveCodexHome = configuredCodexHome ?? defaultCodexHome;
+      codexAuthCopyBackHostPath = path.join(
+        configuredCodexHome != null && !configuredHomeIsManaged
+          ? effectiveCodexHome
+          : resolveSharedCodexHomeDir(process.env),
+        "auth.json",
+      );
+      await fs.mkdir(effectiveCodexHome, { recursive: true });
+
+      // Never launch a managed CODEX_HOME with no credentials. Without auth.json and
+      // with OPENAI_API_KEY="" the provider rejects every request with
+      // "401 Missing bearer"; fail fast with a clear adapter error instead of
+      // emitting unauthenticated calls. External overrides manage their own auth.
+      const credentialReadiness = await evaluateCodexCredentialReadiness({
+        env: process.env,
+        companyId: agent.companyId,
+        configuredCodexHome,
+        configuredApiKey: configuredOpenAiApiKey,
+      });
+      if (credentialReadiness.managed && !credentialReadiness.ready) {
+        throw new Error(
+          `no Codex credentials provisioned for managed home "${effectiveCodexHome}" ` +
+            `(no usable auth.json and OPENAI_API_KEY is empty). ` +
+            `Sign in to Codex on the host with a ChatGPT subscription, or configure a per-agent ` +
+            `OPENAI_API_KEY.`,
+        );
+      }
+      // Merge custom model providers (PAPERCLIP_CODEX_PROVIDERS) into the managed
+      // CODEX_HOME's config.toml BEFORE the home is shipped to a remote execution
+      // target, so both local and sandboxed Codex processes pick up the routing.
+      // An explicit env.CODEX_HOME override is treated as user-managed and skipped.
+      preparedRuntimeConfig = await prepareCodexRuntimeConfig({
+        env: envConfigStrings,
+        codexHome: configuredCodexHome ? null : effectiveCodexHome,
+      });
+    }
     for (const note of preparedRuntimeConfig.notes) {
       await onLog("stdout", `[paperclip] ${note}\n`);
     }
     const paperclipBaseEnv = buildPaperclipEnv(agent);
-    const runtimeMcpGateways = (ctx.runtimeMcp?.getServers() ?? []).map((server) => ({
-      name: server.name,
-      endpointPath: server.url,
-      bearerToken: server.token,
-    }));
-    const managedMcpGateways = mergeManagedCodexMcpGateways(
-      runtimeMcpGateways,
-      managedMcpGatewaysFromContext(context),
-    );
-    const managedMcp = await writeManagedCodexMcpConfig({
-      codexHome: effectiveCodexHome,
-      apiBaseUrl: paperclipBaseEnv.PAPERCLIP_API_URL,
-      gateways: managedMcpGateways,
-    });
-    if (managedMcpGateways.length > 0) {
-      await onLog(
-        "stdout",
-        `[paperclip] Wrote ${managedMcpGateways.length} managed MCP gateway(s) into Codex config "${managedMcp.configPath}".\n`,
+    const runtimeMcpGateways = shadowReadOnly
+      ? []
+      : (ctx.runtimeMcp?.getServers() ?? []).map((server) => ({
+          name: server.name,
+          endpointPath: server.url,
+          bearerToken: server.token,
+        }));
+    if (!shadowReadOnly) {
+      const managedMcpGateways = mergeManagedCodexMcpGateways(
+        runtimeMcpGateways,
+        managedMcpGatewaysFromContext(context),
+      );
+      const managedMcp = await writeManagedCodexMcpConfig({
+        codexHome: effectiveCodexHome,
+        apiBaseUrl: paperclipBaseEnv.PAPERCLIP_API_URL,
+        gateways: managedMcpGateways,
+      });
+      if (managedMcpGateways.length > 0) {
+        await onLog(
+          "stdout",
+          `[paperclip] Wrote ${managedMcpGateways.length} managed MCP gateway(s) into Codex config "${managedMcp.configPath}".\n`,
+        );
+      }
+      for (const warning of managedMcp.warnings) {
+        await onLog("stderr", `[paperclip] ${warning}\n`);
+      }
+    }
+    if (!shadowReadOnly) {
+      // Inject skills into the same CODEX_HOME that Codex will actually run with
+      // (managed home in the default case, or an explicit override from adapter config).
+      const codexSkillsDir = resolveCodexSkillsDir(effectiveCodexHome);
+      await ensureCodexSkillsInjected(
+        onLog,
+        {
+          skillsHome: codexSkillsDir,
+          skillsEntries: codexSkillEntries,
+          desiredSkillNames,
+        },
       );
     }
-    for (const warning of managedMcp.warnings) {
-      await onLog("stderr", `[paperclip] ${warning}\n`);
-    }
-    // Inject skills into the same CODEX_HOME that Codex will actually run with
-    // (managed home in the default case, or an explicit override from adapter config).
-    const codexSkillsDir = resolveCodexSkillsDir(effectiveCodexHome);
-    await ensureCodexSkillsInjected(
-      onLog,
-      {
-        skillsHome: codexSkillsDir,
-        skillsEntries: codexSkillEntries,
-        desiredSkillNames,
-      },
-    );
     const timeoutSec = resolveAdapterExecutionTargetTimeoutSec(
       executionTarget,
       asNumber(config.timeoutSec, 0),
@@ -709,11 +783,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const executionTargetIsSandbox =
       runtimeExecutionTarget?.kind === "remote" && runtimeExecutionTarget.transport === "sandbox";
     const networkScope = parseLocalProcessNetworkScope(config.networkScope);
-    const filesystemScope = parseLocalProcessFilesystemScope(config.filesystemScope);
-    const filesystemWorkspaceAccess = parseLocalProcessFilesystemWorkspaceAccess(config.filesystemWorkspaceAccess);
+    const configuredFilesystemScope = parseLocalProcessFilesystemScope(config.filesystemScope);
+    const configuredFilesystemWorkspaceAccess = parseLocalProcessFilesystemWorkspaceAccess(config.filesystemWorkspaceAccess);
+    const filesystemScope = shadowReadOnly ? "workspace" : configuredFilesystemScope;
+    const filesystemWorkspaceAccess = shadowReadOnly ? "ro" : configuredFilesystemWorkspaceAccess;
     const localFilesystemSandboxEnabled = filesystemScope === "workspace" && !executionTargetIsRemote;
     let localFilesystemSandboxCodexHome = effectiveCodexHome;
-    if (localFilesystemSandboxEnabled) {
+    if (localFilesystemSandboxEnabled && !shadowReadOnly) {
       // Bubblewrap mounts only explicit managed paths. Stage a curated CODEX_HOME
       // with dereferenced auth/config/skills so auth.json is a real readable file
       // inside tmpfs root (never a dangling host-relative symlink).
@@ -819,10 +895,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       env.PAPERCLIP_RUNTIME_PRIMARY_URL = runtimePrimaryUrl;
     }
     env.CODEX_HOME = remoteCodexHome ?? localFilesystemSandboxCodexHome;
-    if (authToken) {
+    if (authToken && !shadowReadOnly) {
       env.PAPERCLIP_API_KEY = authToken;
     }
-    if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
+    if (
+      !shadowReadOnly &&
+      executionTargetIsRemote &&
+      adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)
+    ) {
       paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
         runId,
         target: runtimeExecutionTarget,
@@ -838,7 +918,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     const effectiveEnv = Object.fromEntries(
       Object.entries({ ...process.env, ...env }).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string",
+        (entry): entry is [string, string] =>
+          typeof entry[1] === "string" && (!shadowReadOnly || entry[0] !== "PAPERCLIP_API_KEY"),
       ),
     );
     const billingType = resolveCodexBillingType(effectiveEnv);
@@ -849,18 +930,20 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             filesystemScope,
             filesystemWorkspaceAccess,
             managedPaths: [{ path: localFilesystemSandboxCodexHome, access: "rw" }],
-            extraPaths: parseLocalProcessSandboxExtraPaths(config.filesystemExtraPaths),
-            pathAliases: targetWorkspaceRealization?.mode === "copy"
+            extraPaths: shadowReadOnly ? [] : parseLocalProcessSandboxExtraPaths(config.filesystemExtraPaths),
+            pathAliases: !shadowReadOnly && targetWorkspaceRealization?.mode === "copy"
               ? targetWorkspaceRealization.pathAliases
               : [],
-            outboundRestorePaths: targetWorkspaceRealization?.outboundRestorePaths ?? [],
+            outboundRestorePaths: shadowReadOnly ? [] : targetWorkspaceRealization?.outboundRestorePaths ?? [],
             homeDir: filesystemScope ? localFilesystemSandboxCodexHome : null,
             networkScope,
             networkAllowlist: parseLocalProcessNetworkAllowlist(config.networkAllowlist),
-            networkTrustedUrls: [
-              paperclipBaseEnv.PAPERCLIP_API_URL,
-              ...runtimeMcpGateways.map((gateway) => gateway.endpointPath),
-            ],
+            networkTrustedUrls: shadowReadOnly
+              ? []
+              : [
+                  paperclipBaseEnv.PAPERCLIP_API_URL,
+                  ...runtimeMcpGateways.map((gateway) => gateway.endpointPath),
+                ],
             command: asString(config.filesystemSandboxCommand, "bwrap"),
           }
         : null;
@@ -878,6 +961,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
+    // Shadow contract: no Paperclip API path/bridge/token/MCP. After PATH prep,
+    // drop every PAPERCLIP_* key while keeping Codex auth and ordinary runtime.
+    const childEnv = shadowReadOnly
+      ? Object.fromEntries(
+          Object.entries(runtimeEnv).filter(([key]) => !key.startsWith("PAPERCLIP_")),
+        )
+      : env;
     await ensureAdapterExecutionTargetRuntimeCommandInstalled({
       runId,
       target: executionTarget,
@@ -914,6 +1004,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const runtimeSessionCwd = asString(runtimeSessionParams.cwd, "");
     const runtimeRemoteExecution = parseObject(runtimeSessionParams.remoteExecution);
     const canResumeSession =
+      !shadowReadOnly &&
       runtimeSessionId.length > 0 &&
       (runtimeSessionCwd.length === 0 || path.resolve(runtimeSessionCwd) === path.resolve(effectiveExecutionCwd)) &&
       adapterExecutionTargetSessionMatches(runtimeRemoteExecution, runtimeExecutionTarget);
@@ -1164,7 +1255,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       try {
         const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
           cwd,
-          env,
+          env: childEnv,
           stdin: prompt,
           timeoutSec,
           graceSec,
@@ -1293,7 +1384,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         };
       }
 
-      const canFallbackToRuntimeSession = !isRetry && !forceFreshSession;
+      const canFallbackToRuntimeSession = !isRetry && !forceFreshSession && !shadowReadOnly;
       const resolvedSessionId =
         attempt.parsed.sessionId ??
         (canFallbackToRuntimeSession ? (runtimeSessionId ?? runtime.sessionId ?? null) : null);
@@ -1437,7 +1528,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
   } finally {
     try {
-      if (stagedCodexHomeDir && stagedCodexHomePurpose === "local-filesystem-sandbox") {
+      if (
+        !shadowReadOnly &&
+        stagedCodexHomeDir &&
+        stagedCodexHomePurpose === "local-filesystem-sandbox"
+      ) {
         const stagedCodexHomeDirForCopyBack = stagedCodexHomeDir;
         await copyBackCodexAuth({
           readSandboxAuth: () => fs.readFile(path.join(stagedCodexHomeDirForCopyBack, "auth.json")),

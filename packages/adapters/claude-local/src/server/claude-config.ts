@@ -13,6 +13,14 @@ import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 
 const SEEDED_SHARED_FILES = ["settings.json", "CLAUDE.md"] as const;
 
+/** Whitelist for disposable shadow/read-only Claude config staging. */
+const DISPOSABLE_CLAUDE_CONFIG_FILES = [
+  ".credentials.json",
+  "credentials.json",
+  "settings.json",
+  "CLAUDE.md",
+] as const;
+
 interface SeedFile {
   name: string;
   sourcePath: string;
@@ -117,6 +125,33 @@ export function resolveSharedClaudeConfigDir(
 ): string {
   const fromEnv = nonEmpty(env.CLAUDE_CONFIG_DIR);
   return fromEnv ? path.resolve(fromEnv) : path.join(os.homedir(), ".claude");
+}
+
+/**
+ * Create a unique disposable Claude config directory for shadow/read-only lanes.
+ * Copies only provider auth files plus settings.json and CLAUDE.md from `sourceDir`,
+ * sanitizes settings with remote-settings safety rules, and applies private permissions.
+ * On unexpected copy error the partial temp directory is removed and the error is rethrown.
+ * The caller owns removing the returned directory when finished.
+ */
+export async function createDisposableClaudeConfigDir(sourceDir: string): Promise<string> {
+  const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-disposable-"));
+  try {
+    await fs.chmod(stagingDir, 0o700);
+    for (const name of DISPOSABLE_CLAUDE_CONFIG_FILES) {
+      const sourcePath = path.join(sourceDir, name);
+      if (!(await pathExists(sourcePath))) continue;
+      const rawContents = await fs.readFile(sourcePath);
+      const contents = name === "settings.json"
+        ? Buffer.from(sanitizeRemoteClaudeSettings(rawContents.toString("utf8")), "utf8")
+        : rawContents;
+      await fs.writeFile(path.join(stagingDir, name), contents, { mode: 0o600 });
+    }
+    return stagingDir;
+  } catch (error) {
+    await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 export function resolveManagedClaudeConfigSeedDir(

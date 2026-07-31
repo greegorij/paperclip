@@ -122,8 +122,8 @@ function applyManagedOpenAiRoleFit(snapshot) {
   return snapshot;
 }
 
-function buildLiveSnapshotForProfile(profileName, runtimeEnv) {
-  const snapshot = structuredClone(liveAligned);
+function buildLiveSnapshotForProfile(profileName, runtimeEnv, sourceSnapshot = liveAligned) {
+  const snapshot = structuredClone(sourceSnapshot);
   ensureJarvisManagedInstructions(snapshot);
   for (const agent of snapshot.agents ?? []) {
     if (SWITCHABLE_PROFILE_SLUGS.has(agent.slug)) {
@@ -159,11 +159,19 @@ function isProfileOwnedModelChange(change) {
   return SWITCHABLE_PROFILE_SLUGS.has(String(change.target));
 }
 
-const liveAligned = applyManagedOpenAiRoleFit(
-  JSON.parse(readFileSync(path.join(FIXTURES_DIR, "live-aligned.json"), "utf8")),
+const liveAligned = buildLiveSnapshotForProfile(
+  "anthropic-first",
+  ANTHROPIC_RUNTIME_ENV,
+  applyManagedOpenAiRoleFit(
+    JSON.parse(readFileSync(path.join(FIXTURES_DIR, "live-aligned.json"), "utf8")),
+  ),
 );
-const liveDrift = applyManagedOpenAiRoleFit(
-  JSON.parse(readFileSync(path.join(FIXTURES_DIR, "live-drift.json"), "utf8")),
+const liveDrift = buildLiveSnapshotForProfile(
+  "anthropic-first",
+  ANTHROPIC_RUNTIME_ENV,
+  applyManagedOpenAiRoleFit(
+    JSON.parse(readFileSync(path.join(FIXTURES_DIR, "live-drift.json"), "utf8")),
+  ),
 );
 function buildApplySnapshotWithNonProfileModelDrift({
   includeSecondModelDrift = false,
@@ -258,7 +266,13 @@ function createLiveSnapshotFetchMock({
   assert.ok(secondSelectedAgent, `fixture must include ${secondSelectedAgentSlug}`);
   const secondSelectedAgentDetail = detailsById.get(secondSelectedAgent.id);
   secondSelectedAgentDetail.maxConcurrentRuns = null;
-  secondSelectedAgentDetail.runtimeConfig = { heartbeat: { maxConcurrentRuns: 0 } };
+  secondSelectedAgentDetail.runtimeConfig = {
+    ...(secondSelectedAgentDetail.runtimeConfig ?? {}),
+    heartbeat: {
+      ...(secondSelectedAgentDetail.runtimeConfig?.heartbeat ?? {}),
+      maxConcurrentRuns: 1,
+    },
+  };
   const heartbeatRoleSlugs = ["zwiadowca-kodu", "mi-sie-kodu-codex"];
   for (const slug of heartbeatRoleSlugs) {
     const sourceAgent = source.agents.find((agent) => agent.slug === slug);
@@ -1595,7 +1609,7 @@ test("snapshotFleet live path maps runtimeConfig heartbeat fields", async () => 
   assert.equal(recenzent.maxConcurrentRuns, 1);
   const jarvis = snap.agents.find((agent) => agent.slug === "jarvis");
   assert.ok(jarvis, "snapshot should include jarvis");
-  assert.equal(jarvis.maxConcurrentRuns, 0);
+  assert.equal(jarvis.maxConcurrentRuns, 1);
   const zwiadowca = snap.agents.find((agent) => agent.slug === "zwiadowca-kodu");
   assert.ok(zwiadowca, "snapshot should include zwiadowca-kodu");
   assert.deepEqual(zwiadowca.heartbeat, {
@@ -1842,6 +1856,36 @@ test("switchable profile model corruption blocks profile consistency and avoids 
   assert.ok(jarvis, "fixture must include jarvis");
   jarvis.adapterConfig = { ...(jarvis.adapterConfig ?? {}), model: "claude-opus-5" };
   jarvis.model = "claude-opus-5";
+  const diff = diffFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+  });
+  assert.ok(
+    diff.changes.some((change) => change.kind === "provider-profile-inconsistent" && change.blocking),
+    JSON.stringify(diff.changes, null, 2),
+  );
+  assert.equal(
+    diff.changes.filter((change) => isProfileOwnedModelChange(change)).length,
+    0,
+    JSON.stringify(diff.changes, null, 2),
+  );
+  const validation = validateFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+  });
+  assert.ok(
+    validation.errors.some((error) => error.code === "provider-profile-inconsistent"),
+    JSON.stringify(validation.errors, null, 2),
+  );
+});
+
+test("switchable safe-config drift blocks profile consistency even when adapter and model match", () => {
+  const snapshot = buildLiveSnapshotForProfile("openai-first");
+  const badacz = snapshot.agents.find((agent) => agent.slug === "badacz");
+  assert.ok(badacz, "fixture must include badacz");
+  badacz.adapterConfig.networkAllowlist = [];
   const diff = diffFleet({
     packageDir: PACKAGE_DIR,
     desiredDir: DESIRED_DIR,

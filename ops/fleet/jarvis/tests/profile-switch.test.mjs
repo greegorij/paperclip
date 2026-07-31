@@ -9,6 +9,7 @@ import { loadDesired } from "../lib/load.mjs";
 import { generateCodexJarvisInstructions } from "../lib/codex-jarvis-instructions.mjs";
 import {
   validateProviderProfilesDocument,
+  detectProviderProfileState,
   planProviderProfileSwitch,
   previewProviderProfileSwitch,
   applyProviderProfileSwitch,
@@ -128,6 +129,7 @@ function createApiMock(
     omitDesiredSkillsOnAgentGet = false,
     skillsDesiredSkillsBySlug = null,
     omitDesiredSkillsArrayOnSkillsGetForSlug = null,
+    bundleVerifyMismatchForContent = null,
   } = {},
 ) {
   const byId = new Map((snapshot.agents ?? []).map((agent) => [agent.id, structuredClone(agent)]));
@@ -138,6 +140,8 @@ function createApiMock(
     if (Array.isArray(orderLog)) orderLog.push(entry);
   };
   const instructionsBundleByAgentId = new Map();
+  const poisonNextBundleGetByAgentId = new Set();
+  let bundlePutFailureUsed = false;
   for (const [agentId] of byId.entries()) {
     const files = new Map([[JARVIS_CODEX_BUNDLE_PATH, COMMITTED_JARVIS_CODEX_BUNDLE_CONTENT]]);
     const globalOverrides = instructionsBundleState?.["*"];
@@ -165,6 +169,14 @@ function createApiMock(
       }
       return null;
     },
+    peekBundleBySlug(slug, filePath = JARVIS_CODEX_BUNDLE_PATH) {
+      for (const agent of byId.values()) {
+        if (agent.slug === slug) {
+          return instructionsBundleByAgentId.get(agent.id)?.get(filePath) ?? null;
+        }
+      }
+      return null;
+    },
     async get(url) {
       logOrder({ type: "get", url });
       getCalls.push({ url });
@@ -183,6 +195,13 @@ function createApiMock(
         }
         const content = instructionsBundleByAgentId.get(agentId)?.get(requestedPath);
         if (content == null) return { ok: false, status: 404, data: null };
+        if (poisonNextBundleGetByAgentId.delete(agentId)) {
+          return {
+            ok: true,
+            status: 200,
+            data: { path: requestedPath, content: "tampered-after-write" },
+          };
+        }
         return {
           ok: true,
           status: 200,
@@ -276,12 +295,16 @@ function createApiMock(
       if (typeof body?.content !== "string") {
         return { ok: false, status: 404, data: null };
       }
-      const failCfg = failBundlePut && typeof failBundlePut === "object"
+      const configuredFailure = failBundlePut && !bundlePutFailureUsed
         ? failBundlePut
-        : (failBundlePut ? { status: 500, afterWrite: true } : null);
+        : null;
+      const failCfg = configuredFailure && typeof configuredFailure === "object"
+        ? configuredFailure
+        : (configuredFailure ? { status: 500, afterWrite: true } : null);
       const failStatus = Number.isInteger(failCfg?.status) ? failCfg.status : 500;
       const failAfterWrite = failCfg?.afterWrite !== false;
       if (failCfg && !failAfterWrite) {
+        bundlePutFailureUsed = true;
         putCalls.push({ url, body, slug: agent.slug, failed: true, afterWrite: false });
         return { ok: false, status: failStatus, data: null };
       }
@@ -289,6 +312,9 @@ function createApiMock(
         instructionsBundleByAgentId.set(agentId, new Map());
       }
       instructionsBundleByAgentId.get(agentId).set(targetPath, body.content);
+      if (bundleVerifyMismatchForContent === body.content) {
+        poisonNextBundleGetByAgentId.add(agentId);
+      }
       const rootPath = typeof agent.adapterConfig?.instructionsRootPath === "string"
         ? agent.adapterConfig.instructionsRootPath.trim()
         : "";
@@ -302,6 +328,7 @@ function createApiMock(
       };
       putCalls.push({ url, body, slug: agent.slug, failed: Boolean(failCfg), afterWrite: true });
       if (failCfg) {
+        bundlePutFailureUsed = true;
         return { ok: false, status: failStatus, data: null };
       }
       return {
@@ -318,13 +345,26 @@ function createApiMock(
 }
 
 function buildRollbackPayloadFromSnapshot(snapshot, { companyId, profileName }) {
+  const jarvis = snapshot.agents.find((agent) => agent.slug === "jarvis");
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: "jarvis-provider-profile-backup",
     companyId,
     profileName,
     capturedAt: new Date().toISOString(),
     snapshotCapturedAt: new Date().toISOString(),
+    ...(profileName === "openai-first"
+      ? {
+          jarvisInstructions: {
+            agentId: jarvis.id,
+            path: JARVIS_CODEX_BUNDLE_PATH,
+            content: COMMITTED_JARVIS_CODEX_BUNDLE_CONTENT,
+            sha256: createHash("sha256")
+              .update(COMMITTED_JARVIS_CODEX_BUNDLE_CONTENT)
+              .digest("hex"),
+          },
+        }
+      : {}),
     agents: SWITCHABLE.map((slug) => {
       const live = snapshot.agents.find((agent) => agent.slug === slug);
       return {
@@ -350,6 +390,149 @@ test("profiles schema validates exact 22 switchable slugs and required mappings"
   assert.deepEqual(
     result.expectedSwitchable,
     [...SWITCHABLE].sort(),
+  );
+});
+
+test("profiles schema rejects Sol-overuse drift against model-policy primary", () => {
+  const desired = loadDesired(DESIRED_DIR);
+  const profilesDoc = structuredClone(desired.profiles);
+  const badacz = profilesDoc.profiles["openai-first"].agents.find((item) => item.slug === "badacz");
+  assert.notEqual(badacz.model, "gpt-5.6-sol");
+  badacz.model = "gpt-5.6-sol";
+  const result = validateProviderProfilesDocument({ desired, profilesDoc });
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (item) => item.includes("openai-first badacz: model must be gpt-5.6-terra"),
+    ),
+    JSON.stringify(result.errors, null, 2),
+  );
+});
+
+test("profiles schema rejects wrong Anthropic fallback drift against model-policy", () => {
+  const desired = loadDesired(DESIRED_DIR);
+  const profilesDoc = structuredClone(desired.profiles);
+  const krytyk = profilesDoc.profiles["anthropic-first"].agents.find((item) => item.slug === "krytyk");
+  assert.equal(krytyk.model, "claude-opus-5");
+  krytyk.model = "claude-sonnet-5";
+  const result = validateProviderProfilesDocument({ desired, profilesDoc });
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (item) => item.includes("anthropic-first krytyk")
+        && item.includes("model must be claude-opus-5"),
+    ),
+    JSON.stringify(result.errors, null, 2),
+  );
+});
+
+test("profiles schema rejects profile version that does not equal model-policy version", () => {
+  const desired = loadDesired(DESIRED_DIR);
+  const profilesDoc = structuredClone(desired.profiles);
+  assert.equal(profilesDoc.profiles["openai-first"].version, "2026-07-31.1");
+  profilesDoc.profiles["openai-first"].version = "2026-07-30.1";
+  const result = validateProviderProfilesDocument({ desired, profilesDoc });
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (item) => item.includes("openai-first")
+        && item.includes("version must equal model-policy version 2026-07-31.1"),
+    ),
+    JSON.stringify(result.errors, null, 2),
+  );
+});
+
+function loadShadowModelPolicy() {
+  return JSON.parse(
+    readFileSync(path.join(DESIRED_DIR, "model-policy.shadow.v1.json"), "utf8"),
+  );
+}
+
+test("profiles schema rejects openai-first primary modelCatalog contract breaks", () => {
+  const desired = loadDesired(DESIRED_DIR);
+  const profilesDoc = desired.profiles;
+
+  const missing = structuredClone(loadShadowModelPolicy());
+  missing.roles.badacz.primary.model = "missing-openai-primary";
+  let result = validateProviderProfilesDocument({
+    desired,
+    profilesDoc,
+    modelPolicy: missing,
+  });
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (item) => item.includes("badacz") && item.includes("must exist in modelCatalog"),
+    ),
+    JSON.stringify(result.errors, null, 2),
+  );
+
+  const wrongProvider = structuredClone(loadShadowModelPolicy());
+  wrongProvider.roles.badacz.primary.model = "claude-sonnet-5";
+  result = validateProviderProfilesDocument({
+    desired,
+    profilesDoc,
+    modelPolicy: wrongProvider,
+  });
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (item) => item.includes("badacz")
+        && item.includes("primary modelCatalog provider must be openai"),
+    ),
+    JSON.stringify(result.errors, null, 2),
+  );
+
+  const wrongAdapter = structuredClone(loadShadowModelPolicy());
+  wrongAdapter.modelCatalog["gpt-5.6-terra"].adapterType = "http";
+  result = validateProviderProfilesDocument({
+    desired,
+    profilesDoc,
+    modelPolicy: wrongAdapter,
+  });
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (item) => item.includes("primary modelCatalog adapterType must be codex_local"),
+    ),
+    JSON.stringify(result.errors, null, 2),
+  );
+});
+
+test("profiles schema rejects anthropic fallback modelCatalog contract breaks", () => {
+  const desired = loadDesired(DESIRED_DIR);
+  const profilesDoc = desired.profiles;
+
+  const wrongProvider = structuredClone(loadShadowModelPolicy());
+  wrongProvider.modelCatalog["claude-sonnet-5"].provider = "openai";
+  let result = validateProviderProfilesDocument({
+    desired,
+    profilesDoc,
+    modelPolicy: wrongProvider,
+  });
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (item) => item.includes("badacz")
+        && item.includes("fallback must include a model with modelCatalog provider anthropic"),
+    ),
+    JSON.stringify(result.errors, null, 2),
+  );
+
+  const wrongAdapter = structuredClone(loadShadowModelPolicy());
+  wrongAdapter.modelCatalog["claude-sonnet-5"].adapterType = "http";
+  result = validateProviderProfilesDocument({
+    desired,
+    profilesDoc,
+    modelPolicy: wrongAdapter,
+  });
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (item) => item.includes("badacz")
+        && item.includes("anthropic fallback modelCatalog adapterType must be claude_local"),
+    ),
+    JSON.stringify(result.errors, null, 2),
   );
 });
 
@@ -846,6 +1029,33 @@ test("apply never resumes agents and idempotent reapply makes zero writes", asyn
   assert.ok(secondPlan.allAffected.every((item) => item.to.status === "paused"));
 });
 
+test("profile detection compares the full safe configuration, not only adapter and model", () => {
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const plan = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+    profileName: "openai-first",
+  });
+  assert.equal(plan.ok, true, JSON.stringify(plan.blockers, null, 2));
+  applyPlanToSnapshot(snapshot, plan);
+
+  const profilesDoc = loadDesired(DESIRED_DIR).profiles;
+  const aligned = detectProviderProfileState({ profilesDoc, liveSnapshot: snapshot });
+  assert.equal(aligned.ok, true, JSON.stringify(aligned.issues, null, 2));
+  assert.equal(aligned.profileName, "openai-first");
+
+  const badacz = snapshot.agents.find((agent) => agent.slug === "badacz");
+  badacz.adapterConfig.networkAllowlist = [];
+  const drifted = detectProviderProfileState({ profilesDoc, liveSnapshot: snapshot });
+  assert.equal(drifted.ok, false);
+  assert.ok(
+    drifted.issues.some(
+      (issue) => issue.slug === "badacz" && issue.detail.includes("full safe configuration"),
+    ),
+  );
+});
+
 test("openai apply exact bundle makes zero PUT and zero agent PATCH on no-plan", async () => {
   const snapshot = structuredClone(liveAligned);
   setSwitchablePaused(snapshot);
@@ -883,12 +1093,12 @@ test("openai apply exact bundle makes zero PUT and zero agent PATCH on no-plan",
   assert.equal(api.patchCalls.length, 0);
 });
 
-test("openai apply uploads missing bundle before first agent patch and verifies GET", async () => {
+test("openai apply updates stale bundle before first agent patch and verifies GET", async () => {
   const snapshot = structuredClone(liveAligned);
   setSwitchablePaused(snapshot);
   const orderLog = [];
   const api = createApiMock(snapshot, {
-    instructionsBundleState: { "*": { [JARVIS_CODEX_BUNDLE_PATH]: null } },
+    instructionsBundleState: { "*": { [JARVIS_CODEX_BUNDLE_PATH]: "previous Jarvis instructions" } },
     orderLog,
   });
   const backup = makeBackupGate();
@@ -921,12 +1131,124 @@ test("openai apply uploads missing bundle before first agent patch and verifies 
   );
 });
 
+test("openai backup and rollback preserve exact prior Jarvis instructions without reporting them", async () => {
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const previousInstructions = "private exact Jarvis instructions\nwith a second line\n";
+  const api = createApiMock(snapshot, {
+    instructionsBundleState: {
+      "*": { [JARVIS_CODEX_BUNDLE_PATH]: previousInstructions },
+    },
+  });
+  const stateBackupFile = path.join(
+    mkdtempSync(path.join(os.tmpdir(), "jarvis-state-instructions-")),
+    "pre.json",
+  );
+  const applyReport = await applyProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    companyId: "company-jarvis",
+    profileName: "openai-first",
+    confirmProfile: "openai-first",
+    backupGate: makeBackupGate(),
+    stateBackupFile,
+    api,
+    liveSnapshot: snapshot,
+    runtimeEnv: OPENAI_RUNTIME_ENV,
+  });
+  assert.equal(applyReport.ok, true, JSON.stringify(applyReport.failed, null, 2));
+  const savedBackup = JSON.parse(readFileSync(stateBackupFile, "utf8"));
+  assert.equal(savedBackup.jarvisInstructions.content, previousInstructions);
+  assert.equal(
+    savedBackup.jarvisInstructions.sha256,
+    createHash("sha256").update(previousInstructions).digest("hex"),
+  );
+  assert.equal(JSON.stringify(applyReport).includes(previousInstructions), false);
+
+  const rollbackReport = await rollbackProviderProfileSwitch({
+    companyId: "company-jarvis",
+    backupFile: stateBackupFile,
+    backupGate: makeBackupGate(),
+    api,
+    liveSnapshot: snapshot,
+  });
+  assert.equal(rollbackReport.ok, true, JSON.stringify(rollbackReport.failed, null, 2));
+  assert.equal(api.peekBundleBySlug("jarvis"), previousInstructions);
+  assert.equal(JSON.stringify(rollbackReport).includes(previousInstructions), false);
+  assert.ok(
+    rollbackReport.completed.some(
+      (item) => item.slug === "jarvis" && typeof item.instructionsHashPrefix === "string",
+    ),
+  );
+});
+
+test("rollback fails closed when exact Jarvis instruction verification mismatches", async () => {
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const previousInstructions = "private rollback verification sentinel";
+  const payload = buildRollbackPayloadFromSnapshot(snapshot, {
+    companyId: "company-jarvis",
+    profileName: "openai-first",
+  });
+  payload.jarvisInstructions.content = previousInstructions;
+  payload.jarvisInstructions.sha256 = createHash("sha256")
+    .update(previousInstructions)
+    .digest("hex");
+  const rollbackFile = path.join(
+    mkdtempSync(path.join(os.tmpdir(), "jarvis-rollback-verify-")),
+    "rollback.json",
+  );
+  writeFileSync(rollbackFile, JSON.stringify(payload, null, 2));
+  const api = createApiMock(snapshot, {
+    bundleVerifyMismatchForContent: previousInstructions,
+  });
+  const report = await rollbackProviderProfileSwitch({
+    companyId: "company-jarvis",
+    backupFile: rollbackFile,
+    backupGate: makeBackupGate(),
+    api,
+    liveSnapshot: snapshot,
+  });
+  assert.equal(report.ok, false);
+  assert.ok(
+    report.failed.some(
+      (item) => item.slug === "jarvis" && String(item.error).includes("verify mismatch"),
+    ),
+  );
+  assert.equal(JSON.stringify(report).includes(previousInstructions), false);
+});
+
+test("openai apply refuses a missing prior Jarvis instruction file before writes", async () => {
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const api = createApiMock(snapshot, {
+    instructionsBundleState: { "*": { [JARVIS_CODEX_BUNDLE_PATH]: null } },
+  });
+  const report = await applyProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    companyId: "company-jarvis",
+    profileName: "openai-first",
+    confirmProfile: "openai-first",
+    backupGate: makeBackupGate(),
+    stateBackupFile: path.join(
+      mkdtempSync(path.join(os.tmpdir(), "jarvis-state-missing-")),
+      "pre.json",
+    ),
+    api,
+    liveSnapshot: snapshot,
+    runtimeEnv: OPENAI_RUNTIME_ENV,
+  });
+  assert.equal(report.ok, false);
+  assert.equal(api.putCalls.length, 0);
+  assert.equal(api.patchCalls.length, 0);
+  assert.ok(report.failed.some((item) => item.step === "jarvis-instructions-backup"));
+});
+
 test("openai apply bundle PUT failure does not run profile PATCH and triggers rollback attempt", async () => {
   const snapshot = structuredClone(liveAligned);
   setSwitchablePaused(snapshot);
   const api = createApiMock(snapshot, {
     failBundlePut: { status: 500, afterWrite: true },
-    instructionsBundleState: { "*": { [JARVIS_CODEX_BUNDLE_PATH]: null } },
+    instructionsBundleState: { "*": { [JARVIS_CODEX_BUNDLE_PATH]: "previous Jarvis instructions" } },
   });
   const backup = makeBackupGate();
   const stateBackupFile = path.join(mkdtempSync(path.join(os.tmpdir(), "jarvis-state-")), "pre.json");
@@ -954,7 +1276,7 @@ test("openai apply later patch failure restores exact pre-upload jarvis config",
   baselineJarvis.runtimeConfig = structuredClone(baselineJarvis.runtimeConfig ?? {});
   const api = createApiMock(snapshot, {
     failRollbackForSlug: "badacz",
-    instructionsBundleState: { "*": { [JARVIS_CODEX_BUNDLE_PATH]: null } },
+    instructionsBundleState: { "*": { [JARVIS_CODEX_BUNDLE_PATH]: "previous Jarvis instructions" } },
   });
   const backup = makeBackupGate();
   const stateBackupFile = path.join(mkdtempSync(path.join(os.tmpdir(), "jarvis-state-")), "pre.json");
@@ -970,13 +1292,14 @@ test("openai apply later patch failure restores exact pre-upload jarvis config",
     runtimeEnv: OPENAI_RUNTIME_ENV,
   });
   assert.equal(report.ok, false);
-  assert.equal(api.putCalls.length, 1);
+  assert.equal(api.putCalls.length, 2);
   assert.ok(report.failed.some((item) => item.step === "patch" && item.slug === "badacz"));
   const restoredJarvis = api.peekBySlug("jarvis");
   assert.deepEqual(restoredJarvis, baselineJarvis);
+  assert.equal(api.peekBundleBySlug("jarvis"), "previous Jarvis instructions");
 });
 
-test("openai no-plan still uploads and verifies missing bundle", async () => {
+test("openai no-plan still updates and verifies stale bundle", async () => {
   const snapshot = structuredClone(liveAligned);
   setSwitchablePaused(snapshot);
   const openAiPlan = planProviderProfileSwitch({
@@ -987,7 +1310,7 @@ test("openai no-plan still uploads and verifies missing bundle", async () => {
   assert.equal(openAiPlan.ok, true, JSON.stringify(openAiPlan.blockers, null, 2));
   applyPlanToSnapshot(snapshot, openAiPlan);
   const api = createApiMock(snapshot, {
-    instructionsBundleState: { "*": { [JARVIS_CODEX_BUNDLE_PATH]: null } },
+    instructionsBundleState: { "*": { [JARVIS_CODEX_BUNDLE_PATH]: "previous Jarvis instructions" } },
   });
   const backup = makeBackupGate();
   const stateBackupFile = path.join(mkdtempSync(path.join(os.tmpdir(), "jarvis-state-")), "pre.json");
@@ -1086,6 +1409,7 @@ test("explicit rollback restores all backup agents and verifies each", async () 
     companyId: "company-jarvis",
     profileName: "openai-first",
   });
+  backupPayload.agents[0].state.status = "idle";
   const dir = mkdtempSync(path.join(os.tmpdir(), "jarvis-rollback-"));
   const rollbackFile = path.join(dir, "rollback.json");
   writeFileSync(rollbackFile, JSON.stringify(backupPayload, null, 2));
@@ -1100,6 +1424,8 @@ test("explicit rollback restores all backup agents and verifies each", async () 
   });
   assert.equal(report.ok, true, JSON.stringify(report.failed, null, 2));
   assert.equal(report.completed.length, 22);
+  assert.ok(api.patchCalls.every((call) => call.body.status === "paused"));
+  assert.ok(SWITCHABLE.every((slug) => api.peekBySlug(slug).status === "paused"));
 });
 
 test("rollback validates backup companyId against requested company", async () => {

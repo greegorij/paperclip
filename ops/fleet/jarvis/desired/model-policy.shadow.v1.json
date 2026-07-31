@@ -1,0 +1,1279 @@
+{
+  "schemaVersion": 1,
+  "policyId": "jarvis-shadow-model-policy",
+  "version": "2026-07-31.1",
+  "mode": "shadow",
+  "providers": {
+    "openai": {
+      "adapterType": "codex_local",
+      "allowedDataClasses": [
+        "public",
+        "internal",
+        "confidential",
+        "sanitized"
+      ],
+      "availability": "candidate"
+    },
+    "anthropic": {
+      "adapterType": "claude_local",
+      "allowedDataClasses": [
+        "public",
+        "internal",
+        "confidential",
+        "sanitized"
+      ],
+      "availability": "candidate"
+    },
+    "cursor": {
+      "adapterType": "cursor",
+      "allowedDataClasses": [
+        "public",
+        "internal",
+        "confidential",
+        "sanitized"
+      ],
+      "availability": "candidate"
+    }
+  },
+  "modelCatalog": {
+    "gpt-5.6-luna": {
+      "provider": "openai",
+      "adapterType": "codex_local",
+      "allowedDataClasses": [
+        "public",
+        "internal",
+        "confidential",
+        "sanitized"
+      ],
+      "availability": "candidate",
+      "billing": "subscription",
+      "pricing": {
+        "mode": "subscription",
+        "quotaSource": "openai-chatgpt-subscription",
+        "verifiedOn": "2026-07-31"
+      }
+    },
+    "gpt-5.6-terra": {
+      "provider": "openai",
+      "adapterType": "codex_local",
+      "allowedDataClasses": [
+        "public",
+        "internal",
+        "confidential",
+        "sanitized"
+      ],
+      "availability": "candidate",
+      "billing": "subscription",
+      "pricing": {
+        "mode": "subscription",
+        "quotaSource": "openai-chatgpt-subscription",
+        "verifiedOn": "2026-07-31"
+      }
+    },
+    "gpt-5.6-sol": {
+      "provider": "openai",
+      "adapterType": "codex_local",
+      "allowedDataClasses": [
+        "public",
+        "internal",
+        "confidential",
+        "sanitized"
+      ],
+      "availability": "candidate",
+      "billing": "subscription",
+      "pricing": {
+        "mode": "subscription",
+        "quotaSource": "openai-chatgpt-subscription",
+        "verifiedOn": "2026-07-31"
+      }
+    },
+    "claude-haiku-4-5": {
+      "provider": "anthropic",
+      "adapterType": "claude_local",
+      "allowedDataClasses": [
+        "public",
+        "internal",
+        "confidential",
+        "sanitized"
+      ],
+      "availability": "candidate",
+      "billing": "subscription",
+      "pricing": {
+        "mode": "subscription",
+        "quotaSource": "anthropic-claude-subscription",
+        "verifiedOn": "2026-07-31"
+      }
+    },
+    "claude-sonnet-5": {
+      "provider": "anthropic",
+      "adapterType": "claude_local",
+      "allowedDataClasses": [
+        "public",
+        "internal",
+        "confidential",
+        "sanitized"
+      ],
+      "availability": "candidate",
+      "billing": "subscription",
+      "pricing": {
+        "mode": "subscription",
+        "quotaSource": "anthropic-claude-subscription",
+        "verifiedOn": "2026-07-31"
+      }
+    },
+    "claude-opus-5": {
+      "provider": "anthropic",
+      "adapterType": "claude_local",
+      "allowedDataClasses": [
+        "public",
+        "internal",
+        "confidential",
+        "sanitized"
+      ],
+      "availability": "candidate",
+      "billing": "subscription",
+      "pricing": {
+        "mode": "subscription",
+        "quotaSource": "anthropic-claude-subscription",
+        "verifiedOn": "2026-07-31"
+      }
+    },
+    "cursor-auto": {
+      "provider": "cursor",
+      "adapterType": "cursor",
+      "allowedDataClasses": [
+        "public",
+        "internal",
+        "confidential",
+        "sanitized"
+      ],
+      "availability": "candidate",
+      "billing": "subscription",
+      "pricing": {
+        "mode": "subscription",
+        "quotaSource": "cursor-subscription",
+        "verifiedOn": "2026-07-31"
+      }
+    }
+  },
+  "roles": {
+    "analityk-biznesowy": {
+      "primary": {
+        "model": "gpt-5.6-terra",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-sonnet-5"
+        },
+        {
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "high-stakes",
+          "contradictory-sources"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 80000,
+        "maxRunSeconds": 600,
+        "maxDailyTokens": 200000
+      }
+    },
+    "badacz": {
+      "primary": {
+        "model": "gpt-5.6-terra",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-sonnet-5"
+        },
+        {
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "internal",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "contradictory-sources",
+          "high-stakes"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 80000,
+        "maxRunSeconds": 600,
+        "maxDailyTokens": 200000
+      }
+    },
+    "czytacz-transkryptow": {
+      "primary": {
+        "model": "gpt-5.6-luna",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-haiku-4-5"
+        },
+        {
+          "model": "gpt-5.6-terra"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "human-correction",
+          "high-stakes"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 3,
+        "maxTokensPerRun": 40000,
+        "maxRunSeconds": 300,
+        "maxDailyTokens": 120000
+      }
+    },
+    "designer-ui": {
+      "primary": {
+        "model": "gpt-5.6-terra",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-sonnet-5"
+        },
+        {
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "internal",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run",
+        "approval-required"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "high-stakes",
+          "write-operation"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 80000,
+        "maxRunSeconds": 600,
+        "maxDailyTokens": 200000
+      }
+    },
+    "in-ynier-wdro-e": {
+      "primary": {
+        "model": "gpt-5.6-terra",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-sonnet-5"
+        },
+        {
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run",
+        "approval-required"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "write-operation",
+          "tool-failure",
+          "high-stakes"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "independent-review",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 1,
+        "maxTokensPerRun": 80000,
+        "maxRunSeconds": 600,
+        "maxDailyTokens": 160000
+      }
+    },
+    "jarvis": {
+      "primary": {
+        "model": "gpt-5.6-sol",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-opus-5"
+        }
+      ],
+      "effort": "high",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "high-stakes",
+          "contradictory-sources"
+        ],
+        "target": "independent-review"
+      },
+      "validator": "independent-review",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 120000,
+        "maxRunSeconds": 900,
+        "maxDailyTokens": 300000
+      }
+    },
+    "konfigurator-systemu": {
+      "primary": {
+        "model": "gpt-5.6-terra",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-sonnet-5"
+        },
+        {
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "effort": "high",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run",
+        "approval-required"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "write-operation",
+          "high-stakes"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "independent-review",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 1,
+        "maxTokensPerRun": 100000,
+        "maxRunSeconds": 900,
+        "maxDailyTokens": 200000
+      }
+    },
+    "kronikarz": {
+      "primary": {
+        "model": "gpt-5.6-luna",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-haiku-4-5"
+        },
+        {
+          "model": "gpt-5.6-terra"
+        }
+      ],
+      "effort": "low",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run",
+        "approval-required"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "contradictory-sources"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 3,
+        "maxTokensPerRun": 30000,
+        "maxRunSeconds": 240,
+        "maxDailyTokens": 90000
+      }
+    },
+    "krytyk": {
+      "primary": {
+        "model": "gpt-5.6-sol",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-opus-5"
+        }
+      ],
+      "effort": "high",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "high-stakes"
+        ],
+        "target": "independent-review"
+      },
+      "validator": "independent-review",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 120000,
+        "maxRunSeconds": 900,
+        "maxDailyTokens": 300000
+      }
+    },
+    "kurator-crm": {
+      "primary": {
+        "model": "gpt-5.6-luna",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-haiku-4-5"
+        },
+        {
+          "model": "gpt-5.6-terra"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run",
+        "approval-required"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "human-correction",
+          "write-operation"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 3,
+        "maxTokensPerRun": 40000,
+        "maxRunSeconds": 300,
+        "maxDailyTokens": 120000
+      }
+    },
+    "kurator-vaultu": {
+      "primary": {
+        "model": "gpt-5.6-luna",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-haiku-4-5"
+        },
+        {
+          "model": "gpt-5.6-terra"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run",
+        "approval-required"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "contradictory-sources",
+          "write-operation"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 3,
+        "maxTokensPerRun": 40000,
+        "maxRunSeconds": 300,
+        "maxDailyTokens": 120000
+      }
+    },
+    "mi-sie-kodu-codex": {
+      "primary": {
+        "model": "gpt-5.6-sol",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-sonnet-5"
+        }
+      ],
+      "effort": "high",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run",
+        "approval-required"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "tool-failure",
+          "high-stakes",
+          "write-operation"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "independent-review",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 1,
+        "maxTokensPerRun": 120000,
+        "maxRunSeconds": 900,
+        "maxDailyTokens": 240000
+      }
+    },
+    "mi-sie-kodu-cursor": {
+      "primary": {
+        "model": "cursor-auto",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "model": "claude-sonnet-5"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run",
+        "approval-required"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "tool-failure",
+          "high-stakes"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "independent-review",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 100000,
+        "maxRunSeconds": 900,
+        "maxDailyTokens": 200000
+      }
+    },
+    "mi-sie-kodu-glm": {
+      "primary": {
+        "model": "gpt-5.6-terra",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-sonnet-5"
+        },
+        {
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "sanitized",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run",
+        "approval-required",
+        "sanitized-input-only"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "tool-failure",
+          "write-operation"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 40000,
+        "maxRunSeconds": 300,
+        "maxDailyTokens": 100000
+      }
+    },
+    "mi-sie-recenzji-glm": {
+      "primary": {
+        "model": "gpt-5.6-terra",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-opus-5"
+        },
+        {
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "sanitized",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run",
+        "sanitized-input-only"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "high-stakes"
+        ],
+        "target": "independent-review"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 80000,
+        "maxRunSeconds": 600,
+        "maxDailyTokens": 160000
+      }
+    },
+    "mi-sie-vault": {
+      "primary": {
+        "model": "gpt-5.6-luna",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-haiku-4-5"
+        },
+        {
+          "model": "gpt-5.6-terra"
+        }
+      ],
+      "effort": "low",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run",
+        "approval-required"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "write-operation",
+          "human-correction"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 3,
+        "maxTokensPerRun": 30000,
+        "maxRunSeconds": 240,
+        "maxDailyTokens": 90000
+      }
+    },
+    "mi-sie-web": {
+      "primary": {
+        "model": "gpt-5.6-terra",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-sonnet-5"
+        },
+        {
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "sanitized",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run",
+        "sanitized-input-only"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "contradictory-sources",
+          "high-stakes"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 80000,
+        "maxRunSeconds": 600,
+        "maxDailyTokens": 200000
+      }
+    },
+    "modelarz-procesow": {
+      "primary": {
+        "model": "gpt-5.6-terra",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-sonnet-5"
+        },
+        {
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "high-stakes"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 80000,
+        "maxRunSeconds": 600,
+        "maxDailyTokens": 200000
+      }
+    },
+    "obserwator-upstream": {
+      "primary": {
+        "model": "gpt-5.6-luna",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-haiku-4-5"
+        },
+        {
+          "model": "gpt-5.6-terra"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "public",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "high-stakes"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 3,
+        "maxTokensPerRun": 40000,
+        "maxRunSeconds": 300,
+        "maxDailyTokens": 120000
+      }
+    },
+    "recenzent": {
+      "primary": {
+        "model": "gpt-5.6-sol",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-opus-5"
+        }
+      ],
+      "effort": "high",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "high-stakes"
+        ],
+        "target": "independent-review"
+      },
+      "validator": "independent-review",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 120000,
+        "maxRunSeconds": 900,
+        "maxDailyTokens": 300000
+      }
+    },
+    "reflection-coach": {
+      "primary": {
+        "model": "gpt-5.6-terra",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-sonnet-5"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run"
+      ],
+      "escalation": {
+        "max": 0,
+        "when": [
+          "high-stakes"
+        ],
+        "target": "human"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 60000,
+        "maxRunSeconds": 450,
+        "maxDailyTokens": 150000
+      }
+    },
+    "senior-programista": {
+      "primary": {
+        "model": "gpt-5.6-sol",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-sonnet-5"
+        }
+      ],
+      "effort": "high",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run",
+        "approval-required"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "high-stakes",
+          "write-operation"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "independent-review",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 120000,
+        "maxRunSeconds": 900,
+        "maxDailyTokens": 300000
+      }
+    },
+    "specjalista-deck-w": {
+      "primary": {
+        "model": "gpt-5.6-terra",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-opus-5"
+        },
+        {
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "high-stakes"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "independent-review",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 80000,
+        "maxRunSeconds": 600,
+        "maxDailyTokens": 200000
+      }
+    },
+    "specjalista-komunikacji-klienckiej": {
+      "primary": {
+        "model": "gpt-5.6-terra",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-sonnet-5"
+        },
+        {
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "high-stakes",
+          "human-correction"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "independent-review",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 80000,
+        "maxRunSeconds": 600,
+        "maxDailyTokens": 200000
+      }
+    },
+    "specjalista-ofert": {
+      "primary": {
+        "model": "gpt-5.6-terra",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-opus-5"
+        },
+        {
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "effort": "high",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "high-stakes"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "independent-review",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 100000,
+        "maxRunSeconds": 900,
+        "maxDailyTokens": 240000
+      }
+    },
+    "summarizer": {
+      "primary": {
+        "model": "gpt-5.6-luna",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-haiku-4-5"
+        },
+        {
+          "model": "gpt-5.6-terra"
+        }
+      ],
+      "effort": "low",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run",
+        "approval-required"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "high-stakes"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 3,
+        "maxTokensPerRun": 30000,
+        "maxRunSeconds": 240,
+        "maxDailyTokens": 90000
+      }
+    },
+    "szef-komercyjny": {
+      "primary": {
+        "model": "gpt-5.6-terra",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-opus-5"
+        },
+        {
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "effort": "high",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "high-stakes"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "independent-review",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 2,
+        "maxTokensPerRun": 100000,
+        "maxRunSeconds": 900,
+        "maxDailyTokens": 240000
+      }
+    },
+    "zwiadowca-kodu": {
+      "primary": {
+        "model": "gpt-5.6-terra",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-sonnet-5"
+        },
+        {
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "long-context",
+          "high-stakes"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 3,
+        "maxTokensPerRun": 100000,
+        "maxRunSeconds": 600,
+        "maxDailyTokens": 240000
+      }
+    },
+    "zwiadowca-vaultu": {
+      "primary": {
+        "model": "gpt-5.6-luna",
+        "workspaceAccess": "ro"
+      },
+      "fallback": [
+        {
+          "model": "claude-haiku-4-5"
+        },
+        {
+          "model": "gpt-5.6-terra"
+        }
+      ],
+      "effort": "medium",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "contradictory-sources"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "mechanical",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 3,
+        "maxTokensPerRun": 40000,
+        "maxRunSeconds": 300,
+        "maxDailyTokens": 120000
+      }
+    }
+  }
+}
