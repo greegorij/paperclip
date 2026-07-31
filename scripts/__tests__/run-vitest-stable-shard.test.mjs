@@ -9,6 +9,7 @@ import {
   loadShardDurations,
   partitionGeneralServerSuites,
 } from "../general-server-shard.mjs";
+import { failedFileRetries, formatFailedFileRetryLog } from "../run-vitest-stable.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const script = path.join(repoRoot, "scripts", "run-vitest-stable.mjs");
@@ -29,6 +30,20 @@ function dryRunJson(args) {
 }
 
 const SHARD_COUNT = 3;
+
+test("serialized failed files retry once in CI only", () => {
+  // Transient single-file races (issue-update wakeup, PG 40P01) are cheaper
+  // to absorb with one CI re-run of the failed file than with quarantines.
+  // Passing files never re-run; local stays retries:0.
+  assert.equal(failedFileRetries({ CI: "true" }), 1);
+  assert.equal(failedFileRetries({ CI: "1" }), 1);
+  assert.equal(failedFileRetries({}), 0);
+  assert.equal(failedFileRetries({ CI: "" }), 0);
+  assert.equal(
+    formatFailedFileRetryLog("server/src/__tests__/example.test.ts", 2, 2),
+    "[test:run] Retrying failed file server/src/__tests__/example.test.ts (attempt 2/2)",
+  );
+});
 
 test("the general-server shards form a complete, non-overlapping partition", () => {
   const shards = Array.from({ length: SHARD_COUNT }, (_, index) =>

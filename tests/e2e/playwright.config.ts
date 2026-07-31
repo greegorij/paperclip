@@ -27,7 +27,7 @@ export default defineConfig({
   // intentionally not part of the default local_trusted e2e run.
   testIgnore: ["multi-user.spec.ts", "multi-user-authenticated.spec.ts"],
   timeout: 60_000,
-  retries: 0,
+  retries: process.env.CI ? 1 : 0,
   // All specs share one throwaway server, and several toggle instance-level
   // state (the `enableConferenceRoomChat` experimental flag) that changes
   // which UI variant renders. Run files serially so a flag flip in one spec

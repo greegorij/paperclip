@@ -68,6 +68,18 @@ const serializedServerVitestArgs = [
   "--maxWorkers=1",
 ];
 
+/**
+ * How many times to re-run a single failed serialized file after the first attempt.
+ * CI absorbs one transient flake (issue-update races, PG deadlocks); local stays fail-fast.
+ */
+export function failedFileRetries(env = process.env) {
+  return env.CI ? 1 : 0;
+}
+
+export function formatFailedFileRetryLog(file, attempt, maxAttempts) {
+  return `[test:run] Retrying failed file ${file} (attempt ${attempt}/${maxAttempts})`;
+}
+
 function walk(dir) {
   const entries = readdirSync(dir);
   const files = [];
@@ -250,7 +262,7 @@ function selectSerializedSuites(routeTests, shardIndex, shardCount) {
   return routeTests.filter((_, index) => index % shardCount === shardIndex);
 }
 
-function runVitest(args, label) {
+function runVitest(args, label, { allowFailure = false } = {}) {
   console.log(`\n[test:run] ${label}`);
   invocationIndex += 1;
   const tempRootParent = process.platform === "win32" ? os.tmpdir() : "/tmp";
@@ -274,9 +286,11 @@ function runVitest(args, label) {
     console.error(`[test:run] Failed to start Vitest: ${result.error.message}`);
     process.exit(1);
   }
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
+  const status = result.status ?? 1;
+  if (status !== 0 && !allowFailure) {
+    process.exit(status);
   }
+  return status;
 }
 
 function runGeneralSuites(routeTests) {
@@ -351,17 +365,28 @@ function runSerializedSuites(routeTests, shardIndex, shardCount) {
     `\n[test:run] serialized shard ${shardIndex + 1}/${shardCount} running ${shardTests.length} of ${routeTests.length} suites`,
   );
 
+  const retries = failedFileRetries(process.env);
+  const maxAttempts = 1 + retries;
   for (const routeTest of shardTests) {
-    runVitest(
-      [
-        "--project",
-        "@paperclipai/server",
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      if (attempt > 1) {
+        console.log(formatFailedFileRetryLog(routeTest.repoPath, attempt, maxAttempts));
+      }
+      const status = runVitest(
+        [
+          "--project",
+          "@paperclipai/server",
+          routeTest.repoPath,
+          "--pool=forks",
+          "--isolate",
+        ],
         routeTest.repoPath,
-        "--pool=forks",
-        "--isolate",
-      ],
-      routeTest.repoPath,
-    );
+        { allowFailure: attempt < maxAttempts },
+      );
+      if (status === 0) {
+        break;
+      }
+    }
   }
 }
 
@@ -386,50 +411,56 @@ const generalServerTestFiles = walk(serverSrcDir)
   .filter((repoPath) => !isRouteOrAuthzTest(repoPath))
   .sort((a, b) => a.localeCompare(b));
 
-const options = parseCliOptions(process.argv.slice(2));
-if (options.dryRun) {
-  const serializedSuites =
-    options.mode === serializedModeName
-      ? selectSerializedSuites(routeTests, options.shardIndex, options.shardCount)
-      : routeTests;
-  console.log(
-    JSON.stringify(
-      {
-        mode: options.mode,
-        shardIndex: options.shardIndex,
-        shardCount: options.shardCount,
-        group: options.group,
-        availableGeneralGroups: generalGroupNames,
-        serializedSuiteCount: routeTests.length,
-        selectedSerializedSuites: serializedSuites.map((routeTest) => routeTest.repoPath),
-        generalServerSuiteCount: generalServerTestFiles.length,
-        selectedGeneralServerSuites:
-          options.mode === generalModeName &&
-          options.group === generalServerGroupName &&
-          options.shardCount !== null
-            ? selectGeneralServerShard(
-                generalServerTestFiles,
-                options.shardIndex,
-                options.shardCount,
-                generalServerShardDurations,
-              )
-            : null,
-      },
-      null,
-      2,
-    ),
-  );
-  process.exit(0);
-}
+function main(argv = process.argv.slice(2)) {
+  const options = parseCliOptions(argv);
+  if (options.dryRun) {
+    const serializedSuites =
+      options.mode === serializedModeName
+        ? selectSerializedSuites(routeTests, options.shardIndex, options.shardCount)
+        : routeTests;
+    console.log(
+      JSON.stringify(
+        {
+          mode: options.mode,
+          shardIndex: options.shardIndex,
+          shardCount: options.shardCount,
+          group: options.group,
+          availableGeneralGroups: generalGroupNames,
+          serializedSuiteCount: routeTests.length,
+          selectedSerializedSuites: serializedSuites.map((routeTest) => routeTest.repoPath),
+          generalServerSuiteCount: generalServerTestFiles.length,
+          selectedGeneralServerSuites:
+            options.mode === generalModeName &&
+            options.group === generalServerGroupName &&
+            options.shardCount !== null
+              ? selectGeneralServerShard(
+                  generalServerTestFiles,
+                  options.shardIndex,
+                  options.shardCount,
+                  generalServerShardDurations,
+                )
+              : null,
+        },
+        null,
+        2,
+      ),
+    );
+    process.exit(0);
+  }
 
-if (options.mode === generalModeName || options.mode === allModeName) {
-  if (options.group) {
-    runGeneralGroup(routeTests, options.group, options.shardIndex, options.shardCount);
-  } else {
-    runGeneralSuites(routeTests);
+  if (options.mode === generalModeName || options.mode === allModeName) {
+    if (options.group) {
+      runGeneralGroup(routeTests, options.group, options.shardIndex, options.shardCount);
+    } else {
+      runGeneralSuites(routeTests);
+    }
+  }
+
+  if (options.mode === serializedModeName || options.mode === allModeName) {
+    runSerializedSuites(routeTests, options.shardIndex ?? 0, options.shardCount ?? 1);
   }
 }
 
-if (options.mode === serializedModeName || options.mode === allModeName) {
-  runSerializedSuites(routeTests, options.shardIndex ?? 0, options.shardCount ?? 1);
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
 }

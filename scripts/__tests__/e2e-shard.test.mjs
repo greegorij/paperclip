@@ -47,6 +47,20 @@ test("the ignored spec list matches playwright.config.ts testIgnore", () => {
   assert.deepEqual([...configured].sort(), [...IGNORED_SPECS].sort());
 });
 
+test("playwright e2e retries once in CI only and keeps trace on-first-retry", () => {
+  // Flaky signoff-policy checkout races are cheaper to absorb with one CI
+  // retry than with quarantines. Local stays retries:0; trace stays
+  // on-first-retry so the retry path still captures diagnostics.
+  const config = readFileSync(playwrightConfig, "utf8");
+  const retriesMatch = config.match(/retries:\s*(process\.env\.CI\s*\?\s*1\s*:\s*0)/);
+  assert.ok(retriesMatch, "expected retries: process.env.CI ? 1 : 0 in playwright.config.ts");
+  assert.match(config, /trace:\s*"on-first-retry"/, "expected trace: on-first-retry");
+
+  const resolveRetries = new Function("process", `return (${retriesMatch[1]});`);
+  assert.equal(resolveRetries({ env: { CI: "1" } }), 1, "CI must enable exactly one retry");
+  assert.equal(resolveRetries({ env: {} }), 0, "local runs must keep retries at 0");
+});
+
 test("the duration manifest only names specs that still exist", () => {
   const durations = loadShardDurations(durationsManifest);
   assert.ok(Object.keys(durations).length > 0, "expected a populated duration manifest");
@@ -112,16 +126,30 @@ test("pr.yml keeps a stable aggregate check named e2e over the shard matrix", ()
   assert.ok(aggregate, "pr.yml must define an `e2e` job to satisfy branch protection");
   assert.match(aggregate, /^ {4}name: e2e$/m, "the aggregate job must be named exactly `e2e`");
   assert.match(aggregate, /^ {4}if: \$\{\{ always\(\) \}\}$/m, "the aggregate must run even when a shard fails");
-  assert.match(aggregate, /^ {4}needs: \[e2e_shards\]$/m, "the aggregate must depend on the shard matrix");
   assert.match(
     aggregate,
-    /test "\$E2E_SHARDS_RESULT" = "success"/,
-    "the aggregate must fail unless every shard succeeded",
+    /^ {4}needs:\n {6}- policy\n {6}- e2e_shards$/m,
+    "the aggregate must depend on policy and the shard matrix",
+  );
+  assert.match(
+    aggregate,
+    /node \.\/scripts\/classify-pr-ci\.mjs check-e2e/,
+    "the aggregate must accept intentional e2e omission via classify-pr-ci",
+  );
+  assert.match(
+    aggregate,
+    /test "\$POLICY_RESULT" = "success"/,
+    "the aggregate must still require policy success",
   );
 
   const shards = jobs.get("e2e_shards");
   assert.ok(shards, "pr.yml must define the `e2e_shards` matrix job");
   assert.match(shards, /shard_count: 2/, "the shard matrix must match SHARD_COUNT");
+  assert.match(
+    shards,
+    /needs\.policy\.outputs\.run_e2e == '1'/,
+    "shards must stay skipped on docs/selective tracks without e2e",
+  );
 });
 
 test("pr.yml forwards the computed e2e shard specs without a literal -- filter", () => {
