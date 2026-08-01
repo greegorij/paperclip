@@ -65,6 +65,9 @@ const mockHeartbeatService = vi.hoisted(() => ({
 }));
 const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockFetchAllQuotaWindows = vi.hoisted(() => vi.fn());
+const mockProviderAvailabilityService = vi.hoisted(() => ({
+  getSnapshot: vi.fn(),
+}));
 const mockCostService = vi.hoisted(() => ({
   createEvent: vi.fn(),
   summary: vi.fn().mockResolvedValue({ spendCents: 0 }),
@@ -125,6 +128,11 @@ function registerModuleMocks() {
   vi.doMock("../services/quota-windows.js", () => ({
     fetchAllQuotaWindows: mockFetchAllQuotaWindows,
   }));
+  vi.doMock("../services/provider-availability.js", () => ({
+    PROVIDER_AVAILABILITY_BLOCKED_THRESHOLD_PERCENT: 100,
+    PROVIDER_AVAILABILITY_CACHE_TTL_MS: 30_000,
+    getProviderAvailabilityService: () => mockProviderAvailabilityService,
+  }));
 }
 
 async function createApp() {
@@ -168,6 +176,7 @@ beforeEach(() => {
   vi.resetModules();
   vi.doUnmock("../services/index.js");
   vi.doUnmock("../services/quota-windows.js");
+  vi.doUnmock("../services/provider-availability.js");
   vi.doUnmock("../routes/costs.js");
   vi.doUnmock("../middleware/index.js");
   registerModuleMocks();
@@ -184,6 +193,10 @@ beforeEach(() => {
     name: "Paperclip",
     budgetMonthlyCents: 100,
     spentMonthlyCents: 0,
+  });
+  mockCompanyService.getById.mockResolvedValue({
+    id: "company-1",
+    name: "Paperclip",
   });
   mockAgentService.getById.mockResolvedValue({
     id: "agent-1",
@@ -210,6 +223,33 @@ beforeEach(() => {
     identifier: "PC1A2-1",
   });
   mockBudgetService.upsertPolicy.mockResolvedValue(undefined);
+  mockProviderAvailabilityService.getSnapshot.mockResolvedValue({
+    source: "quota_windows",
+    observedAt: "2026-08-01T10:00:00.000Z",
+    expiresAt: "2026-08-01T10:00:30.000Z",
+    providers: [
+      {
+        provider: "openai",
+        laneId: "openai_base",
+        state: "constrained",
+        reason: "OpenAI base quota usage is high.",
+        source: "codex-rpc",
+        observedAt: "2026-08-01T10:00:00.000Z",
+        earliestResetAt: "2026-08-01T12:00:00.000Z",
+        windows: [
+          {
+            label: "5h limit",
+            usedPercent: 90,
+            resetsAt: "2026-08-01T12:00:00.000Z",
+            valueLabel: null,
+            detail: null,
+            requiredByBaseLane: true,
+            namedWindow: false,
+          },
+        ],
+      },
+    ],
+  });
 });
 
 describe("cost routes", () => {
@@ -247,6 +287,65 @@ describe("cost routes", () => {
       estimatedDebitCents: 0,
       eventCount: 0,
     });
+  });
+
+  it("returns provider availability with local budget status for authorized board access", async () => {
+    mockBudgetService.overview.mockResolvedValueOnce({
+      companyId: "company-1",
+      policies: [{ status: "warning" }],
+      activeIncidents: [],
+      pausedAgentCount: 2,
+      pausedProjectCount: 1,
+      pendingApprovalCount: 3,
+    });
+    const app = await createApp();
+    const res = await request(app).get("/api/companies/company-1/costs/provider-availability");
+
+    expect(res.status).toBe(200);
+    expect(mockCompanyService.getById).toHaveBeenCalledWith("company-1");
+    expect(mockProviderAvailabilityService.getSnapshot).toHaveBeenCalledTimes(1);
+    expect(res.body).toMatchObject({
+      companyId: "company-1",
+      observedAt: "2026-08-01T10:00:00.000Z",
+      ttlMs: 30000,
+      localBudgets: {
+        state: "warning",
+        activeIncidentCount: 0,
+        pausedAgentCount: 2,
+        pausedProjectCount: 1,
+        pendingApprovalCount: 3,
+      },
+      lanes: [
+        {
+          provider: "openai",
+          lane: "openai_base",
+          state: "constrained",
+          source: "codex-rpc",
+          nextResetAt: "2026-08-01T12:00:00.000Z",
+          windows: [
+            {
+              label: "5h limit",
+              required: true,
+              matched: true,
+              blocking: false,
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("rejects provider availability requests from non-board actors", async () => {
+    const app = await createAppWithActor({
+      type: "agent",
+      companyId: "company-1",
+      agentId: "agent-1",
+      runId: "run-1",
+    });
+    const res = await request(app).get("/api/companies/company-1/costs/provider-availability");
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "Board access required" });
   });
 
   it("returns issue subtree cost summaries for issue refs", async () => {

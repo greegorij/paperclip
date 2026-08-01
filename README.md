@@ -227,7 +227,7 @@ Paperclip is a full control plane, not a wrapper. Before you build any of this y
 </td>
 <td>
 
-**Heartbeat Execution** — DB-backed wakeup queue with coalescing, budget checks, workspace resolution, secret injection, skill loading, and adapter invocation. Runs produce structured logs, cost events, session state, and audit trails. Recovery handles orphaned runs automatically.
+**Heartbeat Execution** — DB-backed wakeup queue with coalescing, budget checks, provider quota availability gating, workspace resolution, secret injection, skill loading, and adapter invocation. Runs produce structured logs, cost events, session state, and audit trails. Recovery handles orphaned runs automatically; quota gating never auto-raises budgets, switches adapters/models, or flips fleet profiles. Operators can inspect the same projection via read-only `GET /api/companies/:companyId/costs/provider-availability`.
 
 </td>
 </tr>

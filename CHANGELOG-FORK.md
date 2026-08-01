@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+### Dodane / Wzmocnione
+- **Brama dostępności dostawcy przed nowym heartbeatem:** uruchomienie nowego
+  przebiegu sprawdza skonsolidowaną dostępność Anthropic/OpenAI z cache TTL i
+  współdzieleniem pojedynczego odczytu quota windows; klasyfikacja stanów
+  (`available`, `constrained`, `blocked`, `unknown`) rozróżnia bazowy pas od
+  nazwanych okien modelowych OpenAI i blokuje bazę Anthropic przy 100% sesji
+  lub tygodnia.
+- **Semantyka `provider_quota` bez lawiny ponowień:** gdy pas jest `blocked`,
+  bramka nie dopuszcza nowego uruchomienia i utrzymuje sygnał z najwcześniejszym
+  znanym resetem oraz marginesem na odświeżenie danych; `unknown` pozostaje
+  obserwowalne i samo z siebie nie blokuje.
+- **Nowy endpoint obserwacyjny firmy:** `GET /companies/:companyId/costs/provider-availability`
+  zwraca stan pasów dostawców wraz z oknami i skróconym statusem lokalnych
+  budżetów, bez ujawniania poświadczeń ani ścieżek hosta.
+- **Polityka floty (kandydat Cursor):** dodano model `gpt-5.3-codex-high` jako
+  kandydacką alternatywę w roli `mi-sie-kodu-cursor`; Cursor i osobny Mięsień
+  Kodu Codex zachowują niezależne pasy. Ten wycinek nie przełącza automatycznie
+  profili, adapterów ani budżetów.
+
 ### Naprawione / Wzmocnione
 - **Profile dostawców zgodne z polityką modeli:** przełącznik porównuje teraz oba profile z wersjonowaną polityką 29 ról jeszcze przed przygotowaniem zmiany. Wariant OpenAI musi odzwierciedlać model podstawowy, poziom namysłu, dostęp do katalogu roboczego i limit dzienny; wariant Anthropic — pierwszy dozwolony zapas tego dostawcy oraz limit. Rozjazd modelu, limitu lub wersji twardo zatrzymuje operację. Sama polityka nadal nie zmienia floty ani nie omija istniejącej kopii, pauzy i wycofania.
 

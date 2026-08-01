@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ComponentType } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   BudgetPolicySummary,
+  CompanyProviderAvailability,
   CostByAgentModel,
   CostByBiller,
   CostByProviderModel,
@@ -142,6 +143,81 @@ function FinanceSummaryCard({
           subtitle="Estimated debits that are not yet invoice-authoritative"
           icon={Coins}
         />
+      </CardContent>
+    </Card>
+  );
+}
+
+function providerAvailabilityBadgeStatus(state: string) {
+  if (state === "blocked") return "failed";
+  if (state === "constrained" || state === "warning") return "in_progress";
+  if (state === "available" || state === "ok") return "succeeded";
+  return "pending";
+}
+
+function resetLabel(value: string | null) {
+  if (!value) return "No reset time reported";
+  const reset = new Date(value);
+  return Number.isNaN(reset.getTime()) ? "No reset time reported" : reset.toLocaleString();
+}
+
+function ProviderAvailabilityCard({
+  availability,
+  isLoading,
+}: {
+  availability?: CompanyProviderAvailability;
+  isLoading: boolean;
+}) {
+  return (
+    <Card>
+      <CardHeader className="px-5 pt-5 pb-2">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle className="text-base">Execution availability</CardTitle>
+            <CardDescription>
+              Provider subscription windows control admission to new work; local budgets remain independent hard stops.
+            </CardDescription>
+          </div>
+          {availability ? (
+            <StatusBadge
+              status={providerAvailabilityBadgeStatus(availability.localBudgets.state)}
+              label={`Local budget: ${availability.localBudgets.state}`}
+            />
+          ) : null}
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3 px-5 pb-5 pt-2">
+        {isLoading ? (
+          <p className="text-sm text-muted-foreground">Reading provider availability…</p>
+        ) : !availability ? (
+          <p className="text-sm text-muted-foreground">Provider availability is not available yet.</p>
+        ) : (
+          <>
+            <div className="grid gap-3 md:grid-cols-2">
+              {availability.lanes.map((lane) => (
+                <div key={`${lane.provider}:${lane.lane}`} className="border border-border p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium">{providerDisplayName(lane.provider)}</div>
+                      <div className="mt-1 text-xs leading-5 text-muted-foreground">{lane.reason}</div>
+                    </div>
+                    <StatusBadge status={providerAvailabilityBadgeStatus(lane.state)} label={lane.state} />
+                  </div>
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    {lane.state === "blocked"
+                      ? `New work waits until ${resetLabel(lane.nextResetAt)}.`
+                      : lane.state === "unknown"
+                        ? "Telemetry is incomplete; no automatic provider switch is made."
+                        : `Next reset: ${resetLabel(lane.nextResetAt)}.`}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs leading-5 text-muted-foreground">
+              {availability.localBudgets.activeIncidentCount} active budget incident{availability.localBudgets.activeIncidentCount === 1 ? "" : "s"} · {availability.localBudgets.pendingApprovalCount} pending approval{availability.localBudgets.pendingApprovalCount === 1 ? "" : "s"}
+            </p>
+          </>
+        )}
       </CardContent>
     </Card>
   );
@@ -338,6 +414,14 @@ export function Costs() {
     enabled: !!selectedCompanyId && mainTab === "providers",
     refetchInterval: 300_000,
     staleTime: 60_000,
+  });
+
+  const { data: providerAvailability, isLoading: providerAvailabilityLoading } = useQuery({
+    queryKey: queryKeys.providerAvailability(companyId),
+    queryFn: () => costsApi.providerAvailability(companyId),
+    enabled: !!selectedCompanyId && mainTab === "providers",
+    refetchInterval: 30_000,
+    staleTime: 10_000,
   });
 
   const byProvider = useMemo(() => {
@@ -957,6 +1041,10 @@ export function Costs() {
           <FleetModelPolicyCard
             companyId={selectedCompanyId}
             isProviderTabActive={mainTab === "providers"}
+          />
+          <ProviderAvailabilityCard
+            availability={providerAvailability}
+            isLoading={providerAvailabilityLoading}
           />
           {showCustomPrompt ? (
             <p className="text-sm text-muted-foreground">Select a start and end date to load data.</p>

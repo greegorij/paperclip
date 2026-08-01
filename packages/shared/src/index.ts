@@ -1270,6 +1270,12 @@ export type {
   FieldDef,
   QuotaWindow,
   ProviderQuotaResult,
+  ProviderAvailabilityState,
+  ProviderAvailabilityWindow,
+  ProviderAvailabilityLaneStatus,
+  ProviderAvailabilitySnapshot,
+  LocalBudgetAvailabilityStatus,
+  CompanyProviderAvailability,
 } from "./types/index.js";
 export {
   COMPANY_SEARCH_EXTRACT_KINDS,

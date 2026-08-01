@@ -521,3 +521,18 @@ test("shadow model policy file validates for all 29 expected roles", () => {
   assert.equal(result.ok, true, result.errors.join("\n"));
   assert.deepEqual(result.errors, []);
 });
+
+test("shadow policy keeps Cursor default executor with a coding-model candidate fallback", () => {
+  const policy = JSON.parse(readFileSync(SHADOW_POLICY_PATH, "utf8"));
+  const role = policy.roles["mi-sie-kodu-cursor"];
+  assert.ok(role, "mi-sie-kodu-cursor role must exist");
+  assert.equal(role.primary.model, "cursor-auto");
+
+  const candidate = policy.modelCatalog["gpt-5.3-codex-high"];
+  assert.ok(candidate, "gpt-5.3-codex-high model must exist");
+  assert.equal(candidate.provider, "cursor");
+  assert.equal(candidate.adapterType, "cursor");
+
+  const fallbackModels = role.fallback.map((entry) => entry.model);
+  assert.deepEqual(fallbackModels, ["gpt-5.3-codex-high", "gpt-5.6-sol"]);
+});

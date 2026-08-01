@@ -26,3 +26,44 @@ export interface ProviderQuotaResult {
   error?: string;
   windows: QuotaWindow[];
 }
+
+export type ProviderAvailabilityState = "available" | "constrained" | "blocked" | "unknown";
+
+export interface ProviderAvailabilityWindow extends QuotaWindow {
+  required: boolean;
+  matched: boolean;
+  blocking: boolean;
+}
+
+export interface ProviderAvailabilityLaneStatus {
+  provider: string;
+  lane: string;
+  source: string | null;
+  observedAt: string;
+  state: ProviderAvailabilityState;
+  reason: string;
+  nextResetAt: string | null;
+  windows: ProviderAvailabilityWindow[];
+}
+
+export interface ProviderAvailabilitySnapshot {
+  observedAt: string;
+  ttlMs: number;
+  lanes: ProviderAvailabilityLaneStatus[];
+}
+
+export interface LocalBudgetAvailabilityStatus {
+  state: "ok" | "warning" | "blocked" | "unknown";
+  activeIncidentCount: number;
+  pausedAgentCount: number;
+  pausedProjectCount: number;
+  pendingApprovalCount: number;
+}
+
+export interface CompanyProviderAvailability {
+  companyId: string;
+  observedAt: string;
+  ttlMs: number;
+  lanes: ProviderAvailabilityLaneStatus[];
+  localBudgets: LocalBudgetAvailabilityStatus;
+}

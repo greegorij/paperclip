@@ -499,6 +499,8 @@ V1 non-terminal liveness rule:
 - when Paperclip cannot safely infer the next action, it surfaces the problem through visible blocked/recovery work instead of silently completing or reassigning work
 - explicit recovery actions are the liveness primitive; source-scoped actions are the default form, issue-backed recovery is a fallback for independent repair work or safety boundaries, and comments alone are evidence rather than a healthy liveness path
 - source-scoped recovery routing is cause-keyed: lost processes, missing successful-run dispositions, and output-inactivity terminations retry the original agent when invokable; provider-quota failures create/reuse a scheduled wait-recovery monitor without a takeover wake; workspace validation and unknown causes route to the manager ladder
+- provider availability for new heartbeats is evaluated from cached quota-window telemetry (`available | constrained | blocked | unknown`); `blocked` preserves `provider_quota` semantics with the earliest known reset, while `unknown` remains observable and does not block by itself
+- provider availability gating is enforcement-only for run admission and never auto-raises budgets, auto-switches adapter/model, or auto-switches fleet profiles
 - recovery-scoped wakes replace the normal deliverable execution contract with a cause-specific recovery contract, and successful repair returns the issue to the recorded original owner by default while recording `handed_back` versus `owner_completed`
 
 Detailed ownership, execution, blocker, active-run watchdog, crash-recovery, and non-terminal liveness semantics are documented in `doc/execution-semantics.md`.
@@ -916,8 +918,17 @@ Allowed states are `joined` and `left`. Endpoints require a concrete board user 
 - `GET /companies/:companyId/costs/summary`
 - `GET /companies/:companyId/costs/by-agent`
 - `GET /companies/:companyId/costs/by-project`
+- `GET /companies/:companyId/costs/quota-windows`
+- `GET /companies/:companyId/costs/provider-availability`
+- `GET /companies/:companyId/budgets/overview`
 - `PATCH /companies/:companyId/budgets`
 - `PATCH /agents/:agentId/budgets`
+
+`/costs/provider-availability` is a read-only operator surface. It reports
+provider lane state (`available | constrained | blocked | unknown`), source,
+read timestamp, and projected windows together with a coarse local budget
+status. It does not mutate budgets, agent adapter/model configuration, or
+fleet profile state.
 
 ## 10.9 Activity and Dashboard
 
@@ -1037,6 +1048,10 @@ Scheduler must skip invocation when:
 - agent is paused/terminated
 - an existing run is active
 - hard budget limit has been hit
+- required base provider quota lane is `blocked`
+
+Provider telemetry state `unknown` must remain observable but must not block
+new work by itself.
 
 ## 12. Governance and Approval Flows
 

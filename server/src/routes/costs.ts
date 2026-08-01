@@ -1,6 +1,8 @@
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import {
+  type CompanyProviderAvailability,
+  type LocalBudgetAvailabilityStatus,
   createCostEventSchema,
   createFinanceEventSchema,
   normalizeIssueIdentifier,
@@ -22,6 +24,10 @@ import {
 } from "../services/index.js";
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
 import { fetchAllQuotaWindows } from "../services/quota-windows.js";
+import {
+  PROVIDER_AVAILABILITY_BLOCKED_THRESHOLD_PERCENT,
+  getProviderAvailabilityService,
+} from "../services/provider-availability.js";
 import { badRequest } from "../errors.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 
@@ -63,6 +69,7 @@ export function costRoutes(
   const agents = agentService(db);
   const issues = issueService(db);
   const access = accessService(db);
+  const providerAvailability = getProviderAvailabilityService();
 
   async function resolveIssueByRef(rawId: string) {
     const identifier = normalizeIssueIdentifier(rawId);
@@ -283,6 +290,72 @@ export function costRoutes(
     }
     const results = await fetchAllQuotaWindows();
     res.json(results);
+  });
+
+  router.get("/companies/:companyId/costs/provider-availability", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    assertBoard(req);
+    const company = await companies.getById(companyId);
+    if (!company) {
+      res.status(404).json({ error: "Company not found" });
+      return;
+    }
+
+    // This is deliberately an observation surface. Local budget hard-stops
+    // remain independent enforcement policies and are not recalculated from
+    // a provider's subscription percentage.
+    const [availabilitySnapshot, budgetOverview] = await Promise.all([
+      providerAvailability.getSnapshot(),
+      budgets.overview(companyId),
+    ]);
+    const observedAtMs = Date.parse(availabilitySnapshot.observedAt);
+    const expiresAtMs = Date.parse(availabilitySnapshot.expiresAt);
+    const ttlMs = Number.isFinite(observedAtMs) && Number.isFinite(expiresAtMs) && expiresAtMs >= observedAtMs
+      ? expiresAtMs - observedAtMs
+      : 0;
+    const hasHardStopPolicy = budgetOverview.activeIncidents.length > 0;
+    const hasWarningPolicy = budgetOverview.policies.some((policy) => policy.status === "warning");
+    const localBudgetState: LocalBudgetAvailabilityStatus["state"] =
+      hasHardStopPolicy || budgetOverview.activeIncidents.length > 0
+        ? "blocked"
+        : hasWarningPolicy
+          ? "warning"
+          : "ok";
+    const response: CompanyProviderAvailability = {
+      companyId,
+      observedAt: availabilitySnapshot.observedAt,
+      ttlMs,
+      lanes: availabilitySnapshot.providers.map((provider) => ({
+        provider: provider.provider,
+        lane: provider.laneId ?? "unassigned",
+        source: provider.source,
+        observedAt: provider.observedAt,
+        state: provider.state,
+        reason: provider.reason,
+        nextResetAt: provider.earliestResetAt,
+        windows: provider.windows.map((window) => ({
+          label: window.label,
+          usedPercent: window.usedPercent,
+          resetsAt: window.resetsAt,
+          valueLabel: window.valueLabel,
+          detail: window.detail ?? null,
+          required: window.requiredByBaseLane,
+          matched: window.requiredByBaseLane,
+          blocking: window.requiredByBaseLane &&
+            typeof window.usedPercent === "number" &&
+            window.usedPercent >= PROVIDER_AVAILABILITY_BLOCKED_THRESHOLD_PERCENT,
+        })),
+      })),
+      localBudgets: {
+        state: localBudgetState,
+        activeIncidentCount: budgetOverview.activeIncidents.length,
+        pausedAgentCount: budgetOverview.pausedAgentCount,
+        pausedProjectCount: budgetOverview.pausedProjectCount,
+        pendingApprovalCount: budgetOverview.pendingApprovalCount,
+      },
+    };
+    res.json(response);
   });
 
   router.get("/companies/:companyId/budgets/overview", async (req, res) => {

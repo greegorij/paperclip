@@ -100,6 +100,15 @@ describe("fleet model policy routes", () => {
     expect(sampleRole).not.toHaveProperty("adapterType");
     expect(JSON.stringify(sampleRole)).not.toMatch(/pricing|quotaSource|apiKey|credentials/i);
 
+    const cursorCodeRole = (res.body.roles as Record<string, {
+      primary: { model: string };
+      fallback: Array<{ model: string }>;
+    }>)["mi-sie-kodu-cursor"];
+    expect(cursorCodeRole.primary.model).toBe("cursor-auto");
+    expect(cursorCodeRole.fallback.map((entry) => entry.model)).toEqual(
+      expect.arrayContaining(["gpt-5.3-codex-high", "gpt-5.6-sol"]),
+    );
+
     const sampleProfile = Object.values(res.body.profiles)[0] as {
       version: string;
       agents: Array<Record<string, unknown>>;

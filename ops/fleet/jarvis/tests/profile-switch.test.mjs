@@ -429,14 +429,14 @@ test("profiles schema rejects wrong Anthropic fallback drift against model-polic
 test("profiles schema rejects profile version that does not equal model-policy version", () => {
   const desired = loadDesired(DESIRED_DIR);
   const profilesDoc = structuredClone(desired.profiles);
-  assert.equal(profilesDoc.profiles["openai-first"].version, "2026-07-31.1");
+  assert.equal(profilesDoc.profiles["openai-first"].version, "2026-08-01.1");
   profilesDoc.profiles["openai-first"].version = "2026-07-30.1";
   const result = validateProviderProfilesDocument({ desired, profilesDoc });
   assert.equal(result.ok, false);
   assert.ok(
     result.errors.some(
       (item) => item.includes("openai-first")
-        && item.includes("version must equal model-policy version 2026-07-31.1"),
+        && item.includes("version must equal model-policy version 2026-08-01.1"),
     ),
     JSON.stringify(result.errors, null, 2),
   );

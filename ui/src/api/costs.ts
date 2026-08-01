@@ -10,6 +10,7 @@ import type {
   FinanceByBiller,
   FinanceByKind,
   FinanceEvent,
+  CompanyProviderAvailability,
   ProviderQuotaResult,
 } from "@paperclipai/shared";
 import { api } from "./client";
@@ -47,6 +48,8 @@ export const costsApi = {
     api.get<CostWindowSpendRow[]>(`/companies/${companyId}/costs/window-spend`),
   quotaWindows: (companyId: string) =>
     api.get<ProviderQuotaResult[]>(`/companies/${companyId}/costs/quota-windows`),
+  providerAvailability: (companyId: string) =>
+    api.get<CompanyProviderAvailability>(`/companies/${companyId}/costs/provider-availability`),
 };
 
 function dateParamsWithLimit(from?: string, to?: string, limit?: number): string {

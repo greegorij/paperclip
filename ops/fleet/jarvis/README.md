@@ -167,6 +167,10 @@ per-run limits. `lib/model-policy.mjs` validates the complete role set and
 fails closed on contradictions such as a restricted-data provider without
 sanitization or a high-responsibility role without independent review.
 
+For `mi-sie-kodu-cursor`, the policy keeps `cursor-auto` as the primary lane
+and declares `gpt-5.3-codex-high` as an explicit Cursor-provider candidate
+fallback before the separate Codex backup lane.
+
 The policy remains a shadow specification: it cannot wake agents, change an
 adapter, or bypass the existing backup and paused-agent gates. `profile-switch`
 does consume it as a **read-only consistency gate** for the 22 switchable

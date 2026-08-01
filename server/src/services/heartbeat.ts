@@ -90,6 +90,11 @@ import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import { companySkillService } from "./company-skills.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
+import {
+  PROVIDER_AVAILABILITY_BLOCKED_THRESHOLD_PERCENT,
+  getProviderAvailabilityService,
+  type ProviderAvailabilityService,
+} from "./provider-availability.js";
 import { secretService, type MissingRuntimeBinding } from "./secrets.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import {
@@ -5513,6 +5518,7 @@ export interface HeartbeatServiceOptions {
   pluginWorkerManager?: PluginWorkerManager;
   environmentRuntime?: HeartbeatEnvironmentRuntime;
   runtimeEnv?: Record<string, string | undefined>;
+  providerAvailability?: ProviderAvailabilityService;
 }
 
 function isTruthyRuntimeEnvValue(value: string | undefined) {
@@ -5612,7 +5618,41 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     cancelWorkForScope: cancelBudgetScopeWork,
   };
   const budgets = budgetService(db, budgetHooks);
+  const providerAvailability = options.providerAvailability ?? getProviderAvailabilityService();
   const recovery = recoveryService(db, { enqueueWakeup });
+
+  async function getProviderQuotaBlockForAgent(agent: typeof agents.$inferSelect) {
+    const availability = await providerAvailability.evaluateAdapterAvailability(agent.adapterType);
+    if (availability.state !== "blocked") return null;
+    const snapshot = await providerAvailability.getSnapshot();
+    const lane = snapshot.providers.find(
+      (entry) =>
+        entry.provider === availability.provider &&
+        entry.laneId === availability.laneId,
+    );
+    const blockingWindows = (lane?.windows ?? [])
+      .filter(
+        (window) =>
+          window.requiredByBaseLane &&
+          typeof window.usedPercent === "number" &&
+          window.usedPercent >= PROVIDER_AVAILABILITY_BLOCKED_THRESHOLD_PERCENT,
+      )
+      .map((window) => window.label);
+    const reportedReset = readNonEmptyString(availability.earliestResetAt);
+    const parsedResetMs = reportedReset ? Date.parse(reportedReset) : Number.NaN;
+    // A provider can expose a stale "blocked" window for a short period after
+    // the advertised reset. Leave a small margin so a single scheduled retry
+    // does not immediately consume another bounded retry slot on stale data.
+    const retryNotBefore = Number.isFinite(parsedResetMs)
+      ? new Date(parsedResetMs + PROVIDER_QUOTA_RESET_MARGIN_MS).toISOString()
+      : reportedReset;
+    return {
+      provider: availability.provider,
+      reason: `New work is waiting because the ${availability.provider} subscription quota is exhausted.`,
+      retryNotBefore,
+      blockingWindows,
+    };
+  }
 
   function isPlanApprovalConfirmationPayload(payload: unknown) {
     const target = parseObject(parseObject(payload).target);
@@ -9660,22 +9700,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (fromMessage && fromMessage.getTime() > input.now.getTime()) return fromMessage;
 
     try {
-      const adapter = getServerAdapter(input.agent.adapterType);
-      if (adapter.getQuotaWindows) {
-        const quota = await adapter.getQuotaWindows();
-        if (quota.ok) {
-          const resets = quota.windows
-            .map((window) => {
-              if (!window.resetsAt) return null;
-              const parsed = new Date(window.resetsAt);
-              return Number.isNaN(parsed.getTime()) ? null : parsed;
-            })
-            .filter((value): value is Date => value != null && value.getTime() > input.now.getTime())
-            .sort((a, b) => a.getTime() - b.getTime());
-          if (resets[0]) {
-            return new Date(resets[0].getTime() + PROVIDER_QUOTA_RESET_MARGIN_MS);
-          }
-        }
+      const nextReset = await providerAvailability.getEarliestResetForAdapter(input.agent.adapterType);
+      if (nextReset && nextReset.getTime() > input.now.getTime()) {
+        return new Date(nextReset.getTime() + PROVIDER_QUOTA_RESET_MARGIN_MS);
       }
     } catch (err) {
       logger.warn(
@@ -10743,6 +10770,64 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return cancelled;
   }
 
+  async function cancelQueuedRunForProviderQuota(
+    run: typeof heartbeatRuns.$inferSelect,
+    agent: typeof agents.$inferSelect,
+    providerQuotaBlock: NonNullable<Awaited<ReturnType<typeof getProviderQuotaBlockForAgent>>>,
+  ) {
+    const now = new Date();
+    const retryNotBefore = readNonEmptyString(providerQuotaBlock.retryNotBefore);
+    const reason = providerQuotaBlock.reason;
+    const cancelled = await setRunStatus(run.id, "cancelled", {
+      finishedAt: now,
+      error: reason,
+      errorCode: "provider_quota",
+      resultJson: {
+        ...parseObject(run.resultJson),
+        errorFamily: "provider_quota",
+        stopReason: "provider_quota_gate",
+        provider: providerQuotaBlock.provider,
+        providerQuotaBlockingWindows: providerQuotaBlock.blockingWindows,
+        ...(retryNotBefore
+          ? {
+            retryNotBefore,
+            transientRetryNotBefore: retryNotBefore,
+            providerQuotaRetryNotBefore: retryNotBefore,
+          }
+          : {}),
+        effectiveTimeoutSec: 0,
+        timeoutConfigured: false,
+        timeoutSource: "provider_quota_gate",
+        timeoutFired: false,
+      },
+    });
+    if (!cancelled) return null;
+
+    await setWakeupStatus(run.wakeupRequestId, "skipped", {
+      finishedAt: now,
+      error: reason,
+    });
+
+    await appendRunEvent(cancelled, await nextRunEventSeq(cancelled.id), {
+      eventType: "lifecycle",
+      stream: "system",
+      level: "warn",
+      message: reason,
+      payload: {
+        provider: providerQuotaBlock.provider,
+        retryNotBefore: providerQuotaBlock.retryNotBefore,
+        blockingWindows: providerQuotaBlock.blockingWindows,
+      },
+    });
+
+    const scheduled = await scheduleBoundedRetryForRun(cancelled, agent, { now });
+    if (scheduled.outcome !== "scheduled") {
+      await releaseIssueExecutionAndPromote(cancelled, { suppressImmediateRecovery: true });
+    }
+
+    return cancelled;
+  }
+
   async function hasActionableTimerWork(agent: typeof agents.$inferSelect) {
     const row = await db
       .select({ id: issues.id })
@@ -10846,6 +10931,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
     if (budgetBlock) {
       await cancelRunInternal(run.id, budgetBlock.reason);
+      return null;
+    }
+
+    const providerQuotaBlock = await getProviderQuotaBlockForAgent(agent);
+    if (providerQuotaBlock) {
+      await cancelQueuedRunForProviderQuota(run, agent, providerQuotaBlock);
       return null;
     }
 

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyId": "jarvis-shadow-model-policy",
-  "version": "2026-07-31.1",
+  "version": "2026-08-01.1",
   "mode": "shadow",
   "providers": {
     "openai": {
@@ -153,6 +153,23 @@
         "mode": "subscription",
         "quotaSource": "cursor-subscription",
         "verifiedOn": "2026-07-31"
+      }
+    },
+    "gpt-5.3-codex-high": {
+      "provider": "cursor",
+      "adapterType": "cursor",
+      "allowedDataClasses": [
+        "public",
+        "internal",
+        "confidential",
+        "sanitized"
+      ],
+      "availability": "candidate",
+      "billing": "subscription",
+      "pricing": {
+        "mode": "subscription",
+        "quotaSource": "cursor-subscription",
+        "verifiedOn": "2026-08-01"
       }
     }
   },
@@ -630,10 +647,10 @@
       },
       "fallback": [
         {
-          "model": "gpt-5.6-sol"
+          "model": "gpt-5.3-codex-high"
         },
         {
-          "model": "claude-sonnet-5"
+          "model": "gpt-5.6-sol"
         }
       ],
       "effort": "medium",
