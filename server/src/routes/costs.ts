@@ -314,10 +314,12 @@ export function costRoutes(
     const ttlMs = Number.isFinite(observedAtMs) && Number.isFinite(expiresAtMs) && expiresAtMs >= observedAtMs
       ? expiresAtMs - observedAtMs
       : 0;
-    const hasHardStopPolicy = budgetOverview.activeIncidents.length > 0;
+    const hasHardStopPolicy = budgetOverview.policies.some(
+      (policy) => policy.status === "hard_stop" && policy.hardStopEnabled,
+    ) || budgetOverview.activeIncidents.some((incident) => incident.thresholdType === "hard");
     const hasWarningPolicy = budgetOverview.policies.some((policy) => policy.status === "warning");
     const localBudgetState: LocalBudgetAvailabilityStatus["state"] =
-      hasHardStopPolicy || budgetOverview.activeIncidents.length > 0
+      hasHardStopPolicy
         ? "blocked"
         : hasWarningPolicy
           ? "warning"

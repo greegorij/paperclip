@@ -724,6 +724,48 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
     expect(overviewAfterResume.activeIncidents).toHaveLength(0);
   });
 
+  it("does not surface open incidents from an expired budget window as active", async () => {
+    const { companyId, agentId } = await createBudgetFixture();
+    const service = budgetService(db);
+    const now = new Date();
+    const previousMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+    const currentMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const [policy] = await db
+      .insert(budgetPolicies)
+      .values({
+        companyId,
+        scopeType: "agent",
+        scopeId: agentId,
+        metric: "total_tokens",
+        windowKind: "calendar_month_utc",
+        amount: 100,
+        warnPercent: 80,
+        hardStopEnabled: true,
+        notifyEnabled: true,
+        isActive: true,
+      })
+      .returning();
+    await db.insert(budgetIncidents).values({
+      companyId,
+      policyId: policy!.id,
+      scopeType: "agent",
+      scopeId: agentId,
+      metric: "total_tokens",
+      windowKind: "calendar_month_utc",
+      windowStart: previousMonthStart,
+      windowEnd: currentMonthStart,
+      thresholdType: "hard",
+      amountLimit: 100,
+      amountObserved: 125,
+      status: "open",
+    });
+
+    const overview = await service.overview(companyId);
+
+    expect(overview.activeIncidents).toEqual([]);
+    expect(overview.pendingApprovalCount).toBe(0);
+  });
+
   it("enforces total_tokens hard-stop for agent and company scopes and ignores cached_input_tokens", async () => {
     const { companyId, agentId } = await createBudgetFixture();
     const cancelWorkForScope = vi.fn().mockResolvedValue(undefined);

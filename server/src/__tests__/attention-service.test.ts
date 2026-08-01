@@ -464,6 +464,9 @@ describeEmbeddedPostgres("attention service", () => {
     const softPolicy85Id = randomUUID();
     const softPolicy84Id = randomUUID();
     const hardPolicyId = randomUUID();
+    const now = new Date();
+    const currentMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const nextMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
     await db.insert(budgetPolicies).values([
       {
         id: softPolicy85Id,
@@ -501,8 +504,8 @@ describeEmbeddedPostgres("attention service", () => {
         scopeId: companyId,
         metric: "billed_cents",
         windowKind: "calendar_month_utc",
-        windowStart: new Date("2026-07-01T00:00:00.000Z"),
-        windowEnd: new Date("2026-08-01T00:00:00.000Z"),
+        windowStart: currentMonthStart,
+        windowEnd: nextMonthStart,
         thresholdType: "soft",
         amountLimit: 100,
         amountObserved: 85,
@@ -533,8 +536,8 @@ describeEmbeddedPostgres("attention service", () => {
         scopeId: workerId,
         metric: "billed_cents",
         windowKind: "calendar_month_utc",
-        windowStart: new Date("2026-07-01T00:00:00.000Z"),
-        windowEnd: new Date("2026-08-01T00:00:00.000Z"),
+        windowStart: currentMonthStart,
+        windowEnd: nextMonthStart,
         thresholdType: "hard",
         amountLimit: 100,
         amountObserved: 100,

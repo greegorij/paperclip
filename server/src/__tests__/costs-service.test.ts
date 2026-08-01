@@ -293,7 +293,7 @@ describe("cost routes", () => {
     mockBudgetService.overview.mockResolvedValueOnce({
       companyId: "company-1",
       policies: [{ status: "warning" }],
-      activeIncidents: [],
+      activeIncidents: [{ thresholdType: "soft" }],
       pausedAgentCount: 2,
       pausedProjectCount: 1,
       pendingApprovalCount: 3,
@@ -310,7 +310,7 @@ describe("cost routes", () => {
       ttlMs: 30000,
       localBudgets: {
         state: "warning",
-        activeIncidentCount: 0,
+        activeIncidentCount: 1,
         pausedAgentCount: 2,
         pausedProjectCount: 1,
         pendingApprovalCount: 3,
@@ -332,6 +332,26 @@ describe("cost routes", () => {
           ],
         },
       ],
+    });
+  });
+
+  it("marks local budgets blocked only for a current hard stop", async () => {
+    mockBudgetService.overview.mockResolvedValueOnce({
+      companyId: "company-1",
+      policies: [{ status: "ok", hardStopEnabled: true }],
+      activeIncidents: [{ thresholdType: "hard" }],
+      pausedAgentCount: 0,
+      pausedProjectCount: 0,
+      pendingApprovalCount: 1,
+    });
+    const app = await createApp();
+    const res = await request(app).get("/api/companies/company-1/costs/provider-availability");
+
+    expect(res.status).toBe(200);
+    expect(res.body.localBudgets).toMatchObject({
+      state: "blocked",
+      activeIncidentCount: 1,
+      pendingApprovalCount: 1,
     });
   });
 

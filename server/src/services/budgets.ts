@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, lt, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, lt, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -693,10 +693,18 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
     overview: async (companyId: string): Promise<BudgetOverview> => {
       const rows = await listPolicyRows(companyId);
       const policies = await Promise.all(rows.map((row) => buildPolicySummary(row)));
+      // Incidents are tied to a fixed budget window.  An unresolved record from
+      // a previous month is useful history, but it must not appear as active
+      // work or turn the current budget surface into a false hard stop.
+      const now = new Date();
       const activeIncidentRows = await db
         .select()
         .from(budgetIncidents)
-        .where(and(eq(budgetIncidents.companyId, companyId), eq(budgetIncidents.status, "open")))
+        .where(and(
+          eq(budgetIncidents.companyId, companyId),
+          eq(budgetIncidents.status, "open"),
+          gt(budgetIncidents.windowEnd, now),
+        ))
         .orderBy(desc(budgetIncidents.createdAt));
       const activeIncidents = await hydrateIncidentRows(activeIncidentRows);
       return {
