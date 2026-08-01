@@ -1,4 +1,25 @@
 export {
+  decisionEffectStalenessSchema,
+  decisionOptionStyleSchema,
+  commentOnIssueDecisionEffectSchema,
+  createIssueDecisionEffectSchema,
+  updateIssueStatusDecisionEffectSchema,
+  assignIssueDecisionEffectSchema,
+  cancelIssueTreeDecisionEffectSchema,
+  resolveBlockerDecisionEffectSchema,
+  decisionEffectSchema,
+  decisionInputSchema,
+  decisionOptionSchema,
+  decisionOptionsSchema,
+  decisionInputsSchema,
+  decisionSpecSchema,
+  type DecisionEffectInput,
+  type DecisionOptionInput,
+  type DecisionInputInput,
+  type DecisionSpecInput,
+} from "./decision.js";
+
+export {
   instanceSettingsSchema,
   instanceGeneralSettingsSchema,
   patchInstanceGeneralSettingsSchema,
@@ -93,7 +114,9 @@ export {
 } from "./sidebar-preferences.js";
 export {
   resourceMembershipStateSchema,
+  updateDocumentResourceMembershipSchema,
   updateResourceMembershipSchema,
+  type UpdateDocumentResourceMembership,
   type UpdateResourceMembership,
 } from "./resource-memberships.js";
 export {
@@ -154,6 +177,8 @@ export {
   companySkillForkReassignmentSchema,
   companySkillForkResultSchema,
   companySkillForkPrecheckResultSchema,
+  companySkillRenameSchema,
+  companySkillRenameResultSchema,
   companySkillUpdateSchema,
   companySkillUpdateStatusSchema,
   companySkillAuditFindingSchema,
@@ -205,6 +230,7 @@ export {
   type CompanySkillCommentCreate,
   type CompanySkillCommentUpdate,
   type CompanySkillFork,
+  type CompanySkillRename,
   type CatalogSkillListQuery,
   type CompanySkillInstallCatalog,
   type CompanySkillInstallUpdate,
@@ -419,6 +445,7 @@ export {
   acceptIssueThreadInteractionSchema,
   rejectIssueThreadInteractionSchema,
   cancelIssueThreadInteractionSchema,
+  withdrawIssueThreadInteractionSchema,
   respondIssueThreadInteractionSchema,
   submitIssueThreadInteractionVerdictsSchema,
   linkIssueApprovalSchema,
@@ -442,6 +469,7 @@ export {
   type AcceptIssueThreadInteraction,
   type RejectIssueThreadInteraction,
   type CancelIssueThreadInteraction,
+  type WithdrawIssueThreadInteraction,
   type RespondIssueThreadInteraction,
   type SubmitIssueThreadInteractionVerdicts,
   type LinkIssueApproval,

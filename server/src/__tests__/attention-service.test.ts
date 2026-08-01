@@ -491,7 +491,7 @@ describeEmbeddedPostgres("attention service", () => {
         companyId,
         scopeType: "agent",
         scopeId: workerId,
-        metric: "billed_cents",
+        metric: "total_tokens",
         windowKind: "calendar_month_utc",
         amount: 100,
       },
@@ -534,7 +534,7 @@ describeEmbeddedPostgres("attention service", () => {
         policyId: hardPolicyId,
         scopeType: "agent",
         scopeId: workerId,
-        metric: "billed_cents",
+        metric: "total_tokens",
         windowKind: "calendar_month_utc",
         windowStart: currentMonthStart,
         windowEnd: nextMonthStart,
@@ -610,6 +610,9 @@ describeEmbeddedPostgres("attention service", () => {
     expect(feed.items.find((item) =>
       item.sourceKind === "budget_alert" && item.detail?.kind === "budget" && item.detail.observedPercent === 100
     )).toBeTruthy();
+    expect(feed.items.find((item) =>
+      item.sourceKind === "budget_alert" && item.subject.title.includes("runaway-work safeguard")
+    )?.whyNow).toContain("not subscription quota usage");
     expect(feed.items.find((item) => item.sourceKind === "agent_error_alert")?.detail).toMatchObject({
       kind: "agent_error",
       agentName: "Broken Agent",
@@ -928,6 +931,79 @@ describeEmbeddedPostgres("attention service", () => {
     const feed = await attentionService(db).list(companyId, { userId: "board-user" });
 
     expect(feed.items.some((item) => item.dedupKey === `blocker:${issueId}:ATP-1`)).toBe(true);
+  });
+
+  // Regression: both blocker_attention call sites fell back to the blocked
+  // task's own identity when no `blocks` relation was loaded, so every such row
+  // claimed the task was blocked by itself ("PAP-23 — Blocked by PAP-23").
+  it("reports no blocking task rather than a self-reference when the blocker is unknown", async () => {
+    const { companyId } = await seedCompany("ATV");
+    const issueId = await insertIssue({
+      companyId,
+      identifier: "ATV-1",
+      title: "Blocked with no relation",
+      status: "blocked",
+      blockedTransitionAt: new Date(ROUTABLE_BLOCKED_ROLLOUT_AT.getTime() - 1),
+    });
+
+    const feed = await attentionService(db).list(companyId, { userId: "board-user" });
+    const row = feed.items.find((item) => item.dedupKey === `blocker:${issueId}:ATV-1`);
+
+    expect(row).toBeTruthy();
+    expect(row?.detail).toMatchObject({ kind: "blocker", blockingIssue: null });
+    // The dedup key keeps its original fallback so existing dismissals survive.
+    expect(row?.dismissalKey).toBe(`attention:blocker:${issueId}:ATV-1`);
+  });
+
+  it("names the real blocking task when a blocks relation exists", async () => {
+    const { companyId } = await seedCompany("ATW");
+    const blockedId = await insertIssue({
+      companyId,
+      identifier: "ATW-1",
+      title: "Blocked parent",
+      status: "blocked",
+      blockedTransitionAt: new Date(ROUTABLE_BLOCKED_ROLLOUT_AT.getTime() - 1),
+    });
+    const blockerId = await insertIssue({
+      companyId,
+      identifier: "ATW-2",
+      title: "The actual blocker",
+      status: "in_progress",
+    });
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerId,
+      relatedIssueId: blockedId,
+      type: "blocks",
+    });
+
+    const feed = await attentionService(db).list(companyId, { userId: "board-user" });
+    const row = feed.items.find((item) => item.sourceKind === "blocker_attention" && item.subject.id === blockedId);
+
+    expect(row?.detail).toMatchObject({
+      kind: "blocker",
+      blockingIssue: { identifier: "ATW-2", title: "The actual blocker" },
+    });
+  });
+
+  it("does not name the blocked task as its own blocker on a human-owned unblock row", async () => {
+    const { companyId } = await seedCompany("ATX");
+    const transitionAt = new Date("2026-07-23T18:30:00.000Z");
+    const issueId = await insertIssue({
+      companyId,
+      identifier: "ATX-1",
+      title: "Needs board action",
+      status: "blocked",
+      unblockDescriptor: { owner: "board", action: "Approve the exception" },
+      blockedTransitionAt: transitionAt,
+    });
+
+    const feed = await attentionService(db).list(companyId, { userId: "board-user" });
+    const row = feed.items.find(
+      (item) => item.dedupKey === `blocked-owner:${issueId}:${transitionAt.toISOString()}`,
+    );
+
+    expect(row?.detail).toMatchObject({ kind: "blocker", blockingIssue: null });
   });
 
   it("does not route pre-rollout human unblock descriptors", async () => {

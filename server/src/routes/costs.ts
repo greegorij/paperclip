@@ -302,9 +302,10 @@ export function costRoutes(
       return;
     }
 
-    // This is deliberately an observation surface. Local budget hard-stops
-    // remain independent enforcement policies and are not recalculated from
-    // a provider's subscription percentage.
+    // Provider windows are the source of truth for subscription admission.
+    // Local token policies are separate anti-runaway guards: quota telemetry
+    // reports percentages, not a stable token capacity, so translating one
+    // into the other would create a misleading and unsafe hard limit.
     const [availabilitySnapshot, budgetOverview] = await Promise.all([
       providerAvailability.getSnapshot(),
       budgets.overview(companyId),
@@ -318,6 +319,10 @@ export function costRoutes(
       (policy) => policy.status === "hard_stop" && policy.hardStopEnabled,
     ) || budgetOverview.activeIncidents.some((incident) => incident.thresholdType === "hard");
     const hasWarningPolicy = budgetOverview.policies.some((policy) => policy.status === "warning");
+    const hardStopCount = budgetOverview.policies.filter(
+      (policy) => policy.status === "hard_stop" && policy.hardStopEnabled,
+    ).length + budgetOverview.activeIncidents.filter((incident) => incident.thresholdType === "hard").length;
+    const advisoryWarningCount = budgetOverview.policies.filter((policy) => policy.status === "warning").length;
     const localBudgetState: LocalBudgetAvailabilityStatus["state"] =
       hasHardStopPolicy
         ? "blocked"
@@ -350,8 +355,12 @@ export function costRoutes(
         })),
       })),
       localBudgets: {
+        purpose: "safety_guardrail",
+        subscriptionAvailabilityIsProviderManaged: true,
         state: localBudgetState,
         activeIncidentCount: budgetOverview.activeIncidents.length,
+        advisoryWarningCount,
+        hardStopCount,
         pausedAgentCount: budgetOverview.pausedAgentCount,
         pausedProjectCount: budgetOverview.pausedProjectCount,
         pendingApprovalCount: budgetOverview.pendingApprovalCount,

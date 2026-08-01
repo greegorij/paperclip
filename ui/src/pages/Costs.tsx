@@ -161,6 +161,13 @@ function resetLabel(value: string | null) {
   return Number.isNaN(reset.getTime()) ? "No reset time reported" : reset.toLocaleString();
 }
 
+function localGuardrailLabel(availability: CompanyProviderAvailability) {
+  const guards = availability.localBudgets;
+  if (guards.state === "blocked") return `Safety guardrails: ${guards.hardStopCount} blocking`;
+  if (guards.state === "warning") return `Safety guardrails: ${guards.advisoryWarningCount} advisory`;
+  return "Safety guardrails: clear";
+}
+
 function ProviderAvailabilityCard({
   availability,
   isLoading,
@@ -175,13 +182,13 @@ function ProviderAvailabilityCard({
           <div>
             <CardTitle className="text-base">Execution availability</CardTitle>
             <CardDescription>
-              Provider subscription windows control admission to new work; local budgets remain independent hard stops.
+              Provider windows control subscription availability. Local token policies only protect against runaway work or paid usage.
             </CardDescription>
           </div>
           {availability ? (
             <StatusBadge
               status={providerAvailabilityBadgeStatus(availability.localBudgets.state)}
-              label={`Local budget: ${availability.localBudgets.state}`}
+              label={localGuardrailLabel(availability)}
             />
           ) : null}
         </div>
@@ -214,7 +221,7 @@ function ProviderAvailabilityCard({
               ))}
             </div>
             <p className="text-xs leading-5 text-muted-foreground">
-              {availability.localBudgets.activeIncidentCount} active budget incident{availability.localBudgets.activeIncidentCount === 1 ? "" : "s"} · {availability.localBudgets.pendingApprovalCount} pending approval{availability.localBudgets.pendingApprovalCount === 1 ? "" : "s"}
+              {availability.localBudgets.activeIncidentCount} active local safeguard incident{availability.localBudgets.activeIncidentCount === 1 ? "" : "s"} · {availability.localBudgets.pendingApprovalCount} pending approval{availability.localBudgets.pendingApprovalCount === 1 ? "" : "s"}. Local token estimates never reduce the reported subscription quota.
             </p>
           </>
         )}

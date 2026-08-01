@@ -204,7 +204,7 @@ const DETAILS: Record<string, AttentionItem["detail"]> = {
   },
   "review-1": { kind: "generic", summaryExcerpt: "3 files changed · +212 / −41", images: [IMAGES[0], IMAGES[1], IMAGES[2], IMAGES[3]] },
   "fail-1": { kind: "failed_run", agentName: "Deployer", failureReasonExcerpt: "exit code 1 running migrate", images: [] },
-  "budget-1": { kind: "budget", observedPercent: 85, amountObserved: 425, amountLimit: 500, images: [] },
+  "budget-1": { kind: "budget", observedPercent: 85, amountObserved: 425, amountLimit: 500, metric: "billed_cents", images: [] },
 };
 
 const POPULATED_DATED: AttentionItem[] = POPULATED.map((it) => ({
@@ -268,7 +268,7 @@ const SHOWCASE: AttentionItem[] = [
       relatedIssue: null,
     }),
     activityAt: new Date(NOW - 5 * HOUR).toISOString(),
-    detail: { kind: "budget", observedPercent: 85, amountObserved: 425, amountLimit: 500, images: [] },
+    detail: { kind: "budget", observedPercent: 85, amountObserved: 425, amountLimit: 500, metric: "billed_cents", images: [] },
   },
   {
     ...item("join-2", "join_request", "medium", "alex@acme.dev wants to join", "Join request pending.", {

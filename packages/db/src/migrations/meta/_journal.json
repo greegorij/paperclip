@@ -1352,6 +1352,41 @@
       "when": 1784916888226,
       "tag": "0194_cost_events_heartbeat_run_unique",
       "breakpoints": true
+    },
+    {
+      "idx": 195,
+      "version": "7",
+      "when": 1785170000000,
+      "tag": "0195_document_memberships",
+      "breakpoints": true
+    },
+    {
+      "idx": 196,
+      "version": "7",
+      "when": 1784920485226,
+      "tag": "0196_company_skill_releases",
+      "breakpoints": true
+    },
+    {
+      "idx": 197,
+      "version": "7",
+      "when": 1785170000001,
+      "tag": "0197_built_in_agent_unique_marker",
+      "breakpoints": true
+    },
+    {
+      "idx": 198,
+      "version": "7",
+      "when": 1785170001001,
+      "tag": "0198_drop_cloud_upstream_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 199,
+      "version": "7",
+      "when": 1785175200000,
+      "tag": "0199_decisions_v1",
+      "breakpoints": true
     }
   ]
 }

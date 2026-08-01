@@ -2,6 +2,7 @@ import type { InboxDismissalKind } from "./inbox-dismissal.js";
 
 export type AttentionSourceKind =
   | "approval"
+  | "decision"
   | "issue_thread_interaction"
   | "join_request"
   | "recovery_action"
@@ -14,6 +15,7 @@ export type AttentionSourceKind =
 
 export type AttentionSubjectKind =
   | "approval"
+  | "decision"
   | "issue"
   | "interaction"
   | "join_request"
@@ -130,6 +132,8 @@ export type AttentionItemDetail =
       observedPercent: number;
       amountObserved: number;
       amountLimit: number;
+      /** Distinguishes currency spend controls from local anti-runaway token safeguards. */
+      metric: "billed_cents" | "total_tokens";
       images: AttentionDetailImage[];
     }
   | {

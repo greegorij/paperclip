@@ -53,8 +53,14 @@ export interface ProviderAvailabilitySnapshot {
 }
 
 export interface LocalBudgetAvailabilityStatus {
+  /** Local policies limit runaway work or paid usage; provider windows measure subscription availability. */
+  purpose: "safety_guardrail";
+  /** True: subscription admission is decided by the provider lanes above, never by local token estimates. */
+  subscriptionAvailabilityIsProviderManaged: true;
   state: "ok" | "warning" | "blocked" | "unknown";
   activeIncidentCount: number;
+  advisoryWarningCount: number;
+  hardStopCount: number;
   pausedAgentCount: number;
   pausedProjectCount: number;
   pendingApprovalCount: number;

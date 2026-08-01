@@ -309,8 +309,12 @@ describe("cost routes", () => {
       observedAt: "2026-08-01T10:00:00.000Z",
       ttlMs: 30000,
       localBudgets: {
+        purpose: "safety_guardrail",
+        subscriptionAvailabilityIsProviderManaged: true,
         state: "warning",
         activeIncidentCount: 1,
+        advisoryWarningCount: 1,
+        hardStopCount: 0,
         pausedAgentCount: 2,
         pausedProjectCount: 1,
         pendingApprovalCount: 3,
@@ -351,6 +355,8 @@ describe("cost routes", () => {
     expect(res.body.localBudgets).toMatchObject({
       state: "blocked",
       activeIncidentCount: 1,
+      advisoryWarningCount: 0,
+      hardStopCount: 1,
       pendingApprovalCount: 1,
     });
   });

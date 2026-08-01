@@ -141,6 +141,13 @@ If the connection drops, the UI reconnects automatically.
 3. Monitor errors + cancel quickly when needed
 4. Reset sessions when drift appears
 
+## 7.4 Subscription-aware operation
+
+1. Read provider quota windows before admitting new subscription-backed work.
+2. Treat the provider state and reset time as the source of truth for whether a subscription lane is available.
+3. Treat local token budgets as separate safety guardrails for runaway context or paid usage. They are not a conversion of subscription percentage into tokens.
+4. A local soft guardrail warning is advisory; a current local hard stop remains enforced. Do not infer remaining provider quota from either local value.
+
 ## 8. Troubleshooting
 
 If runs fail repeatedly:
