@@ -5,16 +5,47 @@ vi.mock("../adapters/registry.js", () => ({
 }));
 
 import { listServerAdapters } from "../adapters/registry.js";
-import { fetchAllQuotaWindows } from "../services/quota-windows.js";
+import {
+  PAPERCLIP_DISABLE_EXTERNAL_QUOTA_PROBES,
+  fetchAllQuotaWindows,
+} from "../services/quota-windows.js";
 
 describe("fetchAllQuotaWindows", () => {
+  const previousDisableProbes = process.env[PAPERCLIP_DISABLE_EXTERNAL_QUOTA_PROBES];
+
   beforeEach(() => {
     vi.useFakeTimers();
+    // Aggregator behavior tests need probes enabled; harness setup disables them globally.
+    delete process.env[PAPERCLIP_DISABLE_EXTERNAL_QUOTA_PROBES];
   });
 
   afterEach(() => {
+    if (previousDisableProbes === undefined) {
+      delete process.env[PAPERCLIP_DISABLE_EXTERNAL_QUOTA_PROBES];
+    } else {
+      process.env[PAPERCLIP_DISABLE_EXTERNAL_QUOTA_PROBES] = previousDisableProbes;
+    }
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it("returns empty results without probing when external quota probes are disabled", async () => {
+    process.env[PAPERCLIP_DISABLE_EXTERNAL_QUOTA_PROBES] = "1";
+    const getQuotaWindows = vi.fn().mockResolvedValue({
+      provider: "anthropic",
+      ok: true,
+      windows: [],
+    });
+    vi.mocked(listServerAdapters).mockReturnValue([
+      {
+        type: "claude_local",
+        getQuotaWindows,
+      },
+    ] as never);
+
+    await expect(fetchAllQuotaWindows()).resolves.toEqual([]);
+    expect(listServerAdapters).not.toHaveBeenCalled();
+    expect(getQuotaWindows).not.toHaveBeenCalled();
   });
 
   it("returns adapter results without waiting for a slower provider to finish forever", async () => {

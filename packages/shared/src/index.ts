@@ -309,6 +309,8 @@ export {
   FINANCE_UNITS,
   BUDGET_SCOPE_TYPES,
   BUDGET_METRICS,
+  BUDGET_PACING_MODES,
+  BUDGET_PACING_CONFIDENCE,
   BUDGET_WINDOW_KINDS,
   BUDGET_THRESHOLD_TYPES,
   BUDGET_INCIDENT_STATUSES,
@@ -490,6 +492,8 @@ export {
   type FinanceUnit,
   type BudgetScopeType,
   type BudgetMetric,
+  type BudgetPacingMode,
+  type BudgetPacingConfidence,
   type BudgetWindowKind,
   type BudgetThresholdType,
   type BudgetIncidentStatus,
@@ -1328,6 +1332,8 @@ export type {
   ProviderAvailabilitySnapshot,
   LocalBudgetAvailabilityStatus,
   CompanyProviderAvailability,
+  ProviderBudgetPacing,
+  CompanyBudgetPacingSnapshot,
 } from "./types/index.js";
 export {
   COMPANY_SEARCH_EXTRACT_KINDS,

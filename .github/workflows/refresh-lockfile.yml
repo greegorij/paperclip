@@ -4,10 +4,13 @@ on:
   push:
     branches:
       - master
+      - production
   workflow_dispatch:
 
 concurrency:
-  group: refresh-lockfile-master
+  # Keep master and production refreshes isolated so one target cannot cancel
+  # or overwrite the other's bot branch / PR upsert.
+  group: refresh-lockfile-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -55,6 +58,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO_OWNER: ${{ github.repository_owner }}
+          TARGET_BRANCH: ${{ github.ref_name }}
         run: |
           if git diff --quiet -- pnpm-lock.yaml; then
             echo "Lockfile unchanged, nothing to do."
@@ -62,26 +66,37 @@ jobs:
             exit 0
           fi
 
-          BRANCH="chore/refresh-lockfile"
+          # Predictable bot branch per target: master keeps the historical
+          # name; every other target (production, …) gets a suffix.
+          if [ "$TARGET_BRANCH" = "master" ]; then
+            BRANCH="chore/refresh-lockfile"
+          else
+            BRANCH="chore/refresh-lockfile-${TARGET_BRANCH}"
+          fi
+
           git config user.name "lockfile-bot"
           git config user.email "lockfile-bot@users.noreply.github.com"
 
           git checkout -B "$BRANCH"
           git add pnpm-lock.yaml
-          git commit -m "chore(lockfile): refresh pnpm-lock.yaml"
+          git commit -m "chore(lockfile): refresh pnpm-lock.yaml on ${TARGET_BRANCH}"
           git push --force origin "$BRANCH"
 
-          # Only reuse an open PR from this repository owner, not a fork with the same branch name.
+          # Only reuse an open PR from this repository owner for this exact
+          # head→base pair — never a fork with the same branch name, and never
+          # a PR aimed at a different target branch.
           pr_url="$(
-            gh pr list --state open --head "$BRANCH" --json url,headRepositoryOwner \
+            gh pr list --state open --head "$BRANCH" --base "$TARGET_BRANCH" \
+              --json url,headRepositoryOwner \
               --jq ".[] | select(.headRepositoryOwner.login == \"$REPO_OWNER\") | .url" |
             head -n 1
           )"
           if [ -z "$pr_url" ]; then
             pr_url="$(gh pr create \
               --head "$BRANCH" \
-              --title "chore(lockfile): refresh pnpm-lock.yaml" \
-              --body "Auto-generated lockfile refresh after dependencies changed on master. This PR only updates pnpm-lock.yaml.")"
+              --base "$TARGET_BRANCH" \
+              --title "chore(lockfile): refresh pnpm-lock.yaml (${TARGET_BRANCH})" \
+              --body "Auto-generated lockfile refresh after dependencies changed on \`${TARGET_BRANCH}\`. This PR only updates pnpm-lock.yaml.")"
             echo "Created new PR: $pr_url"
           else
             echo "PR already exists: $pr_url"

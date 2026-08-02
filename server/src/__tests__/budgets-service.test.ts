@@ -18,9 +18,44 @@ import {
 
 const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockLoggerWarn = vi.hoisted(() => vi.fn());
+const mockGetProviderBudgetPacing = vi.hoisted(() =>
+  vi.fn(async (db: unknown, companyId: string) => ({
+    companyId,
+    fetchedAt: new Date().toISOString(),
+    source: "test",
+    providers: [] as Array<{
+      mode: string;
+      provider: string;
+      usedPercent: number | null;
+      resetAt: string | null;
+      recentTokens: number;
+      burnRatePerHour: number;
+      projectedExhaustionAt: string | null;
+      reason: string;
+      confidence: string;
+      warning?: string | null;
+    }>,
+  })),
+);
 
 vi.mock("../services/activity-log.js", () => ({
   logActivity: mockLogActivity,
+}));
+
+vi.mock("../services/provider-budget-pacing.js", () => ({
+  getProviderBudgetPacing: mockGetProviderBudgetPacing,
+  pacingForAdapterType: (
+    snapshot: { providers: Array<{ provider: string }> },
+    adapterType: string,
+  ) => {
+    const provider =
+      adapterType === "claude_local" || adapterType === "claude_remote"
+        ? "anthropic"
+        : adapterType === "codex_local" || adapterType === "codex_remote"
+          ? "openai"
+          : adapterType;
+    return snapshot.providers.find((entry) => entry.provider === provider) ?? null;
+  },
 }));
 
 vi.mock("../middleware/logger.js", () => ({
@@ -449,7 +484,7 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
     await db.insert(agents).values({
       id: agentId,
       companyId,
-      name: "Budget Agent SECRET_TOKEN_SHOULD_NOT_LEAK",
+      name: "Budget Agent REDACTED_VALUE_SHOULD_NOT_LEAK",
       role: "engineer",
       status: "active",
       adapterType: "codex_local",
@@ -580,7 +615,7 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
     expect(block).toEqual({
       scopeType: "agent",
       scopeId: agentId,
-      scopeName: "Budget Agent SECRET_TOKEN_SHOULD_NOT_LEAK",
+      scopeName: "Budget Agent REDACTED_VALUE_SHOULD_NOT_LEAK",
       reason: "Agent is paused because its budget hard-stop was reached.",
     });
 
@@ -613,7 +648,7 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
       ]),
     );
     for (const call of telemetryCalls) {
-      expect(JSON.stringify(call.details)).not.toContain("SECRET_TOKEN_SHOULD_NOT_LEAK");
+      expect(JSON.stringify(call.details)).not.toContain("REDACTED_VALUE_SHOULD_NOT_LEAK");
       expect(call.details).not.toHaveProperty("prompt");
       expect(call.details).not.toHaveProperty("message");
     }
@@ -840,7 +875,7 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
     expect(await service.getInvocationBlock(companyId, agentId)).toEqual({
       scopeType: "agent",
       scopeId: agentId,
-      scopeName: "Budget Agent SECRET_TOKEN_SHOULD_NOT_LEAK",
+      scopeName: "Budget Agent REDACTED_VALUE_SHOULD_NOT_LEAK",
       reason: "Agent is paused because its budget hard-stop was reached.",
     });
 
@@ -1047,5 +1082,99 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
       .select({ status: agents.status, pauseReason: agents.pauseReason })
       .from(agents);
     expect(agentAfter).toEqual({ status: "active", pauseReason: null });
+  });
+
+  it("blocks invocation only for provider pacing mode=stop with future reset on matching adapter", async () => {
+    const { companyId, agentId } = await createBudgetFixture();
+    const service = budgetService(db);
+    const resetAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+    mockGetProviderBudgetPacing.mockResolvedValueOnce({
+      companyId,
+      fetchedAt: new Date().toISOString(),
+      source: "test",
+      providers: [
+        {
+          mode: "stop",
+          provider: "openai",
+          usedPercent: 100,
+          resetAt,
+          recentTokens: 1000,
+          burnRatePerHour: 40,
+          projectedExhaustionAt: null,
+          reason: 'Most constraining window "5h" is exhausted until reset.',
+          confidence: "high",
+          warning: null,
+        },
+        {
+          mode: "stop",
+          provider: "anthropic",
+          usedPercent: 100,
+          resetAt,
+          recentTokens: 0,
+          burnRatePerHour: 0,
+          projectedExhaustionAt: null,
+          reason: "should not affect openai agent",
+          confidence: "high",
+          warning: null,
+        },
+      ],
+    });
+
+    const block = await service.getInvocationBlock(companyId, agentId);
+    expect(block).toMatchObject({
+      scopeType: "agent",
+      scopeId: agentId,
+      scopeName: "Budget Agent REDACTED_VALUE_SHOULD_NOT_LEAK",
+    });
+    expect(block?.reason).toContain(resetAt);
+    expect(block?.reason).toContain("openai");
+  });
+
+  it("does not block invocation for unknown or throttle provider pacing", async () => {
+    const { companyId, agentId } = await createBudgetFixture();
+    const service = budgetService(db);
+
+    mockGetProviderBudgetPacing.mockResolvedValueOnce({
+      companyId,
+      fetchedAt: new Date().toISOString(),
+      source: "test",
+      providers: [
+        {
+          mode: "unknown",
+          provider: "openai",
+          usedPercent: null,
+          resetAt: null,
+          recentTokens: 10,
+          burnRatePerHour: 1,
+          projectedExhaustionAt: null,
+          reason: "No reliable provider quota windows; no automatic stop.",
+          confidence: "none",
+          warning: "Quota windows are missing or lack usedPercent; work continues without auto-stop.",
+        },
+      ],
+    });
+    expect(await service.getInvocationBlock(companyId, agentId)).toBeNull();
+
+    mockGetProviderBudgetPacing.mockResolvedValueOnce({
+      companyId,
+      fetchedAt: new Date().toISOString(),
+      source: "test",
+      providers: [
+        {
+          mode: "throttle",
+          provider: "openai",
+          usedPercent: 92,
+          resetAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+          recentTokens: 10,
+          burnRatePerHour: 1,
+          projectedExhaustionAt: null,
+          reason: 'Most constraining window "5h" is at 92% used.',
+          confidence: "high",
+          warning: null,
+        },
+      ],
+    });
+    expect(await service.getInvocationBlock(companyId, agentId)).toBeNull();
   });
 });

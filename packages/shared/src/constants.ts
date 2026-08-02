@@ -808,6 +808,19 @@ export type BudgetScopeType = (typeof BUDGET_SCOPE_TYPES)[number];
 export const BUDGET_METRICS = ["billed_cents", "total_tokens"] as const;
 export type BudgetMetric = (typeof BUDGET_METRICS)[number];
 
+/** Provider subscription pacing recommendation modes. */
+export const BUDGET_PACING_MODES = [
+  "accelerate",
+  "normal",
+  "throttle",
+  "stop",
+  "unknown",
+] as const;
+export type BudgetPacingMode = (typeof BUDGET_PACING_MODES)[number];
+
+export const BUDGET_PACING_CONFIDENCE = ["high", "medium", "low", "none"] as const;
+export type BudgetPacingConfidence = (typeof BUDGET_PACING_CONFIDENCE)[number];
+
 export const BUDGET_WINDOW_KINDS = ["calendar_month_utc", "lifetime"] as const;
 export type BudgetWindowKind = (typeof BUDGET_WINDOW_KINDS)[number];
 

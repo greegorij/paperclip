@@ -60,7 +60,26 @@ The dashboard shows current month spend vs budget for the company and each agent
 GET /api/companies/{companyId}/costs/summary     # Company total
 GET /api/companies/{companyId}/costs/by-agent     # Per-agent breakdown
 GET /api/companies/{companyId}/costs/by-project   # Per-project breakdown
+GET /api/companies/{companyId}/costs/budget-pacing # Provider subscription tempo
 ```
+
+### Provider pacing (subscription limits)
+
+On the Costs page, **Tempo względem limitów dostawców** shows pacing derived from live provider quota windows plus recent token burn:
+
+| Mode | Meaning |
+|------|---------|
+| Accelerate | Low usage and enough time until reset |
+| Normal | Within ordinary bounds |
+| Throttle | High usage (≥90%) or projected to exhaust before reset |
+| Stop | Window at 100% with a known future reset — matching-provider agents are blocked from new invocations |
+| Unknown | Quota data missing/error — **no automatic stop** |
+
+Throttle/accelerate are recommendations only for now: Paperclip does not auto-change concurrency or mass-wake agents from this signal. There is also no automatic resume when a window resets yet.
+
+Pacing snapshots are cached briefly (~30s). Concurrent reads for the same company share one in-flight provider quota probe (a force refresh still joins an existing probe). Failures are not cached; missing telemetry stays Unknown and fail-open.
+
+Budget policies can track `total_tokens` (input + output, excluding cached input) in addition to `billed_cents`. That matters on subscription plans where billed cents stay near zero.
 
 ## Best Practices
 
@@ -68,3 +87,4 @@ GET /api/companies/{companyId}/costs/by-project   # Per-project breakdown
 - Monitor the dashboard regularly for unexpected cost spikes
 - Use per-agent budgets to limit exposure from any single agent
 - Critical agents (CEO, CTO) may need higher budgets than ICs
+- On subscriptions, watch provider pacing and consider `total_tokens` policies — money hard-stops alone may never fire

@@ -25,6 +25,10 @@ import type {
 import { notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
+import {
+  getProviderBudgetPacing,
+  pacingForAdapterType,
+} from "./provider-budget-pacing.js";
 
 type ScopeRecord = {
   companyId: string;
@@ -799,6 +803,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           pauseReason: agents.pauseReason,
           companyId: agents.companyId,
           name: agents.name,
+          adapterType: agents.adapterType,
         })
         .from(agents)
         .where(eq(agents.id, agentId))
@@ -887,53 +892,84 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       }
 
       const candidateProjectId = context?.projectId ?? null;
-      if (!candidateProjectId) return null;
+      if (candidateProjectId) {
+        const project = await db
+          .select({
+            id: projects.id,
+            name: projects.name,
+            companyId: projects.companyId,
+            pauseReason: projects.pauseReason,
+            pausedAt: projects.pausedAt,
+          })
+          .from(projects)
+          .where(eq(projects.id, candidateProjectId))
+          .then((rows) => rows[0] ?? null);
 
-      const project = await db
-        .select({
-          id: projects.id,
-          name: projects.name,
-          companyId: projects.companyId,
-          pauseReason: projects.pauseReason,
-          pausedAt: projects.pausedAt,
-        })
-        .from(projects)
-        .where(eq(projects.id, candidateProjectId))
-        .then((rows) => rows[0] ?? null);
+        if (project && project.companyId === companyId) {
+          const projectPolicies = await db
+            .select()
+            .from(budgetPolicies)
+            .where(
+              and(
+                eq(budgetPolicies.companyId, companyId),
+                eq(budgetPolicies.scopeType, "project"),
+                eq(budgetPolicies.scopeId, project.id),
+                eq(budgetPolicies.isActive, true),
+              ),
+            );
+          for (const projectPolicy of projectPolicies) {
+            if (!projectPolicy.hardStopEnabled) continue;
+            if (skipUnenforceableBudgetPolicy(projectPolicy)) continue;
+            const observed = await computeObservedAmount(db, projectPolicy);
+            if (observed >= projectPolicy.amount) {
+              return {
+                scopeType: "project" as const,
+                scopeId: project.id,
+                scopeName: project.name,
+                reason: "Project cannot start work because its budget hard-stop is still exceeded.",
+              };
+            }
+          }
 
-      if (!project || project.companyId !== companyId) return null;
-      const projectPolicies = await db
-        .select()
-        .from(budgetPolicies)
-        .where(
-          and(
-            eq(budgetPolicies.companyId, companyId),
-            eq(budgetPolicies.scopeType, "project"),
-            eq(budgetPolicies.scopeId, project.id),
-            eq(budgetPolicies.isActive, true),
-          ),
-        );
-      for (const projectPolicy of projectPolicies) {
-        if (!projectPolicy.hardStopEnabled) continue;
-        if (skipUnenforceableBudgetPolicy(projectPolicy)) continue;
-        const observed = await computeObservedAmount(db, projectPolicy);
-        if (observed >= projectPolicy.amount) {
-          return {
-            scopeType: "project" as const,
-            scopeId: project.id,
-            scopeName: project.name,
-            reason: "Project cannot start work because its budget hard-stop is still exceeded.",
-          };
+          if (project.pausedAt && project.pauseReason === "budget") {
+            return {
+              scopeType: "project" as const,
+              scopeId: project.id,
+              scopeName: project.name,
+              reason: "Project is paused because its budget hard-stop was reached.",
+            };
+          }
         }
       }
 
-      if (!project.pausedAt || project.pauseReason !== "budget") return null;
-      return {
-        scopeType: "project" as const,
-        scopeId: project.id,
-        scopeName: project.name,
-        reason: "Project is paused because its budget hard-stop was reached.",
-      };
+      // Provider subscription stop is advisory for throttle/accelerate/unknown.
+      // Only mode=stop with a future resetAt blocks the matching adapter provider.
+      try {
+        const pacing = await getProviderBudgetPacing(db, companyId);
+        const providerPacing = pacingForAdapterType(pacing, agent.adapterType);
+        if (
+          providerPacing &&
+          providerPacing.mode === "stop" &&
+          providerPacing.resetAt &&
+          Date.parse(providerPacing.resetAt) > Date.now()
+        ) {
+          return {
+            scopeType: "agent" as const,
+            scopeId: agentId,
+            scopeName: agent.name,
+            reason:
+              `Provider ${providerPacing.provider} subscription quota is exhausted until ${providerPacing.resetAt}. ` +
+              `${providerPacing.reason}`,
+          };
+        }
+      } catch (err) {
+        logger.warn(
+          { err, companyId, agentId },
+          "provider_budget_pacing_check_failed: allowing invocation (fail-open)",
+        );
+      }
+
+      return null;
     },
 
     resolveIncident: async (

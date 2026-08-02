@@ -24,6 +24,7 @@ import { FleetModelPolicyCard } from "../components/FleetModelPolicyCard";
 import { Identity } from "../components/Identity";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PageTabBar } from "../components/PageTabBar";
+import { ProviderBudgetPacingCard } from "../components/ProviderBudgetPacingCard";
 import { ProviderQuotaCard } from "../components/ProviderQuotaCard";
 import { StatusBadge } from "../components/StatusBadge";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
@@ -429,6 +430,18 @@ export function Costs() {
     enabled: !!selectedCompanyId && mainTab === "providers",
     refetchInterval: 30_000,
     staleTime: 10_000,
+  });
+
+  const {
+    data: pacingData,
+    isLoading: pacingLoading,
+    error: pacingError,
+  } = useQuery({
+    queryKey: queryKeys.usageBudgetPacing(companyId),
+    queryFn: () => costsApi.budgetPacing(companyId),
+    enabled: !!selectedCompanyId && (mainTab === "providers" || mainTab === "budgets"),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
   });
 
   const byProvider = useMemo(() => {
@@ -933,6 +946,11 @@ export function Costs() {
             <p className="text-sm text-destructive">{(budgetError as Error).message}</p>
           ) : (
             <>
+              <ProviderBudgetPacingCard
+                snapshot={pacingData}
+                isLoading={pacingLoading}
+                error={pacingError ? (pacingError as Error).message : null}
+              />
               <Card className="border-border/70 bg-(image:--gradient-extract-2)">
                 <CardHeader className="px-5 pt-5 pb-3">
                   <CardTitle className="text-base">Budget control plane</CardTitle>
@@ -1057,6 +1075,11 @@ export function Costs() {
             <p className="text-sm text-muted-foreground">Select a start and end date to load data.</p>
           ) : (
             <>
+              <ProviderBudgetPacingCard
+                snapshot={pacingData}
+                isLoading={pacingLoading}
+                error={pacingError ? (pacingError as Error).message : null}
+              />
               <Tabs value={effectiveProvider} onValueChange={setActiveProvider}>
                 <PageTabBar items={providerTabItems} value={effectiveProvider} />
 

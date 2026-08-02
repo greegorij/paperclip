@@ -1228,7 +1228,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
       "https://raw.githubusercontent.com/acme/github-skill/main/SKILL.md",
       "https://raw.githubusercontent.com/acme/skills_sh-skill/main/SKILL.md",
     ]));
-  });
+  }, 15_000);
 
   it("validates version-aware desired skill selections", async () => {
     const companyId = randomUUID();

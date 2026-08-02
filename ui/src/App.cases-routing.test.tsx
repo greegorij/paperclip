@@ -9,8 +9,8 @@
 // future removal of those redirect routes fails loudly.
 
 import type { ReactNode } from "react";
-import { flushSync } from "react-dom";
-import { createRoot } from "react-dom/client";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
@@ -88,9 +88,14 @@ vi.mock("./context/CompanyContext", () => ({
   CompanyProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
 
+// React 19's act() requires the env flag so Navigate's effect-driven redirects
+// flush inside the harness instead of racing a bare setTimeout(0) poll.
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
+
 async function renderAppAt(container: HTMLElement, path: string) {
   const root = createRoot(container);
-  flushSync(() => {
+  await act(async () => {
     root.render(
       <MemoryRouter initialEntries={[path]}>
         <App />
@@ -101,15 +106,20 @@ async function renderAppAt(container: HTMLElement, path: string) {
 }
 
 async function waitForRoute(container: HTMLElement, text: string) {
+  // <Navigate> commits via passive effects. act() flushes those; a few polls
+  // cover the redirect → matched-route commit without blind wall-clock waits.
   for (let attempt = 0; attempt < 3; attempt += 1) {
     if (container.textContent?.includes(text)) return;
-    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    await act(async () => {
+      await Promise.resolve();
+    });
   }
   expect(container.textContent).toContain(text);
 }
 
 describe("App Cases routing (PAP-13002)", () => {
   let container: HTMLDivElement;
+  let root: Root | null = null;
 
   beforeEach(() => {
     container = document.createElement("div");
@@ -117,22 +127,26 @@ describe("App Cases routing (PAP-13002)", () => {
   });
 
   afterEach(() => {
+    if (root) {
+      act(() => {
+        root!.unmount();
+      });
+      root = null;
+    }
     container.remove();
     document.body.innerHTML = "";
     vi.clearAllMocks();
   });
 
   it("redirects unprefixed /cases to the company-prefixed list page", async () => {
-    const root = await renderAppAt(container, "/cases");
+    root = await renderAppAt(container, "/cases");
     await waitForRoute(container, "CASES_LIST_PAGE");
     expect(container.textContent).not.toContain("No company matches prefix");
-    flushSync(() => root.unmount());
   });
 
   it("redirects unprefixed /cases/:id to the company-prefixed detail page", async () => {
-    const root = await renderAppAt(container, "/cases/PAP-C5");
+    root = await renderAppAt(container, "/cases/PAP-C5");
     await waitForRoute(container, "CASE_DETAIL_PAGE");
     expect(container.textContent).not.toContain("No company matches prefix");
-    flushSync(() => root.unmount());
   });
 });

@@ -76,6 +76,12 @@ export type {
 } from "./work-timeline.js";
 export { approvalService } from "./approvals.js";
 export { budgetService } from "./budgets.js";
+export { evaluateBudgetPacing } from "./budget-pacing.js";
+export {
+  getProviderBudgetPacing,
+  clearProviderBudgetPacingCacheForTests,
+  providerSlugForAdapterType,
+} from "./provider-budget-pacing.js";
 export { secretService } from "./secrets.js";
 export { googleSheetsRobotEmailFromEnv, toolAccessService } from "./tool-access.js";
 export { smokeLabService } from "./smoke-lab.js";

@@ -838,6 +838,7 @@ export type {
   LocalBudgetAvailabilityStatus,
   CompanyProviderAvailability,
 } from "./quota.js";
+export type { ProviderBudgetPacing, CompanyBudgetPacingSnapshot } from "./budget-pacing.js";
 export type {
   CompanyPortabilityInclude,
   CompanyPortabilityEnvInput,

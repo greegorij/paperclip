@@ -30,6 +30,10 @@ if (!process.env.CODEX_HOME) {
   process.env.CODEX_HOME = codexHome;
 }
 
+// Fail-open: never spawn real provider quota CLI/API probes from the server test harness.
+// Missing telemetry stays `unknown` (never `blocked`). Production leaves this unset.
+process.env.PAPERCLIP_DISABLE_EXTERNAL_QUOTA_PROBES = "1";
+
 if (!SupertestTest.prototype.__paperclipLoopbackPatched) {
   SupertestTest.prototype.serverAddress = function serverAddress(app, path) {
     const addr = app.address();

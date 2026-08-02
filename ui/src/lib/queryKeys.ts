@@ -424,6 +424,8 @@ export const queryKeys = {
     ["usage-quota-windows", companyId] as const,
   providerAvailability: (companyId: string) =>
     ["provider-availability", companyId] as const,
+  usageBudgetPacing: (companyId: string) =>
+    ["usage-budget-pacing", companyId] as const,
   heartbeats: (companyId: string, agentId?: string) =>
     ["heartbeats", companyId, agentId] as const,
   runDetail: (runId: string) => ["heartbeat-run", runId] as const,

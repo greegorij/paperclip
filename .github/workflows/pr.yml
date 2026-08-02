@@ -49,8 +49,15 @@ jobs:
           fetch-depth: 0
 
       - name: Block manual lockfile edits
+        # Lockfile commits are allowed only for github-actions[bot] on the
+        # dedicated refresh branches (master + production). Dependabot stays
+        # exempt. Author is never loosened for the refresh-branch path.
         if: >-
-          github.head_ref != 'chore/refresh-lockfile' &&
+          !(
+            (github.head_ref == 'chore/refresh-lockfile' ||
+             github.head_ref == 'chore/refresh-lockfile-production') &&
+            github.event.pull_request.user.login == 'github-actions[bot]'
+          ) &&
           github.event.pull_request.user.login != 'dependabot[bot]'
         run: |
           # Diff the PR branch against its merge base so recent base-branch commits
@@ -131,22 +138,19 @@ jobs:
             "${path_args[@]}" \
             --github-output "$GITHUB_OUTPUT"
 
-      - name: Validate dependency resolution when manifests change
+      # Always re-resolve the lockfile. A stale base branch (e.g. production)
+      # can disagree with current manifests even when this PR does not touch
+      # package.json — without an artifact, downstream frozen installs fail.
+      # Never commit the result; only upload when it differs from checkout.
+      - name: Validate dependency resolution (always regenerate check)
         id: regen_lockfile
         run: |
-          changed="$(git diff --name-only "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}")"
-          manifest_pattern='(^|/)package\.json$|^pnpm-workspace\.yaml$|^\.npmrc$|^pnpmfile\.(cjs|js|mjs)$|^patches/'
-          if printf '%s\n' "$changed" | grep -Eq "$manifest_pattern"; then
-            pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile
-            echo "regenerated=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "regenerated=0" >> "$GITHUB_OUTPUT"
-          fi
+          pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile
+          node ./.github/scripts/pr-lockfile-regen.mjs write-github-output
 
-      # Manifest-only PRs (where pnpm-lock.yaml stays at base because the policy
-      # job above blocks committing it) need the regenerated lockfile for the
-      # downstream `pnpm install --frozen-lockfile` steps. Upload it here so
-      # every job consumes the same hash without recomputing.
+      # When the resolved lockfile differs from checkout (stale base or
+      # manifest-changing PR), upload it so every downstream job's
+      # `pnpm install --frozen-lockfile` sees a matching hash. No commit.
       - name: Upload regenerated lockfile for downstream jobs
         if: steps.regen_lockfile.outputs.regenerated == '1'
         uses: actions/upload-artifact@v7
@@ -393,10 +397,10 @@ jobs:
           # `--skip-verify` bypasses the initial verification gate. release.sh
           # also requires a clean working tree, so any in-place lockfile churn
           # from `pnpm install --frozen-lockfile` must be reverted first — unless
-          # the policy job uploaded a regenerated lockfile (manifest-changing
-          # PRs), in which case we stage the artifact-restored copy into an
-          # ephemeral local commit so release.sh sees a clean tree and its
-          # workspace build sees a lockfile that matches the manifest.
+          # the policy job uploaded a regenerated lockfile (stale base or
+          # manifest-changing PRs), in which case we stage the artifact-restored
+          # copy into an ephemeral local commit so release.sh sees a clean tree
+          # and its workspace build sees a lockfile that matches the manifest.
           git checkout -B master HEAD
           if [ "$USED_ARTIFACT_LOCKFILE" = "1" ]; then
             git add pnpm-lock.yaml

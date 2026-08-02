@@ -28,6 +28,7 @@ import {
   PROVIDER_AVAILABILITY_BLOCKED_THRESHOLD_PERCENT,
   getProviderAvailabilityService,
 } from "../services/provider-availability.js";
+import { getProviderBudgetPacing } from "../services/provider-budget-pacing.js";
 import { badRequest } from "../errors.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 
@@ -367,6 +368,19 @@ export function costRoutes(
       },
     };
     res.json(response);
+  });
+
+  router.get("/companies/:companyId/costs/budget-pacing", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    assertBoard(req);
+    const company = await companies.getById(companyId);
+    if (!company) {
+      res.status(404).json({ error: "Company not found" });
+      return;
+    }
+    const snapshot = await getProviderBudgetPacing(db, companyId);
+    res.json(snapshot);
   });
 
   router.get("/companies/:companyId/budgets/overview", async (req, res) => {
