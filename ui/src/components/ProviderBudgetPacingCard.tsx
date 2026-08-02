@@ -6,15 +6,15 @@ import { formatTokens, providerDisplayName } from "@/lib/utils";
 function modeLabel(mode: ProviderBudgetPacing["mode"]): string {
   switch (mode) {
     case "accelerate":
-      return "Accelerate";
+      return "Pełne tempo";
     case "normal":
-      return "Normal";
+      return "Normalnie";
     case "throttle":
-      return "Throttle";
+      return "Ograniczenie";
     case "stop":
       return "Stop";
     case "unknown":
-      return "Unknown";
+      return "Brak danych";
   }
 }
 
@@ -34,10 +34,10 @@ function modeToneClass(mode: ProviderBudgetPacing["mode"]): string {
 }
 
 function formatReset(resetAt: string | null): string {
-  if (!resetAt) return "reset unknown";
+  if (!resetAt) return "reset nieznany";
   const ms = Date.parse(resetAt);
-  if (!Number.isFinite(ms)) return "reset unknown";
-  return `resets ${new Date(ms).toLocaleString()}`;
+  if (!Number.isFinite(ms)) return "reset nieznany";
+  return `reset ${new Date(ms).toLocaleString()}`;
 }
 
 function ProviderRow({ row }: { row: ProviderBudgetPacing }) {
@@ -51,6 +51,11 @@ function ProviderRow({ row }: { row: ProviderBudgetPacing }) {
         </div>
       </div>
       <div className="mt-1 text-xs text-muted-foreground">
+        Dopuszczenie pracy: {Math.round(Math.max(0, Math.min(1, row.admissionRate)) * 100)}%
+        {row.admissionCap != null && row.admissionCeiling != null
+          ? ` · limit ${row.admissionCap}/${row.admissionCeiling} równoległych przebiegów`
+          : ""}
+        {" · "}
         {formatReset(row.resetAt)}
         {" · "}
         {formatTokens(Math.round(row.burnRatePerHour))}/h
@@ -65,7 +70,7 @@ function ProviderRow({ row }: { row: ProviderBudgetPacing }) {
       ) : null}
       {row.mode === "throttle" || row.mode === "accelerate" ? (
         <p className="mt-1 text-xs leading-5 text-muted-foreground">
-          Recommendation only — concurrency is not auto-changed in this release.
+          Przepustowość kolejki jest dostosowywana automatycznie; agenci nie są masowo pauzowani.
         </p>
       ) : null}
     </div>
@@ -88,8 +93,8 @@ export function ProviderBudgetPacingCard({
           <div>
             <CardTitle className="text-base">Tempo względem limitów dostawców</CardTitle>
             <CardDescription className="mt-1">
-              Read-only pacing from subscription quota windows and recent token burn. Unknown/error never auto-stops
-              agents.
+              Limity subskrypcji sterują przepustowością niezależnie od lokalnych zabezpieczeń kosztu i tokenów.
+              Brak wiarygodnych danych nie zatrzymuje pracy.
             </CardDescription>
           </div>
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border">

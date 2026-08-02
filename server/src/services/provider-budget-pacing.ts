@@ -1,8 +1,13 @@
 import { and, eq, gte, lt, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { costEvents } from "@paperclipai/db";
-import type { CompanyBudgetPacingSnapshot, ProviderBudgetPacing } from "@paperclipai/shared";
-import { evaluateBudgetPacing } from "./budget-pacing.js";
+import { agents, costEvents } from "@paperclipai/db";
+import {
+  AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
+  isAgentStatusInvokable,
+  type CompanyBudgetPacingSnapshot,
+  type ProviderBudgetPacing,
+} from "@paperclipai/shared";
+import { evaluateBudgetPacing, providerAdmissionCap } from "./budget-pacing.js";
 import { fetchAllQuotaWindows, providerSlugForAdapterType } from "./quota-windows.js";
 
 const CACHE_TTL_MS = 30_000;
@@ -11,6 +16,11 @@ const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 type CacheEntry = {
   expiresAt: number;
   value: CompanyBudgetPacingSnapshot;
+};
+
+export type CachedProviderBudgetPacing = {
+  snapshot: CompanyBudgetPacingSnapshot;
+  stale: boolean;
 };
 
 const pacingCache = new Map<string, CacheEntry>();
@@ -23,6 +33,31 @@ export type ProviderTokenBurn = {
   recentTokens: number;
   burnRatePerHour: number;
 };
+
+type ProviderAdmissionAgent = Pick<typeof agents.$inferSelect, "status" | "adapterType" | "runtimeConfig">;
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+export function configuredMaxConcurrentRuns(runtimeConfig: unknown): number {
+  const heartbeat = record(record(runtimeConfig).heartbeat);
+  const parsed = Math.floor(Number(heartbeat.maxConcurrentRuns ?? AGENT_DEFAULT_MAX_CONCURRENT_RUNS));
+  if (!Number.isFinite(parsed)) return AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
+  return Math.max(1, Math.min(50, parsed));
+}
+
+export function providerAdmissionCeilings(rows: ProviderAdmissionAgent[]): Map<string, number> {
+  const ceilings = new Map<string, number>();
+  for (const row of rows) {
+    if (!isAgentStatusInvokable(row.status)) continue;
+    const provider = providerSlugForAdapterType(row.adapterType);
+    ceilings.set(provider, (ceilings.get(provider) ?? 0) + configuredMaxConcurrentRuns(row.runtimeConfig));
+  }
+  return ceilings;
+}
 
 /** Half-open historical window for burn aggregation: [now-24h, now). */
 export function recentProviderTokenBurnRange(now: Date): { since: Date; until: Date } {
@@ -90,10 +125,15 @@ export async function computeProviderBudgetPacing(
 ): Promise<CompanyBudgetPacingSnapshot> {
   const now = options?.now ?? new Date();
   const fetchQuotaWindows = options?.fetchQuotaWindows ?? fetchAllQuotaWindows;
-  const [quotaResults, burnByProvider] = await Promise.all([
+  const [quotaResults, burnByProvider, admissionAgents] = await Promise.all([
     fetchQuotaWindows(),
     loadRecentProviderTokenBurn(db, companyId, now),
+    db
+      .select({ status: agents.status, adapterType: agents.adapterType, runtimeConfig: agents.runtimeConfig })
+      .from(agents)
+      .where(eq(agents.companyId, companyId)),
   ]);
+  const ceilings = providerAdmissionCeilings(admissionAgents);
 
   const providers: ProviderBudgetPacing[] = quotaResults.map((result) => {
     const burn = burnByProvider.get(result.provider) ?? {
@@ -124,6 +164,16 @@ export async function computeProviderBudgetPacing(
         fetchError: null,
       }),
     );
+  }
+
+  for (const pacing of providers) {
+    const admissionCeiling = ceilings.get(pacing.provider) ?? 0;
+    pacing.admissionCeiling = admissionCeiling;
+    pacing.admissionCap = providerAdmissionCap({
+      ceiling: admissionCeiling,
+      admissionRate: pacing.admissionRate,
+      mode: pacing.mode,
+    });
   }
 
   return {
@@ -182,6 +232,22 @@ export async function getProviderBudgetPacing(
       pacingInFlight.delete(companyId);
     }
   }
+}
+
+/**
+ * Synchronous scheduler read. It may return a stale snapshot so admission never
+ * blocks on a provider CLI/network probe; callers can refresh it in background.
+ */
+export function peekProviderBudgetPacing(
+  companyId: string,
+  now = new Date(),
+): CachedProviderBudgetPacing | null {
+  const cached = pacingCache.get(companyId);
+  if (!cached) return null;
+  return {
+    snapshot: cached.value,
+    stale: cached.expiresAt <= now.getTime(),
+  };
 }
 
 /** Find pacing for the provider behind an agent adapter type. */

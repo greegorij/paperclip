@@ -5,13 +5,18 @@ import {
   computeProviderBudgetPacing,
   getProviderBudgetPacing,
   loadRecentProviderTokenBurn,
+  peekProviderBudgetPacing,
   PROVIDER_BUDGET_PACING_CACHE_TTL_MS,
+  providerAdmissionCeilings,
   recentProviderTokenBurnRange,
 } from "../services/provider-budget-pacing.js";
 
 const mockFetchAllQuotaWindows = vi.fn<() => Promise<ProviderQuotaResult[]>>();
 
-function createDbStub(tokenRows: Array<{ provider: string; recentTokens: number }>) {
+function createDbStub(
+  tokenRows: Array<{ provider: string; recentTokens: number }>,
+  agentRows: Array<{ status: string; adapterType: string; runtimeConfig: Record<string, unknown> }> = [],
+) {
   const groupBy = vi.fn(async () =>
     tokenRows.map((row) => ({
       provider: row.provider,
@@ -19,8 +24,13 @@ function createDbStub(tokenRows: Array<{ provider: string; recentTokens: number 
     })),
   );
   const where = vi.fn(() => ({ groupBy }));
-  const from = vi.fn(() => ({ where }));
-  const select = vi.fn(() => ({ from }));
+  const select = vi.fn((fields: Record<string, unknown>) => ({
+    from: vi.fn(() => ({
+      where: "adapterType" in fields
+        ? vi.fn(async () => agentRows)
+        : where,
+    })),
+  }));
   return { db: { select } as never, where };
 }
 
@@ -55,10 +65,17 @@ describe("provider budget pacing service", () => {
       },
     ]);
 
-    const { db } = createDbStub([
-      { provider: "anthropic", recentTokens: 2400 },
-      { provider: "openai", recentTokens: 120 },
-    ]);
+    const { db } = createDbStub(
+      [
+        { provider: "anthropic", recentTokens: 2400 },
+        { provider: "openai", recentTokens: 120 },
+      ],
+      [
+        { status: "idle", adapterType: "claude_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 4 } } },
+        { status: "paused", adapterType: "claude_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 40 } } },
+        { status: "idle", adapterType: "codex_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 2 } } },
+      ],
+    );
 
     const snapshot = await computeProviderBudgetPacing(db, "company-1", {
       now: new Date("2026-08-01T12:00:00.000Z"),
@@ -76,14 +93,30 @@ describe("provider budget pacing service", () => {
       usedPercent: 95,
       recentTokens: 2400,
       burnRatePerHour: 100,
+      admissionCeiling: 4,
+      admissionCap: 1,
     });
 
     const openai = snapshot.providers.find((row) => row.provider === "openai");
     expect(openai).toMatchObject({
       mode: "unknown",
       recentTokens: 120,
+      admissionCeiling: 2,
+      admissionCap: 2,
     });
     expect(openai?.warning).toMatch(/timed out/i);
+  });
+
+  it("excludes paused agents and clamps configured concurrency when building provider ceilings", () => {
+    const ceilings = providerAdmissionCeilings([
+      { status: "idle", adapterType: "codex_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 3 } } },
+      { status: "paused", adapterType: "codex_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 50 } } },
+      { status: "running", adapterType: "codex_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 500 } } },
+      { status: "idle", adapterType: "claude_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 0 } } },
+    ]);
+
+    expect(ceilings.get("openai")).toBe(53);
+    expect(ceilings.get("anthropic")).toBe(1);
   });
 
   it("bounds recent burn history to [now-24h, now) so future timestamps cannot inflate pace", async () => {
@@ -130,6 +163,11 @@ describe("provider budget pacing service", () => {
     });
 
     expect(second).toBe(first);
+    expect(peekProviderBudgetPacing("company-cache", now)).toEqual({ snapshot: first, stale: false });
+    expect(peekProviderBudgetPacing(
+      "company-cache",
+      new Date(now.getTime() + PROVIDER_BUDGET_PACING_CACHE_TTL_MS + 1),
+    )).toEqual({ snapshot: first, stale: true });
     expect(mockFetchAllQuotaWindows).toHaveBeenCalledTimes(1);
 
     await getProviderBudgetPacing(db, "company-cache", {

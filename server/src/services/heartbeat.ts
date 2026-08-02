@@ -96,6 +96,13 @@ import {
   getProviderAvailabilityService,
   type ProviderAvailabilityService,
 } from "./provider-availability.js";
+import {
+  getProviderBudgetPacing,
+  pacingForAdapterType,
+  peekProviderBudgetPacing,
+} from "./provider-budget-pacing.js";
+import { resolveProviderAdmissionSlots } from "./budget-pacing.js";
+import { providerSlugForAdapterType } from "./quota-windows.js";
 import { secretService, type MissingRuntimeBinding } from "./secrets.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import {
@@ -222,7 +229,7 @@ import { recoveryService } from "./recovery/service.js";
 import { productivityReviewService } from "./productivity-review.js";
 import { resolveRequiredSuccessfulRunHandoffOnValidPath } from "./successful-run-handoff-state.js";
 import { taskWatchdogService } from "./task-watchdogs.js";
-import { withAgentStartLock } from "./agent-start-lock.js";
+import { withAgentStartLock, withProviderStartLock } from "./agent-start-lock.js";
 import {
   evaluateAgentInvokability,
   evaluateAgentInvokabilityFromDb,
@@ -11745,6 +11752,48 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return Number(count ?? 0);
   }
 
+  async function withProviderStartLockForAgent<T>(agentId: string, fn: () => Promise<T>) {
+    const agent = await getAgent(agentId);
+    if (!agent) return fn();
+    return withProviderStartLock(agent.companyId, providerSlugForAdapterType(agent.adapterType), fn);
+  }
+
+  async function resolveProviderAdmissionSlotsForAgent(
+    agent: typeof agents.$inferSelect,
+    policy: ReturnType<typeof parseHeartbeatPolicy>,
+    agentRunning: number,
+  ) {
+    const provider = providerSlugForAdapterType(agent.adapterType);
+    const runningProviderRows = await db
+      .select({ adapterType: agents.adapterType })
+      .from(heartbeatRuns)
+      .innerJoin(agents, eq(agents.id, heartbeatRuns.agentId))
+      .where(and(eq(heartbeatRuns.companyId, agent.companyId), eq(heartbeatRuns.status, "running")));
+    const providerRunning = runningProviderRows.filter(
+      (row) => providerSlugForAdapterType(row.adapterType) === provider,
+    ).length;
+
+    const cached = peekProviderBudgetPacing(agent.companyId);
+    if (!cached || cached.stale) {
+      void getProviderBudgetPacing(db, agent.companyId, { bypassCache: cached?.stale ?? false }).catch((err) => {
+        logger.warn({ err, companyId: agent.companyId, provider }, "provider pacing refresh failed; retaining fail-open admission");
+      });
+    }
+    const pacing = cached ? pacingForAdapterType(cached.snapshot, agent.adapterType) : null;
+    if (!pacing || pacing.admissionCeiling == null) {
+      const agentSlots = Math.max(0, policy.maxConcurrentRuns - agentRunning);
+      return { agentSlots, providerCap: null, availableSlots: agentSlots };
+    }
+    return resolveProviderAdmissionSlots({
+      agentMaxConcurrent: policy.maxConcurrentRuns,
+      agentRunning,
+      providerCeiling: pacing.admissionCeiling,
+      providerRunning,
+      admissionRate: pacing.admissionRate,
+      mode: pacing.mode,
+    });
+  }
+
   async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect, companyAgents?: AgentOrgRow[]) {
     if (run.status !== "queued") return run;
     const agent = await getAgent(run.agentId);
@@ -12810,7 +12859,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if ((await getSchedulingSuppression()).suppressed) return [];
     const cutoff = await getWorktreeExecutionCutoff();
 
-    return withAgentStartLock(agentId, async () => {
+    return withAgentStartLock(agentId, () => withProviderStartLockForAgent(agentId, async () => {
       const agent = await getAgent(agentId);
       if (!agent) return [];
       const invokability = await getAgentInvokability(agent);
@@ -12822,7 +12871,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
       const policy = parseHeartbeatPolicy(agent);
       const runningCount = await countRunningRunsForAgent(agentId);
-      const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
+      const admission = await resolveProviderAdmissionSlotsForAgent(agent, policy, runningCount);
+      const availableSlots = admission.availableSlots;
       if (availableSlots <= 0) return [];
 
       const queuedRuns = await db
@@ -12896,7 +12946,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         });
       }
       return claimedRuns;
-    });
+    }));
   }
 
   // Await every background heartbeat execution that is currently in flight. A
