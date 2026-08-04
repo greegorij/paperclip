@@ -13,6 +13,7 @@ import {
   issueComments,
   issueDocuments,
   issueApprovals,
+  issueRelations,
   issueThreadInteractions,
   issueWorkProducts,
   issues,
@@ -53,6 +54,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     await db.delete(issueComments);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
+    await db.delete(issueRelations);
     await db.delete(issueWatchdogs);
     await db.delete(issues);
     await db.delete(agents);
@@ -166,6 +168,14 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     return { service, wakes };
   }
 
+  const expectedTaskWatchdogAssigneeAdapterOverrides = {
+    modelProfile: "cheap",
+    adapterConfig: {
+      timeoutSec: 300,
+      graceSec: 15,
+    },
+  };
+
   it("creates one reusable watchdog issue and wakes the watchdog on the initial stopped state", async () => {
     const companyId = await seedCompany();
     const sourceId = await seedIssue(companyId, { identifier: "WDOG-1", status: "done" });
@@ -215,7 +225,12 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       originId: sourceId,
       assigneeAgentId: agentId,
       status: "todo",
+      assigneeAdapterOverrides: expectedTaskWatchdogAssigneeAdapterOverrides,
     });
+    expect(watchdogIssues[0]?.description).toContain("Produce one evidence-based disposition");
+    expect(watchdogIssues[0]?.description).toContain(
+      "Do not perform broad API or documentation exploration when the heartbeat wake context and stopped snapshot already answer the question.",
+    );
 
     const [watchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
     expect(watchdog?.watchdogIssueId).toBe(watchdogIssues[0]?.id);
@@ -227,6 +242,57 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       waitsByIssueId: {},
     });
     expect(watchdog?.triggerCount).toBe(1);
+  });
+
+  it("sets assigneeAdapterOverrides when creating a task-watchdog issue", async () => {
+    const companyId = await seedCompany();
+    const sourceId = await seedIssue(companyId, { identifier: "WDOG-OVERRIDE-CREATE", status: "done" });
+    const agentId = await seedAgent(companyId);
+    await seedWatchdog(companyId, sourceId, agentId);
+    const { service } = createService();
+
+    const result = await service.reconcileTaskWatchdogs({ companyId });
+
+    expect(result).toMatchObject({ checked: 1, triggered: 1 });
+    const [watchdogIssue] = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "task_watchdog")));
+    expect(watchdogIssue?.assigneeAdapterOverrides).toEqual(expectedTaskWatchdogAssigneeAdapterOverrides);
+  });
+
+  it("sets assigneeAdapterOverrides when reopening a task-watchdog issue", async () => {
+    const companyId = await seedCompany();
+    const sourceId = await seedIssue(companyId, { identifier: "WDOG-OVERRIDE-REOPEN", status: "done" });
+    const childId = await seedIssue(companyId, { parentId: sourceId, status: "done" });
+    const agentId = await seedAgent(companyId);
+    await seedWatchdog(companyId, sourceId, agentId);
+    const { service } = createService();
+
+    await service.reconcileTaskWatchdogs({ companyId });
+    const [firstWatchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    const watchdogIssueId = firstWatchdog!.watchdogIssueId!;
+    await db.update(issues).set({
+      status: "done",
+      assigneeAdapterOverrides: null,
+      updatedAt: new Date(),
+    }).where(eq(issues.id, watchdogIssueId));
+
+    const reviewed = await service.reconcileTaskWatchdogs({ companyId });
+    expect(reviewed).toMatchObject({ checked: 1, triggered: 0, alreadyReviewed: 1 });
+
+    await db
+      .update(issues)
+      .set({ status: "blocked", updatedAt: new Date(Date.now() + 60_000) })
+      .where(eq(issues.id, childId));
+    const retriggered = await service.reconcileTaskWatchdogs({ companyId });
+
+    expect(retriggered).toMatchObject({ checked: 1, triggered: 1 });
+    const [reopened] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    expect(reopened).toMatchObject({
+      status: "todo",
+      assigneeAdapterOverrides: expectedTaskWatchdogAssigneeAdapterOverrides,
+    });
   });
 
   it("does not append duplicate review comments for an already-open same-fingerprint review", async () => {
@@ -301,6 +367,251 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     expect(comments).toHaveLength(2);
     const [watchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
     expect(watchdog?.triggerCount).toBe(2);
+  });
+
+  it("recovers a previously reviewed blocked watchdog only after its agent is invokable again", async () => {
+    const companyId = await seedCompany();
+    const sourceId = await seedIssue(companyId, { identifier: "WDOG-BLOCK-RECOVER", status: "done" });
+    const agentId = await seedAgent(companyId);
+    await seedWatchdog(companyId, sourceId, agentId);
+    const { service, wakes } = createService();
+
+    const first = await service.reconcileTaskWatchdogs({ companyId });
+    expect(first).toMatchObject({ checked: 1, triggered: 1 });
+
+    const [firstWatchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    const watchdogIssueId = firstWatchdog!.watchdogIssueId!;
+    const stopFingerprint = firstWatchdog!.lastObservedFingerprint!;
+
+    // Simulate a skipped wake (e.g. heartbeat.daily_run_limit / budget pause):
+    // generated watchdog is blocked with no explicit issue blocker, no live
+    // path, and a stale lastReviewedFingerprint that would otherwise make
+    // later reconciles exit as already_reviewed forever.
+    await db
+      .update(issues)
+      .set({
+        status: "blocked",
+        assigneeAgentId: agentId,
+        executionRunId: null,
+        checkoutRunId: null,
+        executionState: null,
+        monitorNextCheckAt: null,
+      })
+      .where(eq(issues.id, watchdogIssueId));
+    await db
+      .update(issueWatchdogs)
+      .set({
+        lastReviewedFingerprint: stopFingerprint,
+        lastReviewedStopSnapshot: firstWatchdog!.lastObservedStopSnapshot,
+        lastCompletedAt: new Date(),
+      })
+      .where(eq(issueWatchdogs.issueId, sourceId));
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+    wakes.length = 0;
+
+    // While the agent limit/pause remains active, keep strict no-retry behavior.
+    const whilePaused = await service.reconcileTaskWatchdogs({ companyId });
+    expect(whilePaused).toMatchObject({ checked: 1, triggered: 0, alreadyReviewed: 1 });
+    expect(wakes).toHaveLength(0);
+    const [stillBlocked] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    expect(stillBlocked).toMatchObject({
+      status: "blocked",
+      originFingerprint: stopFingerprint,
+    });
+    const [stillReviewed] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    expect(stillReviewed?.lastReviewedFingerprint).toBe(stopFingerprint);
+    expect(stillReviewed?.triggerCount).toBe(1);
+
+    // Effective availability returns → clear the stale reviewed stamp and resume.
+    await db.update(agents).set({ status: "active" }).where(eq(agents.id, agentId));
+    const recovered = await service.reconcileTaskWatchdogs({ companyId });
+
+    expect(recovered).toMatchObject({ checked: 1, triggered: 1 });
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]?.agentId).toBe(agentId);
+    expect(wakes[0]?.opts?.idempotencyKey).toBe(`task_watchdog:${firstWatchdog!.id}:${stopFingerprint}`);
+    const [watchdogIssue] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    expect(watchdogIssue).toMatchObject({
+      status: "todo",
+      assigneeAgentId: agentId,
+      originFingerprint: stopFingerprint,
+    });
+    const [watchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    expect(watchdog?.triggerCount).toBe(2);
+    expect(watchdog?.lastReviewedFingerprint).toBeNull();
+
+    // Once reopened to todo, the same fingerprint stays an open review and does
+    // not stack another wake (idempotent recovery).
+    const third = await service.reconcileTaskWatchdogs({ companyId });
+    expect(third).toMatchObject({ checked: 1, triggered: 0, live: 1 });
+    expect(wakes).toHaveLength(1);
+  });
+
+  it("keeps a maxDailyRuns-capped agent blocked/reviewed until the daily cap is lifted", async () => {
+    const companyId = await seedCompany();
+    const sourceId = await seedIssue(companyId, { identifier: "WDOG-BLOCK-DAILY-CAP", status: "done" });
+    const agentId = await seedAgent(companyId, {
+      runtimeConfig: {
+        heartbeat: {
+          maxDailyRuns: 1,
+        },
+      },
+    });
+    await seedWatchdog(companyId, sourceId, agentId);
+    const { service, wakes } = createService();
+
+    const first = await service.reconcileTaskWatchdogs({ companyId });
+    expect(first).toMatchObject({ checked: 1, triggered: 1 });
+
+    const [firstWatchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    const watchdogIssueId = firstWatchdog!.watchdogIssueId!;
+    const stopFingerprint = firstWatchdog!.lastObservedFingerprint!;
+
+    // Same skipped-wake stall as production: blocked + stale reviewed stamp,
+    // agent remains org-invokable but heartbeat.daily_run_limit is already hit.
+    await db
+      .update(issues)
+      .set({
+        status: "blocked",
+        assigneeAgentId: agentId,
+        executionRunId: null,
+        checkoutRunId: null,
+        executionState: null,
+        monitorNextCheckAt: null,
+      })
+      .where(eq(issues.id, watchdogIssueId));
+    await db
+      .update(issueWatchdogs)
+      .set({
+        lastReviewedFingerprint: stopFingerprint,
+        lastReviewedStopSnapshot: firstWatchdog!.lastObservedStopSnapshot,
+        lastCompletedAt: new Date(),
+      })
+      .where(eq(issueWatchdogs.issueId, sourceId));
+    await db.insert(heartbeatRuns).values({
+      id: randomUUID(),
+      companyId,
+      agentId,
+      invocationSource: "on_demand",
+      triggerDetail: "manual",
+      status: "succeeded",
+      createdAt: new Date(),
+      startedAt: new Date(),
+      finishedAt: new Date(),
+      contextSnapshot: {},
+    });
+    wakes.length = 0;
+
+    const whileCapped = await service.reconcileTaskWatchdogs({ companyId });
+    expect(whileCapped).toMatchObject({ checked: 1, triggered: 0, alreadyReviewed: 1 });
+    expect(wakes).toHaveLength(0);
+    const [stillBlocked] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    expect(stillBlocked).toMatchObject({
+      status: "blocked",
+      originFingerprint: stopFingerprint,
+    });
+    const [stillReviewed] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    expect(stillReviewed?.lastReviewedFingerprint).toBe(stopFingerprint);
+    expect(stillReviewed?.triggerCount).toBe(1);
+
+    // Lift the UTC-day run cap → recovery becomes eligible without changing org status.
+    await db
+      .update(agents)
+      .set({
+        runtimeConfig: {
+          heartbeat: {},
+        },
+      })
+      .where(eq(agents.id, agentId));
+    const recovered = await service.reconcileTaskWatchdogs({ companyId });
+
+    expect(recovered).toMatchObject({ checked: 1, triggered: 1 });
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]?.agentId).toBe(agentId);
+    expect(wakes[0]?.opts?.idempotencyKey).toBe(`task_watchdog:${firstWatchdog!.id}:${stopFingerprint}`);
+    const [watchdogIssue] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    expect(watchdogIssue).toMatchObject({
+      status: "todo",
+      assigneeAgentId: agentId,
+      originFingerprint: stopFingerprint,
+    });
+    const [watchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    expect(watchdog?.triggerCount).toBe(2);
+    expect(watchdog?.lastReviewedFingerprint).toBeNull();
+  });
+
+  it("keeps a normal reviewed disposition closed after a completed watchdog review", async () => {
+    const companyId = await seedCompany();
+    const sourceId = await seedIssue(companyId, { identifier: "WDOG-REVIEW-CLOSED", status: "done" });
+    const agentId = await seedAgent(companyId);
+    await seedWatchdog(companyId, sourceId, agentId);
+    const { service, wakes } = createService();
+
+    const first = await service.reconcileTaskWatchdogs({ companyId });
+    expect(first).toMatchObject({ checked: 1, triggered: 1 });
+
+    const [firstWatchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    const watchdogIssueId = firstWatchdog!.watchdogIssueId!;
+    await db.update(issues).set({ status: "done", updatedAt: new Date() }).where(eq(issues.id, watchdogIssueId));
+    wakes.length = 0;
+
+    const reviewed = await service.reconcileTaskWatchdogs({ companyId });
+    expect(reviewed).toMatchObject({ checked: 1, triggered: 0, alreadyReviewed: 1 });
+    expect(wakes).toHaveLength(0);
+    const [reviewedWatchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    expect(reviewedWatchdog?.lastReviewedFingerprint).toBe(firstWatchdog?.lastObservedFingerprint);
+
+    const again = await service.reconcileTaskWatchdogs({ companyId });
+    expect(again).toMatchObject({ checked: 1, triggered: 0, alreadyReviewed: 1 });
+    expect(wakes).toHaveLength(0);
+  });
+
+  it("does not reopen a blocked watchdog that still has an unresolved issue blocker", async () => {
+    const companyId = await seedCompany();
+    const sourceId = await seedIssue(companyId, { identifier: "WDOG-BLOCK-REAL", status: "done" });
+    const agentId = await seedAgent(companyId);
+    await seedWatchdog(companyId, sourceId, agentId);
+    const { service, wakes } = createService();
+
+    const first = await service.reconcileTaskWatchdogs({ companyId });
+    expect(first).toMatchObject({ checked: 1, triggered: 1 });
+
+    const [firstWatchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    const watchdogIssueId = firstWatchdog!.watchdogIssueId!;
+    const stopFingerprint = firstWatchdog!.lastObservedFingerprint!;
+    const blockerId = await seedIssue(companyId, {
+      identifier: "WDOG-BLOCKER",
+      status: "in_progress",
+    });
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerId,
+      relatedIssueId: watchdogIssueId,
+      type: "blocks",
+    });
+    await db
+      .update(issues)
+      .set({ status: "blocked", assigneeAgentId: agentId })
+      .where(eq(issues.id, watchdogIssueId));
+    // Even with a stale reviewed stamp, an explicit blocker must stay closed.
+    await db
+      .update(issueWatchdogs)
+      .set({
+        lastReviewedFingerprint: stopFingerprint,
+        lastReviewedStopSnapshot: firstWatchdog!.lastObservedStopSnapshot,
+      })
+      .where(eq(issueWatchdogs.issueId, sourceId));
+    wakes.length = 0;
+
+    const second = await service.reconcileTaskWatchdogs({ companyId });
+
+    expect(second).toMatchObject({ checked: 1, triggered: 0, alreadyReviewed: 1 });
+    expect(wakes).toHaveLength(0);
+    const [stillBlocked] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    expect(stillBlocked?.status).toBe("blocked");
+    const [watchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    expect(watchdog?.triggerCount).toBe(1);
+    expect(watchdog?.lastReviewedFingerprint).toBe(stopFingerprint);
   });
 
   it("does not trigger while a non-watchdog descendant has live work", async () => {
@@ -487,6 +798,80 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     expect(afterShrink).toMatchObject({ checked: 1, triggered: 0, alreadyReviewed: 1 });
     expect(wakes).toHaveLength(1);
   });
+
+  it.each([
+    ["cancelled", 1, 0, 1],
+    ["succeeded", 0, 1, 0],
+  ] as const)(
+    "treats only a succeeded watchdog review as completed when the snapshot shrinks (%s)",
+    async (runStatus, expectedTriggered, expectedAlreadyReviewed, expectedWakeCount) => {
+      const companyId = await seedCompany();
+      const sourceId = await seedIssue(companyId, { identifier: "WDOG-COMPLETED-RECOVERY", status: "in_review" });
+      const waitingLeafId = await seedIssue(companyId, { parentId: sourceId, status: "in_review" });
+      const siblingLeafId = await seedIssue(companyId, { parentId: sourceId, status: "in_progress" });
+      const agentId = await seedAgent(companyId);
+      await db.insert(issueThreadInteractions).values({
+        id: randomUUID(),
+        companyId,
+        issueId: waitingLeafId,
+        kind: "request_confirmation",
+        status: "pending",
+        payload: { version: 1, prompt: "Confirm the stop." },
+        createdByAgentId: agentId,
+      });
+      await seedWatchdog(companyId, sourceId, agentId);
+      const { service, wakes } = createService();
+
+      const first = await service.reconcileTaskWatchdogs({ companyId });
+      expect(first).toMatchObject({ checked: 1, triggered: 1 });
+
+      const [firstWatchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+      const watchdogIssueId = firstWatchdog!.watchdogIssueId!;
+      await db
+        .update(issues)
+        .set({ status: "done", updatedAt: new Date() })
+        .where(eq(issues.id, watchdogIssueId));
+      const reviewed = await service.reconcileTaskWatchdogs({ companyId });
+      expect(reviewed).toMatchObject({ checked: 1, triggered: 0, alreadyReviewed: 1 });
+
+      // The completed review's recovery activity shrinks the stopped snapshot.
+      await db
+        .update(issues)
+        .set({ status: "done", updatedAt: new Date(Date.now() + 60_000) })
+        .where(eq(issues.id, siblingLeafId));
+      await db.insert(heartbeatRuns).values({
+        id: randomUUID(),
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        status: runStatus,
+        startedAt: new Date(),
+        finishedAt: new Date(),
+        contextSnapshot: { issueId: watchdogIssueId },
+      });
+      await db
+        .update(issues)
+        .set({
+          status: "blocked",
+          assigneeAgentId: agentId,
+          executionRunId: null,
+          checkoutRunId: null,
+          executionState: null,
+          monitorNextCheckAt: null,
+        })
+        .where(eq(issues.id, watchdogIssueId));
+      wakes.length = 0;
+
+      const startup = await service.reconcileTaskWatchdogs({ companyId });
+
+      expect(startup).toMatchObject({
+        checked: 1,
+        triggered: expectedTriggered,
+        alreadyReviewed: expectedAlreadyReviewed,
+      });
+      expect(wakes).toHaveLength(expectedWakeCount);
+    },
+  );
 
   it("does not let an old terminal watchdog review mark a newer observed fingerprint reviewed", async () => {
     const companyId = await seedCompany();

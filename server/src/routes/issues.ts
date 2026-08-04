@@ -2,10 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { z } from "zod";
-import { and, asc, desc, eq, inArray, isNull, notInArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
+  agentWakeupRequests,
   agents,
   approvals,
   companyMemberships,
@@ -154,10 +155,13 @@ import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.
 import {
   ISSUE_BLOCKER_STRANDED_WAKE_REASON,
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+  ISSUE_STATUS_CHANGED_WAKE_REASON,
   buildIssueBlockerStrandedWakeIdempotencyKey,
   buildIssueBlockersResolvedWakeIdempotencyKey,
+  buildIssueStatusChangedWakeIdempotencyKey,
   findExistingIssueBlockerStrandedWake,
   findExistingIssueBlockersResolvedWake,
+  findExistingIssueStatusChangedWake,
   releaseDependentFromDeadBlocker,
 } from "../services/issue-dependency-wakeups.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
@@ -1741,6 +1745,26 @@ function isClosedIssueStatus(status: string | null | undefined): status is "done
   return status === "done" || status === "cancelled";
 }
 
+/**
+ * Assignee `issue_commented` wakes are suppressed for:
+ * - self-comments from the assignee agent
+ * - closed issues (unless reopened by the caller)
+ * - blocked issues that remain blocked, unless `resume: true`
+ *
+ * Reopen / soft-blocked human resume paths set `reopened` and bypass this via the caller.
+ * Mentions, assignment, status-restore, interaction, and parent-completion wakes use other paths.
+ */
+function shouldSkipAssigneeCommentWake(input: {
+  selfComment: boolean;
+  issueStatus: string | null | undefined;
+  resumeRequested: boolean;
+}) {
+  if (input.selfComment) return true;
+  if (isClosedIssueStatus(input.issueStatus)) return true;
+  if (input.issueStatus === "blocked" && input.resumeRequested !== true) return true;
+  return false;
+}
+
 function shouldImplicitlyMoveCommentedIssueToTodo(input: {
   issueStatus: string | null | undefined;
   assigneeAgentId: string | null | undefined;
@@ -2939,6 +2963,63 @@ export function issueRoutes(
     }
   }
 
+  async function sourceIssueHasLiveExecutionPath(issue: {
+    id: string;
+    companyId: string;
+    executionRunId?: string | null;
+    executionPolicy?: unknown;
+    monitorNextCheckAt?: Date | null;
+  }) {
+    const monitor = summarizeIssueMonitor(issue, normalizeIssueExecutionPolicy(issue.executionPolicy ?? null));
+    if (monitor.nextCheckAt && Date.parse(monitor.nextCheckAt) > Date.now()) {
+      return true;
+    }
+
+    const [run, issueRun, wake] = await Promise.all([
+      db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(and(
+          eq(heartbeatRuns.companyId, issue.companyId),
+          inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+          or(
+            sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
+            sql`${heartbeatRuns.contextSnapshot}->>'taskId' = ${issue.id}`,
+          ),
+        ))
+        .limit(1)
+        .then((rows: Array<{ id: string }>) => rows[0] ?? null),
+      issue.executionRunId
+        ? db
+          .select({ id: heartbeatRuns.id })
+          .from(heartbeatRuns)
+          .where(and(
+            eq(heartbeatRuns.id, issue.executionRunId),
+            eq(heartbeatRuns.companyId, issue.companyId),
+            inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+          ))
+          .limit(1)
+          .then((rows: Array<{ id: string }>) => rows[0] ?? null)
+        : Promise.resolve(null),
+      db
+        .select({ id: agentWakeupRequests.id })
+        .from(agentWakeupRequests)
+        .where(and(
+          eq(agentWakeupRequests.companyId, issue.companyId),
+          inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution"]),
+          or(
+            sql`${agentWakeupRequests.payload}->>'issueId' = ${issue.id}`,
+            sql`${agentWakeupRequests.payload}->>'taskId' = ${issue.id}`,
+            sql`${agentWakeupRequests.payload}->'_paperclipWakeContext'->>'issueId' = ${issue.id}`,
+            sql`${agentWakeupRequests.payload}->'_paperclipWakeContext'->>'taskId' = ${issue.id}`,
+          ),
+        ))
+        .limit(1)
+        .then((rows: Array<{ id: string }>) => rows[0] ?? null),
+    ]);
+    return Boolean(run || issueRun || wake);
+  }
+
   async function classifySourceRecoveryRevalidation(input: {
     issue: IssueRouteSnapshot;
     trigger: RecoveryRevalidationTrigger;
@@ -2996,7 +3077,11 @@ export function issueRoutes(
     }
 
     if ((issue.status === "todo" || issue.status === "in_progress") && issue.assigneeAgentId) {
-      return `Recovery action became stale because the source issue is ${issue.status} with an agent owner.`;
+      // Status+assignee alone is not a live path. Only dismiss recovery when a
+      // real execution mechanism already exists for this issue.
+      if (await sourceIssueHasLiveExecutionPath(issue)) {
+        return `Recovery action became stale because the source issue is ${issue.status} with an agent owner.`;
+      }
     }
 
     if (issue.status === "in_review") {
@@ -5802,10 +5887,13 @@ export function issueRoutes(
         existing.assigneeAgentId !== result.issue.assigneeAgentId)
     ) {
       try {
+        // Ordinary assignment wake: agent sees issue_assigned, not a recovery
+        // directive or recovery-specific wake reason. recoveryActionId stays in
+        // payload only as non-directive audit metadata (not contextSnapshot).
         await enqueueRecoveryActionWakeup(result.issue.assigneeAgentId, {
-          source: "automation",
+          source: "assignment",
           triggerDetail: "system",
-          reason: "issue_recovery_action_restored",
+          reason: "issue_assigned",
           payload: {
             issueId: result.issue.id,
             recoveryActionId: result.recoveryAction.id,
@@ -5815,10 +5903,7 @@ export function issueRoutes(
           requestedByActorId: actor.actorId,
           contextSnapshot: {
             issueId: result.issue.id,
-            taskId: result.issue.id,
-            wakeReason: "issue_recovery_action_restored",
             source: "issue.recovery_action_resolution",
-            recoveryActionId: result.recoveryAction.id,
           },
         });
       } catch (err) {
@@ -8014,9 +8099,16 @@ export function issueRoutes(
     if (updateFields.unblockDescriptor && nextStatus !== "blocked") {
       throw unprocessable("unblockDescriptor requires blocked status");
     }
-    const descriptor = updateFields.unblockDescriptor ?? null;
-    if (descriptor && typeof descriptor === "object") {
-      const owner = descriptor.owner;
+    // Explicit null clears; omitted field may reuse a persisted descriptor from a
+    // prior blocked episode (agents often re-enter blocked without re-sending it).
+    const patchDescriptor = updateFields.unblockDescriptor;
+    const effectiveDescriptor =
+      patchDescriptor !== undefined
+        ? patchDescriptor
+        : (existing.unblockDescriptor ?? null);
+    // Owner permission checks apply only to a newly submitted descriptor.
+    if (patchDescriptor && typeof patchDescriptor === "object") {
+      const owner = patchDescriptor.owner;
       if (req.actor.type === "agent" && (owner === "board" || "userId" in owner)) {
         throw forbidden("Agents may only name themselves as an unblock owner");
       }
@@ -8063,7 +8155,7 @@ export function issueRoutes(
           eq(approvals.status, "pending"),
         )).limit(1).then((rows) => rows[0] ?? null),
       ]);
-      if (!hasUnresolvedBlocker && !pendingInteraction && !pendingApproval && !descriptor) {
+      if (!hasUnresolvedBlocker && !pendingInteraction && !pendingApproval && !effectiveDescriptor) {
         res.status(422).json({ error: "Entering blocked requires unresolved blockers, a pending interaction/approval, or unblockDescriptor" });
         return;
       }
@@ -8729,6 +8821,74 @@ export function issueRoutes(
       requestedByActorId: actor.actorId,
     });
 
+    // Restore-to-actionable wakes must not be fire-and-forget: blocked→todo (and
+    // peers) with an assignee is only a live path once the issue-linked wake exists.
+    const shouldWakeAssigneeOnStatusRestore =
+      !assigneeChanged &&
+      (statusChangedFromBacklog || statusChangedFromBlockedToTodo || statusChangedFromClosedToTodo) &&
+      Boolean(issue.assigneeAgentId);
+    if (shouldWakeAssigneeOnStatusRestore && issue.assigneeAgentId) {
+      const fromStatus = statusChangedFromBacklog
+        ? "backlog"
+        : statusChangedFromBlockedToTodo
+          ? "blocked"
+          : existing.status;
+      const idempotencyKey = buildIssueStatusChangedWakeIdempotencyKey({
+        issueId: issue.id,
+        fromStatus,
+        toStatus: issue.status,
+        updatedAt: issue.updatedAt,
+      });
+      let skipEnqueue = false;
+      try {
+        const existingWake = await findExistingIssueStatusChangedWake(db, {
+          companyId: issue.companyId,
+          idempotencyKey,
+        });
+        skipEnqueue = Boolean(existingWake);
+      } catch (err) {
+        logger.warn(
+          { err, issueId: issue.id, idempotencyKey },
+          "failed to check existing status-change wake before issue status restore",
+        );
+      }
+      if (!skipEnqueue) {
+        try {
+          await heartbeat.wakeup(issue.assigneeAgentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: ISSUE_STATUS_CHANGED_WAKE_REASON,
+            payload: {
+              issueId: issue.id,
+              mutation: "update",
+              fromStatus,
+              toStatus: issue.status,
+              ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
+              ...(interruptedRunId ? { interruptedRunId } : {}),
+            },
+            idempotencyKey,
+            requestedByActorType: actor.actorType,
+            requestedByActorId: actor.actorId,
+            contextSnapshot: {
+              issueId: issue.id,
+              taskId: issue.id,
+              wakeReason: ISSUE_STATUS_CHANGED_WAKE_REASON,
+              source: "issue.status_change",
+              fromStatus,
+              toStatus: issue.status,
+              ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
+              ...(interruptedRunId ? { interruptedRunId } : {}),
+            },
+          });
+        } catch (err) {
+          logger.warn(
+            { err, issueId: issue.id, agentId: issue.assigneeAgentId, idempotencyKey },
+            "failed to wake agent on issue status restore",
+          );
+        }
+      }
+    }
+
     // Merge all wakeups from this update into one enqueue per agent to avoid duplicate runs.
     void (async () => {
       type WakeupRequest = NonNullable<Parameters<typeof heartbeat.wakeup>[1]>;
@@ -8879,37 +9039,17 @@ export function issueRoutes(
         });
       }
 
-      if (
-        !assigneeChanged &&
-        (statusChangedFromBacklog || statusChangedFromBlockedToTodo || statusChangedFromClosedToTodo) &&
-        issue.assigneeAgentId
-      ) {
-        addWakeup(issue.assigneeAgentId, {
-          source: "automation",
-          triggerDetail: "system",
-          reason: "issue_status_changed",
-          payload: {
-            issueId: issue.id,
-            mutation: "update",
-            ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
-            ...(interruptedRunId ? { interruptedRunId } : {}),
-          },
-          requestedByActorType: actor.actorType,
-          requestedByActorId: actor.actorId,
-          contextSnapshot: {
-            issueId: issue.id,
-            source: "issue.status_change",
-            ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
-            ...(interruptedRunId ? { interruptedRunId } : {}),
-          },
-        });
-      }
+      // Status-restore wakes (blocked/backlog/closed → actionable) are awaited above.
 
       if (commentBody && comment) {
         const assigneeId = issue.assigneeAgentId;
         const actorIsAgent = actor.actorType === "agent";
         const selfComment = actorIsAgent && actor.actorId === assigneeId;
-        const skipAssigneeCommentWake = selfComment || isClosed;
+        const skipAssigneeCommentWake = shouldSkipAssigneeCommentWake({
+          selfComment,
+          issueStatus: issue.status,
+          resumeRequested: resumeRequested === true,
+        });
 
         if (assigneeId && !assigneeChanged && (reopened || !skipAssigneeCommentWake)) {
           addWakeup(assigneeId, {
@@ -9020,11 +9160,14 @@ export function issueRoutes(
         }
       }
 
+      // Entering `blocked` alone must not treat pre-existing done edges as a
+      // fresh resolution (agents often keep historical blockedBy while asserting
+      // a new wait via unblockDescriptor). Explicit blockedBy mutation or
+      // assignee change still restores a ready dependency wake.
       const restoredBlockedReadyDependency =
         issue.status === "blocked" &&
         issue.assigneeAgentId &&
         (
-          existing.status !== "blocked" ||
           Array.isArray(req.body.blockedByIssueIds) ||
           existing.assigneeAgentId !== issue.assigneeAgentId
         );
@@ -10598,7 +10741,11 @@ export function issueRoutes(
       // Re-derive closed-ness from the post-mutation issue so the auto-approval
       // transition (in_review -> done) suppresses a stale `issue_commented` wake
       // to the returnAssignee for an already-completed issue.
-      const skipWake = selfComment || isClosedIssueStatus(currentIssue.status);
+      const skipWake = shouldSkipAssigneeCommentWake({
+        selfComment,
+        issueStatus: currentIssue.status,
+        resumeRequested: resumeRequested === true,
+      });
       if (assigneeId && (reopened || !skipWake)) {
         if (reopened) {
           addWakeup(assigneeId, {

@@ -114,6 +114,17 @@ describe("CodexRpcClient spawn failures", () => {
         resetsAt: "2024-03-22T12:38:31.000Z",
       }),
     ]);
+    // The primary source failed and we silently served the fallback. That
+    // downgrade must stay visible — it is why the weekly window kept vanishing
+    // without a single line in the journal.
+    expect(result.degraded).toContain("codex-rpc");
+    expect(result.degraded).toContain("codex-wham");
+    expect(result.degraded!.length).toBeLessThanOrEqual(300);
+    // The notice leaves the server on a 200 and reaches the browser. It must be
+    // built from constants and the classified error family only — never from raw
+    // subprocess stderr, which an external tool controls end to end.
+    expect(result.degraded).not.toContain("refresh token has expired");
+    expect(result.degraded).not.toContain("OAuth failed");
   });
 
   it("classifies WHAM refresh-token response bodies without returning the body text", async () => {

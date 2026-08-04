@@ -197,7 +197,7 @@ describeEmbeddedPostgres("issueService.create agent creation quantitative guards
     });
   });
 
-  it("rejects an agent-created child under depth-4 parent even when requestDepth is forged to 0", async () => {
+  it("allows agent-created depth 5 and 6 children and rejects depth 7 even when requestDepth is forged", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const root = await createHumanRoot(companyId, "Human root for depth guard");
     const depth1 = await svc.create(companyId, {
@@ -221,17 +221,37 @@ describeEmbeddedPostgres("issueService.create agent creation quantitative guards
       createdByUserId: randomUUID(),
     });
 
+    const depth5 = await svc.create(companyId, {
+      parentId: depth4.id,
+      title: `Agent depth 5 ${randomUUID()}`,
+      createdByAgentId: agentId,
+      originRunId: randomUUID(),
+      allowDuplicate: true,
+    });
+    expect(depth5.parentId).toBe(depth4.id);
+    expect(depth5.createdByAgentId).toBe(agentId);
+
+    const depth6 = await svc.create(companyId, {
+      parentId: depth5.id,
+      title: `Agent depth 6 ${randomUUID()}`,
+      createdByAgentId: agentId,
+      originRunId: randomUUID(),
+      allowDuplicate: true,
+    });
+    expect(depth6.parentId).toBe(depth5.id);
+    expect(depth6.createdByAgentId).toBe(agentId);
+
     await expect(
       svc.create(companyId, {
-        parentId: depth4.id,
-        title: `Agent depth 5 candidate ${randomUUID()}`,
+        parentId: depth6.id,
+        title: `Agent depth 7 candidate ${randomUUID()}`,
         createdByAgentId: agentId,
         originRunId: randomUUID(),
         requestDepth: 0,
         allowDuplicate: true,
       }),
     ).rejects.toSatisfy((error: unknown) => {
-      expectGuardError(error, "tree_depth", 4, 5);
+      expectGuardError(error, "tree_depth", 6, 7);
       return true;
     });
   });
@@ -265,6 +285,91 @@ describeEmbeddedPostgres("issueService.create agent creation quantitative guards
       svc.create(companyId, {
         parentId: root.id,
         title: `Agent descendant 13 ${randomUUID()}`,
+        createdByAgentId: freshAgentId,
+        originRunId: freshRunId,
+        allowDuplicate: true,
+      }),
+    ).rejects.toSatisfy((error: unknown) => {
+      expectGuardError(error, "root_descendants", 12, 13);
+      return true;
+    });
+  });
+
+  it("allows a new child when twelve terminal historical descendants already exist", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const freshAgentId = randomUUID();
+    const freshRunId = randomUUID();
+    await db.insert(agents).values({
+      id: freshAgentId,
+      companyId,
+      name: "Terminal descendant reuse agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const root = await createHumanRoot(companyId, "Human root for terminal descendant reuse");
+
+    for (let index = 0; index < 12; index += 1) {
+      const child = await svc.create(companyId, {
+        parentId: root.id,
+        title: `Terminal descendant ${index + 1} ${randomUUID()}`,
+        createdByUserId: randomUUID(),
+      });
+      await svc.update(child.id, { status: index % 2 === 0 ? "done" : "cancelled" });
+    }
+
+    const created = await svc.create(companyId, {
+      parentId: root.id,
+      title: `Repair child after terminals ${randomUUID()}`,
+      createdByAgentId: freshAgentId,
+      originRunId: freshRunId,
+      allowDuplicate: true,
+    });
+    expect(created.parentId).toBe(root.id);
+    expect(created.createdByAgentId).toBe(freshAgentId);
+  });
+
+  it("rejects the 13th active nonterminal descendant under one root", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const freshAgentId = randomUUID();
+    const freshRunId = randomUUID();
+    await db.insert(agents).values({
+      id: freshAgentId,
+      companyId,
+      name: "Active descendant guard agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const root = await createHumanRoot(companyId, "Human root for active descendant guard");
+
+    for (let index = 0; index < 6; index += 1) {
+      const terminal = await svc.create(companyId, {
+        parentId: root.id,
+        title: `Terminal filler ${index + 1} ${randomUUID()}`,
+        createdByUserId: randomUUID(),
+      });
+      await svc.update(terminal.id, { status: "done" });
+    }
+    for (let index = 0; index < 12; index += 1) {
+      await svc.create(companyId, {
+        parentId: root.id,
+        title: `Active descendant ${index + 1} ${randomUUID()}`,
+        createdByUserId: randomUUID(),
+        status: index % 2 === 0 ? "todo" : "blocked",
+      });
+    }
+
+    await expect(
+      svc.create(companyId, {
+        parentId: root.id,
+        title: `Active descendant 13 ${randomUUID()}`,
         createdByAgentId: freshAgentId,
         originRunId: freshRunId,
         allowDuplicate: true,

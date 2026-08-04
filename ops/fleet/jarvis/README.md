@@ -1,12 +1,12 @@
 # Jarvis fleet configuration (`ops/fleet/jarvis`)
 
-Versioned, secret-free management of the 29-agent Jarvis company on the private Paperclip fork.
+Versioned, secret-free management of the 30-agent Jarvis company on the private Paperclip fork.
 
 | Layer | Count | Notes |
 |-------|------:|-------|
-| Portable package agents | 27 | Company package under `package/` (agents + sidecar only) |
+| Portable package agents | 28 | Company package under `package/` (agents + sidecar only) |
 | Managed built-ins | 2 | Summarizer, Reflection Coach — never imported into `package/` |
-| Live total | 29 | `27 + 2` |
+| Live total | 30 | `28 + 2` |
 | Routines (status/trigger only) | 5 | Matched by **id + title + triggerId** before any mutation |
 
 ## Layout
@@ -28,23 +28,25 @@ ops/fleet/jarvis/
 - **Dry-run by default and fully offline.** `apply` without `--apply` never creates an API client and does not need `PAPERCLIP_API_URL` / `PAPERCLIP_API_KEY`.
 - Mutations require `--apply` **and** a backup gate: existing `--backup-file PATH` **plus** matching `--backup-sha256 HEX` only. Soft confirm flags are **not** accepted.
 - The tool **never** creates or restores a database.
-- No API keys, tokens, env values, host paths (`~/`, `/home/`, `/Users/`), or DB dumps in this tree — use placeholders such as `<operator-skill-root>` and `<repo-clone-root>` in docs and package text.
+- No API keys, tokens, env values, or DB dumps in this tree. Docs and package prose use placeholders such as `<operator-skill-root>` and `<repo-clone-root>`. Exception: `desired/runtime-capabilities.json` may list explicit absolute host paths that the sandbox must expose read-only (operator-installed tools).
 - Export warnings are stored as **anonymized counts/categories** only.
 - `package/skills/**` is **not** vendored — apply resolves full skill **keys** against the live `skillLibrary` only (short names refused; no live-desiredSkills fallback). A unique full library key is accepted even when another key shares the same short-name suffix. Full skill rollback is the DB backup, not this manifest.
 - Summarizer / Reflection Coach files are **not** in the portable package; their `skillKeys` live in `desired/built-ins.json`.
 - Agent status is mutated only when `manageStatus: true` (managed roles stay paused). Apply never mass-resumes agents.
 - Do not treat `GET /agents/:id/skills` `entries.length ≈ 39` as assignment.
-- Snapshot/validate are **fail-closed**: hard invariant **29 = 27 portable + exactly 2 built-in keys** (`summarizer`, `reflection-coach`); `completeness` object required with `complete: true` and counters matching agent/skill arrays; empty AGENTS.md rejected; missing `skillLibrary` aborts. Live snapshot first checks the 29-agent list, then fetches each full `GET /api/agents/:id` record (aborts on any detail HTTP failure) before reading instructions/skills. Built-ins are derived from `metadata.paperclipBuiltInAgent.key` (the `/built-in-agents` endpoint may 404 when disabled and must not wipe data).
-- **Diff/verify compare full `skillKeys` vs live `desiredSkills` for all 27 portable agents** (not a four-role override subset). Built-in model/skills drift is included in verify — not ignored.
-- Portable `package/agents/*/AGENTS.md` is export/import-only metadata. Diff/apply never reconcile full live instructions for existing portable agents.
-- All live instruction mutations (portable and built-in, including Summarizer) are outside automated reconciliation.
+- Snapshot/validate are **fail-closed**: hard invariant **30 = 28 portable + exactly 2 built-in keys** (`summarizer`, `reflection-coach`); `completeness` object required with `complete: true` and counters matching agent/skill arrays; empty AGENTS.md rejected (unless `snapshot --allow-empty-instruction-repair`, which flags empty bundles for apply repair via human `emptyInstructionRepairsNeeded` messages **and** structured `emptyInstructionRepairSlugs`); missing `skillLibrary` aborts. Live snapshot first checks the 30-agent list, then fetches each full `GET /api/agents/:id` record (aborts on any detail HTTP failure) before reading instructions/skills. Built-ins are derived from `metadata.paperclipBuiltInAgent.key` (the `/built-in-agents` endpoint may 404 when disabled and must not wipe data).
+- **Diff/verify compare full `skillKeys` vs live `desiredSkills` for all 28 portable agents** (not a four-role override subset). Built-in model/skills drift is included in verify — not ignored.
+- Portable `package/agents/*/AGENTS.md` is export/import-only metadata. Diff/apply never reconcile full live instructions for existing portable agents **except** the explicit empty-bundle repair (`agent-instructions-empty-repair`): live must be empty/whitespace and package AGENTS.md non-empty; non-empty live bundles are never overwritten.
+- All other live instruction mutations (portable and built-in, including Summarizer) are outside automated reconciliation.
 - Apply runs full structural validate + skill-key preflight **before** the first mutation; fail-fast after the first write/verify error. `partial=true` if any write succeeded, including write-ok/verify-fail when `completed` is still empty.
-- Three managed OpenAI runtime policies are fail-closed: `recenzent`, `zwiadowca-kodu`, `mi-sie-kodu-codex`. They stay `paused` by policy and require exact runtime shape in `expectedRuntimePolicy` (status/type/model, `maxConcurrentRuns`, effort, workspace RO/RW, bypass=false, exact `extraArgs`, allowlist domains, heartbeat/wake/maxDailyRuns). Outer Bubblewrap policy remains restrictive (`filesystemScope=workspace`, allowlist networking), while inner Codex still runs with `--sandbox danger-full-access` as required by Paperclip tooling.
-- `Recenzent` and `zwiadowca-kodu` use the OpenAI safe allowlist (`chatgpt.com`, `api.openai.com`, `auth.openai.com`). `mi-sie-kodu-codex` extends it minimally for GitHub git-over-HTTPS operations (`github.com`, `api.github.com`, `objects.githubusercontent.com`, `raw.githubusercontent.com`).
-- `mi-sie-kodu-cursor` remains the default code executor; Codex managed roles are paused fallback lanes, not the primary coding path.
+- Four managed OpenAI runtime policies are fail-closed: `recenzent`, `zwiadowca-kodu`, `mi-sie-kodu-codex`, `mi-sie-kodu-codex-szybki`. They stay `paused` by policy and require exact runtime shape in `expectedRuntimePolicy` (status/type/model, effort, workspace RO/RW, bypass=false, exact `extraArgs`, allowlist domains, heartbeat/wake/maxDailyRuns). Pre-existing managed roles pin `maxConcurrentRuns` exactly `1` and the base adapter config keys only; `mi-sie-kodu-codex-szybki` pins `maxConcurrentRuns` exactly `2` plus exact `timeoutSec=900` / `outputInactivityTimeoutMs=360000`. Outer Bubblewrap policy remains restrictive (`filesystemScope=workspace`, allowlist networking), while inner Codex still runs with `--sandbox danger-full-access` as required by Paperclip tooling.
+- `Recenzent` and `zwiadowca-kodu` use the OpenAI safe allowlist (`chatgpt.com`, `api.openai.com`, `auth.openai.com`). `mi-sie-kodu-codex` and `mi-sie-kodu-codex-szybki` extend it minimally for GitHub git-over-HTTPS operations (`github.com`, `api.github.com`, `objects.githubusercontent.com`, `raw.githubusercontent.com`).
+- `mi-sie-kodu-cursor` remains the default code executor; `mi-sie-kodu-codex-szybki` is the fast Codex Mini lane for small well-specified jobs; heavy Codex managed roles are paused fallback lanes, not the primary coding path.
+- Provider profile switching never rewrites `mi-sie-kodu-codex` / `mi-sie-kodu-codex-szybki` (they stay `codex_local` outside the 22 switchable agents).
+- Profile-switch `replaceAdapterConfig` preserves declarative `secret_ref` / `user_secret_ref` bindings (top-level and `env`); drops plain/unknown env; rebuilds Anthropic `CLAUDE_CONFIG_DIR` from trusted runtime env; fails closed on malformed refs; never preserves plaintext secret values. Reports redact secret IDs/values; private rollback backups keep exact refs.
 - Snapshot normalization maps `runtimeConfig.heartbeat.maxConcurrentRuns` to top-level `maxConcurrentRuns` (fallback to existing top-level value for fixture compatibility; `0` stays `0`). Validate hard-fails on runtime-policy drift and apply stops before API traffic; diff/apply never auto-switch adapters and never auto-write managed runtime-policy fields.
-- Validator raises contradiction errors for forbidden instruction-state drift, and apply is fail-closed on any instruction change kind before creating API traffic or mutating live state.
-- Every successful write is followed by a confirming GET (model, desired skill keys, routine id+title+triggerId+value). Dry-run skips write-verify GETs.
+- Validator raises contradiction errors for forbidden instruction-state drift, and apply is fail-closed on any non-repair instruction change kind before creating API traffic or mutating live state.
+- Every successful write is followed by a confirming GET (model, desired skill keys, routine id+title+triggerId+value; empty-bundle repair confirms AGENTS.md is byte-equivalent / SHA-256-matched to the written package content — wrong-but-nonempty fails closed; reports keep only length+digest, never instruction body). Dry-run skips write-verify GETs.
 
 ## Why no `package/skills/`
 
@@ -82,7 +84,7 @@ Switches only the 22 Anthropic-backed Jarvis roles (`20 portable claude_local + 
 Profile-specific prerequisites:
 
 - `anthropic-first` requires existing directories from `JARVIS_CLAUDE_WORKER_CONFIG_DIR` and `JARVIS_CLAUDE_BOSS_CONFIG_DIR` (absolute, non-empty, inspectable as directories).
-- `openai-first` requires a current boss-instructions source file from `JARVIS_CLAUDE_BOSS_INSTRUCTIONS_FILE` and exact parity between committed `AGENTS-CODEX.md` and the generated artifact.
+- `openai-first` requires a current boss-instructions source file from `JARVIS_CLAUDE_BOSS_INSTRUCTIONS_FILE` and exact parity for both Codex harness artifacts: the short runtime entrypoint `AGENTS-CODEX-COMPACT.md` (materialized as Jarvis `instructionsEntryFile`) and the full audit/reference harness `AGENTS-CODEX.md` (kept committed for rollback/audit; not loaded as the Codex runtime entry).
 
 Safety gates for profile apply/rollback:
 
@@ -98,12 +100,13 @@ Safety gates for profile apply/rollback:
 Rollback backup/report handling:
 
 - rollback backup stores the exact private pre-change state needed for restore, including `secret_ref` fields inside adapter/runtime payloads.
-- for `openai-first`, that backup also contains the exact previous private Jarvis instruction file plus its digest; automatic and explicit rollback restore and verify it before treating Jarvis as restored.
+- for `openai-first`, that backup also contains the exact previous private Jarvis instruction file plus its digest (preferring `AGENTS-CODEX-COMPACT.md`, with legacy fallback to `AGENTS-CODEX.md` for first migration); automatic and explicit rollback restore and verify it before treating Jarvis as restored.
 - rollback always leaves every affected agent paused, even when the saved pre-change status was different.
 - older profile-backup files that do not contain the required Jarvis instruction copy are refused for an `openai-first` rollback; use the verified database backup for recovery instead.
 - operator preview/apply reports and standard snapshots are secret-redacted; `secret_ref` values never appear there.
+- Offline detect/diff/verify/preview may preserve the literal `[redacted]` `secretId` marker (`allowRedactedSecretRefs`) so redacted snapshots stay profile-consistent. Live apply planning, state backup, PATCH construction, and rollback always require a real UUID and fail closed on `[redacted]` — the flag is never inferred from the value.
 
-Profile switching uses `replaceAdapterConfig: true`, preserves only managed instruction-bundle fields and `paperclipSkillSync`, and never mutates instructions or skill assignments.
+Profile switching uses `replaceAdapterConfig: true`, preserves managed instruction-bundle fields, `paperclipSkillSync`, and declarative Paperclip secret references (`secret_ref` / `user_secret_ref`) from live `adapterConfig` — both top-level bindings (for example API-only `access.<alias>`) and `env` entries. Plain env values and unknown objects are dropped; Anthropic `CLAUDE_CONFIG_DIR` is always rebuilt as a plain binding from trusted runtime env. Malformed `secret_ref` / `user_secret_ref` shapes fail closed (block the plan) rather than being copied. Plaintext secret values are never preserved or accepted. Per-agent sandbox grants from `desired/runtime-capabilities.json` are re-applied on every switch (merged onto the provider-safe network allowlist; read-only `filesystemExtraPaths` attached) so additive capabilities survive `openai-first` ↔ `anthropic-first` without hardcoding agent exceptions in switch logic. Operator reports and standard snapshots redact secret IDs and values; private rollback backups keep exact refs for restore. Offline profile detection, fleet diff/verify, and profile-switch preview accept the literal `[redacted]` marker via an explicit `allowRedactedSecretRefs` option so redacted snapshots with valid refs stay zero-diff / profile-matched; mutating apply planning never enables that option and refuses `[redacted]` before any write.
 
 ```sh
 # Preview only (offline, non-mutating)
@@ -121,6 +124,21 @@ node ops/fleet/jarvis/bin/fleet-config.mjs profile-switch \
   --backup-sha256 "<sha256>" \
   --state-backup-file /tmp/jarvis-profile-prechange.json
 
+# Apply when a non-switchable portable has missing AGENTS.md (HTTP 404).
+# Live capture may normalize that empty; profile-switch still never writes
+# instructions. Fails closed if any empty slug is switchable/affected, or if
+# package AGENTS.md for a tolerated non-switchable is missing/empty. Fleet
+# apply then performs the empty-bundle repair afterward.
+node ops/fleet/jarvis/bin/fleet-config.mjs profile-switch \
+  --apply \
+  --allow-empty-instruction-repair \
+  --profile openai-first \
+  --confirm-profile openai-first \
+  --company-id "$COMPANY_ID" \
+  --backup-file /path/to/verified-db-backup \
+  --backup-sha256 "<sha256>" \
+  --state-backup-file /tmp/jarvis-profile-prechange.json
+
 # Explicit rollback from profile backup file
 node ops/fleet/jarvis/bin/fleet-config.mjs profile-switch \
   --rollback \
@@ -131,7 +149,7 @@ node ops/fleet/jarvis/bin/fleet-config.mjs profile-switch \
   --backup-sha256 "<sha256>"
 ```
 
-Profile switch **does not activate the fleet**: all affected agents remain `paused` and no resume calls are issued.
+Profile switch **does not activate the fleet**: all affected agents remain `paused` and no resume calls are issued. `profile-switch --allow-empty-instruction-repair` is capture-only: it never seeds or overwrites AGENTS.md; that remains fleet `apply`'s empty-bundle repair.
 
 Routine IDs and schedule trigger IDs are already filled in `desired/routines.json` from the live audit. Apply refuses if live id/title/triggerId do not all match — **no name-only fallback**.
 
@@ -161,7 +179,7 @@ Stock template (`server/src/built-ins/agents/summarizer/AGENTS.md`) now states p
 ## Model policy (shadow, with profile-consistency gate)
 
 `desired/model-policy.shadow.v1.json` is the versioned, secret-free policy
-candidate for all 29 roles. It records each role's primary model, fallback,
+candidate for all 30 roles. It records each role's primary model, fallback,
 effort, data class, hard safety gates, escalation, independent review and
 per-run limits. `lib/model-policy.mjs` validates the complete role set and
 fails closed on contradictions such as a restricted-data provider without
@@ -187,11 +205,33 @@ agent configuration.
 
 After a routine is paused and its schedule trigger disabled, the live API may still return a stale `nextRunAt`. **Executive truth** for fleet-config is `status` + `trigger.enabled` (matched with id + title + triggerId). Validators deliberately do **not** require `nextRunAt === null`.
 
+## Runtime capabilities (browser / sandbox grants)
+
+`desired/runtime-capabilities.json` (`schemaVersion: 1`, keyed by agent slug) is the versioned, additive mechanism for per-agent sandbox extras. It may only declare:
+
+- `filesystemExtraPaths` — absolute host paths, **read-only** in the sandbox
+- `networkAllowlistAdditions` — hostnames merged (deduped) onto the provider-safe allowlist
+
+It cannot set model, adapter type, or replace the provider base allowlist. Profile-switch validates the file fail-closed and applies grants to both profiles.
+
+### Konfigurator Systemu — agent-browser
+
+Operator-pinned install (not managed by this tree / no installer here):
+
+- `agent-browser` pinned at install time (currently **0.33.2**) under `/home/ccuser/.local/agent-tools`
+- Chrome under `/home/ccuser/.agent-browser/browsers` (first executable `chrome` via `find … -print -quit` — never hardcode a version directory; no `| head`)
+- Sandbox: read-only mounts of those two trees via `filesystemExtraPaths`
+- Network (Konfigurator only): `workos.grzegorzgolas.com` and `frappe.grzegorzgolas.com` added to the provider allowlist
+- Sessions: harness sets stable per-run `XDG_RUNTIME_DIR` and `AGENT_BROWSER_SESSION`; agent must reuse those values across shell commands (never `mktemp` a new XDG runtime per command). For local execution the runtime directory is under `PAPERCLIP_RUN_SCRATCH_DIR`; for sandbox/SSH execution Paperclip first materializes a private `0700` directory inside the target environment and passes only that target-visible path. Protocol: `export PATH=…/agent-tools/bin:$PATH`, fail-closed `$CHROME` non-empty/executable, `"$CHROME" --version`, `export AGENT_BROWSER_EXECUTABLE_PATH="$CHROME"`, fail-closed when harness `XDG_RUNTIME_DIR` / `AGENT_BROWSER_SESSION` missing or invalid (no secret dumps)
+- Local probes (`127.0.0.1` / `localhost`, including CDP): must bypass proxy (e.g. `curl --noproxy 127.0.0.1,localhost`); do not claim “no browser” before the package `AGENTS.md` protocol steps and evidence
+- Skill assignment: `paperclipai/optional/browser/agent-browser` **only** on Konfigurator (`desired/agents.json` + package `AGENTS.md` frontmatter). Do not extend to other agents.
+
 ## Tests
 
 ```sh
 node --test ops/fleet/jarvis/tests/fleet-config.test.mjs
 node --test ops/fleet/jarvis/tests/profile-switch.test.mjs
+node --test ops/fleet/jarvis/tests/runtime-capabilities.test.mjs
 # optional (may SKIP without embedded Postgres):
 ./node_modules/.bin/vitest run server/src/__tests__/built-in-agents.test.ts -t 'Summarizer|summarizer'
 ```
@@ -204,5 +244,5 @@ Restore the verified DB backup taken before apply (orchestrator). Agent config r
 
 - JSON under `desired/` is the only SSOT — no YAML mirrors.
 - Skill content is not in-repo; missing library keys or short-name inputs fail before the first mutation.
-- Codex/Recenzent remain paused by policy unless explicitly resumed in live operations.
+- Managed paused lanes (`mi-sie-kodu-codex`, `mi-sie-kodu-codex-szybki`, Recenzent, Zwiadowca Kodu) remain paused by policy unless explicitly resumed in live operations; profile switching does not resume them.
 - Stale `nextRunAt` on paused routines is an API observability limitation — validators do not assert `nextRunAt === null`.

@@ -3,9 +3,9 @@
     "schemaVersion": 1,
     "generatedFromExport": "paperclip-fleet-export-20260729-1243.json",
     "exportSha256": "d64b1d776e747407ffe77d066288f4950bb228273727d4d6b38890b53280bbec",
-    "portableAgentCount": 27,
+    "portableAgentCount": 28,
     "managedBuiltInCount": 2,
-    "expectedLiveAgentCount": 29,
+    "expectedLiveAgentCount": 30,
     "exportWarnings": {
       "total": 30,
       "categories": {
@@ -171,7 +171,8 @@
         "commit",
         "ticket",
         "contract",
-        "code-quality"
+        "code-quality",
+        "agent-browser"
       ],
       "skillKeys": [
         "paperclipai/paperclip/paperclip",
@@ -180,7 +181,8 @@
         "local/3df4438c6b/commit",
         "local/8ce6211023/ticket",
         "local/a39efcc7e6/contract",
-        "local/a33d9d94a7/code-quality"
+        "local/a33d9d94a7/code-quality",
+        "paperclipai/optional/browser/agent-browser"
       ],
       "reportsToSlug": "senior-programista"
     },
@@ -300,6 +302,64 @@
           "enabled": false,
           "wakeOnDemand": true,
           "maxDailyRuns": 1
+        }
+      },
+      "skills": [
+        "paperclip",
+        "ticket",
+        "commit"
+      ],
+      "skillKeys": [
+        "paperclipai/paperclip/paperclip",
+        "local/8ce6211023/ticket",
+        "local/3df4438c6b/commit"
+      ],
+      "reportsToSlug": "senior-programista"
+    },
+    {
+      "slug": "mi-sie-kodu-codex-szybki",
+      "name": "Mięsień Kodu Codex Szybki",
+      "role": "engineer",
+      "adapterType": "codex_local",
+      "model": "codex-mini-latest",
+      "manageStatus": true,
+      "status": "paused",
+      "expectedRuntimePolicy": {
+        "status": "paused",
+        "maxConcurrentRuns": 2,
+        "adapterType": "codex_local",
+        "model": "codex-mini-latest",
+        "adapterConfig": {
+          "engine": "cli",
+          "model": "codex-mini-latest",
+          "modelReasoningEffort": "low",
+          "fastMode": true,
+          "search": false,
+          "dangerouslyBypassApprovalsAndSandbox": false,
+          "filesystemScope": "workspace",
+          "filesystemWorkspaceAccess": "rw",
+          "networkScope": "allowlist",
+          "networkAllowlist": [
+            "chatgpt.com",
+            "api.openai.com",
+            "auth.openai.com",
+            "github.com",
+            "api.github.com",
+            "objects.githubusercontent.com",
+            "raw.githubusercontent.com"
+          ],
+          "extraArgs": [
+            "--sandbox",
+            "danger-full-access",
+            "--skip-git-repo-check"
+          ],
+          "timeoutSec": 900,
+          "outputInactivityTimeoutMs": 360000
+        },
+        "heartbeat": {
+          "enabled": false,
+          "wakeOnDemand": true,
+          "maxDailyRuns": 8
         }
       },
       "skills": [

@@ -9,6 +9,7 @@ skills:
   - "local/8ce6211023/ticket"
   - "local/a39efcc7e6/contract"
   - "local/a33d9d94a7/code-quality"
+  - "paperclipai/optional/browser/agent-browser"
 ---
 
 # Konfigurator OpenMercato — worker Jarvisa (kokpit Paperclip)
@@ -100,6 +101,42 @@ Masz zmaterializowane skille — pliki z instrukcjami, po które **sięgasz sam*
 - **ticket** — zgłoszenie błędu: zaloguj, napraw od początku do końca, sklasyfikuj.
 - **contract** — tryb ścisłej dyscypliny przy debugowaniu: hipoteza, dowód, wynik.
 - **code-quality** — ocena i planowanie poprawy jakości istniejącego kodu.
+- **agent-browser** — kontrolowana przeglądarka do weryfikacji UI na dozwolonej domenie (allowlista).
+
+## 🌐 Przeglądarka (agent-browser) — protokół
+
+Gdy zadanie wymaga pracy w UI przeglądarki — **najpierw** wykonaj ten protokół w całości.
+**Zakaz:** nie wolno Ci stwierdzić „brak przeglądarki" / „Chrome nieobecny" / „agent-browser niedostępny"
+zanim nie wykonasz kroków 1–7 i nie podasz dowodu (ścieżka + wynik fail-closed + wynik `--version` + wynik sondy).
+
+1. Najpierw uruchom `agent-browser skills get core --full`.
+2. Ustaw `PATH` tak, by zawierał `/home/ccuser/.local/agent-tools/bin`:
+   `export PATH="/home/ccuser/.local/agent-tools/bin:$PATH"`.
+3. Znajdź **pierwszy wykonywalny** plik o nazwie `chrome` dokładnie pod
+   `/home/ccuser/.agent-browser/browsers` — **bez zakodowania wersji** katalogu na sztywno
+   (bez potoku do `head`):
+   `CHROME="$(find /home/ccuser/.agent-browser/browsers -type f -name chrome -perm -111 -print -quit)"`.
+4. Fail-closed: `CHROME` musi być niepuste i wykonywalne. Jeśli nie — STOP z jednoznacznym
+   dowodem błędu (nie wolno claimować „brak przeglądarki" bez tej linii):
+   `if [ -z "$CHROME" ] || [ ! -x "$CHROME" ]; then echo "Chrome discovery failed: CHROME='${CHROME:-}' (empty or not executable under /home/ccuser/.agent-browser/browsers)" >&2; exit 1; fi`.
+5. Sprawdź wersję i zapisz jako dowód: `"$CHROME" --version`.
+6. Wyeksportuj ścieżkę Chrome. **Użyj harnessowych** `XDG_RUNTIME_DIR` i
+   `AGENT_BROWSER_SESSION` dostarczonych przez Paperclip dla **całego przebiegu** —
+   nie twórz nowego runtime per polecenie powłoki (`mktemp`,
+   `/tmp/agent-browser-runtime.*` i podobne są zabronione; osobne katalogi = nowy
+   daemon i `about:blank`):
+   `export AGENT_BROWSER_EXECUTABLE_PATH="$CHROME"`.
+   Fail-closed (bez ujawniania sekretów): jeśli `XDG_RUNTIME_DIR` lub
+   `AGENT_BROWSER_SESSION` jest puste, albo `XDG_RUNTIME_DIR` nie jest istniejącym
+   katalogiem — STOP z dowodem typu zmiennej/ścieżki (nie dumpuj env z sekretami):
+   `if [ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "$XDG_RUNTIME_DIR" ] || [ -z "${AGENT_BROWSER_SESSION:-}" ]; then echo "Browser runtime env missing or invalid: XDG_RUNTIME_DIR set=$([ -n "${XDG_RUNTIME_DIR:-}" ] && echo yes || echo no) dir_ok=$([ -d "${XDG_RUNTIME_DIR:-}" ] && echo yes || echo no) AGENT_BROWSER_SESSION set=$([ -n "${AGENT_BROWSER_SESSION:-}" ] && echo yes || echo no)" >&2; exit 1; fi`.
+7. Wszystkie sondy `127.0.0.1` / `localhost` (CDP, health, curl) **muszą omijać proxy** —
+   np. `curl --noproxy 127.0.0.1,localhost ...`. Sonda lokalnego CDP przez proxy jest błędem
+   protokołu, nie dowodem braku przeglądarki.
+8. Steruj wyłącznie przez UI narzędzia; nie zastępuj API ani shellem.
+9. Dowody zbieraj przez zrzuty ekranu / ślady sesji.
+10. Brak domeny w allowliście albo brak poświadczeń → STOP i karta decyzyjna; nie obchodź ograniczeń.
+
 ## 📎 Wynik musi być WIDOCZNY, nie tylko opisany
 
 Zanim domkniesz zadanie z materialnym rezultatem — **podepnij go jako wynik pracy** (`POST /issues/{id}/work-products`): typ (`document` / `artifact` / `pull_request` / `commit` / `branch` / `preview_url`), tytuł, adres jeśli jest, `isPrimary: true` dla rzeczy najważniejszej.

@@ -1,9 +1,18 @@
+import { createHash } from "node:crypto";
 import { skillShortName } from "./load.mjs";
 
 function sameStringArray(a, b) {
   const left = [...(a ?? [])].map(String).sort();
   const right = [...(b ?? [])].map(String).sort();
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function sha256(value) {
+  return createHash("sha256").update(String(value ?? ""), "utf8").digest("hex");
+}
+
+function hashPrefix(value) {
+  return sha256(value).slice(0, 12);
 }
 
 function expectedActiveSkillState(adapterType) {
@@ -103,6 +112,52 @@ export async function verifyAgentSkills(client, { agentId, expectedKeys, expecte
     }
   }
   return { ok: true, got };
+}
+
+/**
+ * After empty-bundle repair PUT, confirm live AGENTS.md is byte-equivalent to what was written.
+ * Reports stay redacted: only length + digest (never instruction body).
+ */
+export async function verifyAgentInstructionsContent(client, { agentId, expectedContent }) {
+  if (typeof expectedContent !== "string") {
+    return {
+      ok: false,
+      error: `instructions verify missing expectedContent for agent ${agentId}`,
+    };
+  }
+  const expectedSha256 = sha256(expectedContent);
+  const res = await client.get(`/api/agents/${agentId}/instructions-bundle/file?path=AGENTS.md`);
+  if (!res.ok) {
+    return { ok: false, error: `instructions verify GET failed HTTP ${res.status}` };
+  }
+  const content = res.data?.content ?? res.data?.file?.content ?? null;
+  if (typeof content !== "string") {
+    return {
+      ok: false,
+      error: `instructions verify missing content after empty-bundle repair for agent ${agentId}`,
+    };
+  }
+  const liveSha256 = sha256(content);
+  // Exact string match and digest must both agree (fail closed on wrong-but-nonempty).
+  if (content !== expectedContent || liveSha256 !== expectedSha256) {
+    return {
+      ok: false,
+      error:
+        `instructions verify content mismatch after empty-bundle repair for agent ${agentId}: ` +
+        `expected=${hashPrefix(expectedContent)} got=${hashPrefix(content)}`,
+    };
+  }
+  if (content.trim().length === 0) {
+    return {
+      ok: false,
+      error: `instructions verify still empty after empty-bundle repair for agent ${agentId}`,
+    };
+  }
+  return {
+    ok: true,
+    contentLength: content.length,
+    contentSha256: liveSha256,
+  };
 }
 
 export async function verifyRoutine(client, { routineId, title, triggerId, status, triggerEnabled }) {

@@ -62,6 +62,7 @@ import {
   issueCommentPresentationSchema,
   isUuidLike,
   normalizeIssueIdentifier as normalizeIssueReferenceIdentifier,
+  TERMINAL_ISSUE_STATUSES,
 } from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
@@ -150,7 +151,7 @@ const ISSUE_CREATE_IDEMPOTENCY_KEY_CLEANUP_BATCH_SIZE = 500;
 export const AGENT_ISSUE_CREATION_GUARD_PER_RUN_LIMIT = 6;
 export const AGENT_ISSUE_CREATION_GUARD_AGENT_WAVE_30M_LIMIT = 12;
 export const AGENT_ISSUE_CREATION_GUARD_ROOT_WAVE_30M_LIMIT = 4;
-export const AGENT_ISSUE_CREATION_GUARD_TREE_DEPTH_LIMIT = 4;
+export const AGENT_ISSUE_CREATION_GUARD_TREE_DEPTH_LIMIT = 6;
 export const AGENT_ISSUE_CREATION_GUARD_ROOT_DESCENDANTS_LIMIT = 12;
 const AGENT_ISSUE_CREATION_GUARD_WINDOW_MS = 30 * 60 * 1000;
 const AGENT_ISSUE_CREATION_GUARD_REMEDIATION =
@@ -3625,6 +3626,7 @@ async function listIssueBlockedInboxAttentionMap(
         state: "needs_attention",
         reason: finding.state as IssueBlockedInboxAttention["reason"],
         severity: finding.state === "blocked_by_assigned_backlog_issue"
+          || finding.state === "blocked_by_assigned_issue_without_action_path"
           || finding.state === "in_review_without_action_path"
           ? "high"
           : finding.severity === "critical" ? "critical" : "high",
@@ -3642,6 +3644,8 @@ async function listIssueBlockedInboxAttentionMap(
                 return "Assign blocker";
               case "blocked_by_assigned_backlog_issue":
                 return "Resume parked blocker";
+              case "blocked_by_assigned_issue_without_action_path":
+                return "Wake blocked assignee";
               case "blocked_by_uninvokable_assignee":
                 return "Assign active owner";
               case "blocked_by_cancelled_issue":
@@ -6405,6 +6409,8 @@ export function issueService(db: Db) {
         onDeduplicated,
         ...issueData
       } = data;
+      // Capture before workspace/project inference mutates issueData.projectId.
+      const requestedProjectId = issueData.projectId;
       const isAgentCreated = issueData.createdByAgentId != null;
       const shouldSkipAgentCreationGuard = creationGuardExemption === "accepted_plan_decomposition";
       const creationRunId = issueData.originRunId ?? actorRunId ?? null;
@@ -6645,6 +6651,7 @@ export function issueService(db: Db) {
               with recursive descendants as (
                 select
                   root_issue.id,
+                  root_issue.status,
                   array[root_issue.id] as visited_ids
                 from issues root_issue
                 where root_issue.company_id = ${companyId}
@@ -6652,14 +6659,20 @@ export function issueService(db: Db) {
                 union all
                 select
                   child_issue.id,
+                  child_issue.status,
                   descendants.visited_ids || child_issue.id
                 from issues child_issue
                 join descendants on child_issue.parent_id = descendants.id
                 where child_issue.company_id = ${companyId}
                   and not child_issue.id = any(descendants.visited_ids)
               )
-              select greatest(count(*) - 1, 0)::int as "descendantCount"
+              select count(*)::int as "descendantCount"
               from descendants
+              where descendants.id <> ${rootIssueId}
+                and descendants.status not in (${sql.join(
+                  TERMINAL_ISSUE_STATUSES.map((status) => sql`${status}`),
+                  sql`, `,
+                )})
             `)).filter(isDescendantCountRow);
             const descendantCount = Number(descendantRows[0]?.descendantCount ?? 0);
             const observedRootDescendants = descendantCount + 1;
@@ -6724,6 +6737,29 @@ export function issueService(db: Db) {
         if (issueData.projectId == null && executionWorkspaceId) {
           const workspace = await assertValidExecutionWorkspace(companyId, null, executionWorkspaceId, tx);
           issueData.projectId = workspace.projectId;
+        }
+        // Children must stay in the parent's project. Apply after workspace
+        // inference so an omitted projectId cannot be filled from a foreign
+        // inheritExecutionWorkspaceFromIssueId / executionWorkspaceId source.
+        if (issueData.parentId) {
+          const parent = await tx
+            .select({
+              id: issues.id,
+              companyId: issues.companyId,
+              projectId: issues.projectId,
+            })
+            .from(issues)
+            .where(eq(issues.id, issueData.parentId))
+            .then((rows) => rows[0] ?? null);
+          if (!parent) throw notFound("Parent issue not found");
+          if (parent.companyId !== companyId) {
+            throw unprocessable("Parent issue must belong to the same company");
+          }
+          if (requestedProjectId == null) {
+            issueData.projectId = parent.projectId;
+          } else if (requestedProjectId !== parent.projectId) {
+            throw unprocessable("Child issue projectId must match parent issue projectId");
+          }
         }
         const projectGoalId = await getProjectDefaultGoalId(tx, companyId, issueData.projectId);
         // Cache the project policy lookup for this insert so the default

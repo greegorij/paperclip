@@ -690,7 +690,45 @@ describe("fetchCodexQuota", () => {
     });
     const windows = await fetchCodexQuota("token", null);
     expect(windows).toHaveLength(1);
-    expect(windows[0]).toMatchObject({ label: "5h limit", usedPercent: 30, resetsAt: "2026-01-02T00:00:00.000Z" });
+    // 86400s is a day, not five hours — the label comes from the reported
+    // duration now, so this expectation was enshrining the old positional bug.
+    expect(windows[0]).toMatchObject({ label: "1d limit", usedPercent: 30, resetsAt: "2026-01-02T00:00:00.000Z" });
+  });
+
+  // Regression, measured live 2026-08-04 on a "pro" plan: the provider reports a
+  // SINGLE window, it is the weekly one, it arrives in primary_window, and
+  // secondary_window is null. Labelling by position called it "5h limit" and the
+  // weekly row disappeared from the Costs → Providers screen entirely.
+  it("labels a lone 7-day primary_window as weekly", async () => {
+    mockFetch({
+      rate_limit: {
+        allowed: true,
+        primary_window: { used_percent: 64, limit_window_seconds: 604_800, reset_at: 1_786_161_862 },
+        secondary_window: null,
+      },
+    });
+    const windows = await fetchCodexQuota("token", null);
+    expect(windows).toHaveLength(1);
+    expect(windows[0]).toMatchObject({ label: "Weekly limit", usedPercent: 64 });
+  });
+
+  it("still labels a 5h primary_window as 5h", async () => {
+    mockFetch({
+      rate_limit: { primary_window: { used_percent: 12, limit_window_seconds: 18_000 } },
+    });
+    const windows = await fetchCodexQuota("token", null);
+    expect(windows[0]).toMatchObject({ label: "5h limit" });
+  });
+
+  it("keeps the positional label when the provider omits the duration", async () => {
+    mockFetch({
+      rate_limit: {
+        primary_window: { used_percent: 5 },
+        secondary_window: { used_percent: 7 },
+      },
+    });
+    const windows = await fetchCodexQuota("token", null);
+    expect(windows.map((w) => w.label)).toEqual(["5h limit", "Weekly limit"]);
   });
 
   it("parses secondary_window alongside primary_window", async () => {

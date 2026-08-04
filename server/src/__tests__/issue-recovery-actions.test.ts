@@ -1419,6 +1419,45 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
   });
 
+  it("does not project a resolved recovery action into a restored-work wake", async () => {
+    const { companyId, managerId, coderId, sourceIssueId } = await seedCompany();
+    const recoveryActions = issueRecoveryActionService(db);
+    const action = await recoveryActions.upsertSourceScoped({
+      companyId,
+      sourceIssueId,
+      kind: "workspace_validation",
+      ownerType: "agent",
+      ownerAgentId: managerId,
+      previousOwnerAgentId: coderId,
+      returnOwnerAgentId: coderId,
+      cause: "workspace_validation_failed",
+      fingerprint: "workspace:restored-wake",
+      evidence: { failureSummary: "The workspace was repaired." },
+      nextAction: "Return the issue to the coder.",
+      wakePolicy: { type: "wake_owner" },
+    });
+    await recoveryActions.resolveActiveForIssue({
+      companyId,
+      sourceIssueId,
+      actionId: action.id,
+      status: "resolved",
+      outcome: "handed_back",
+      resolutionNote: "Workspace repaired.",
+    });
+
+    const payload = await buildPaperclipWakePayload({
+      db,
+      companyId,
+      contextSnapshot: {
+        issueId: sourceIssueId,
+        wakeReason: "issue_recovery_action_restored",
+        recoveryActionId: action.id,
+      },
+    });
+
+    expect(payload).toMatchObject({ reason: "issue_recovery_action_restored", recovery: null });
+  });
+
   it("resolves an active recovery action and removes it from active projections", async () => {
     const { companyId, managerId, sourceIssueId } = await seedCompany();
     const recoveryActionSvc = issueRecoveryActionService(db);
@@ -1518,13 +1557,28 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       status: "resolved",
       outcome: "handed_back",
     });
+    expect(enqueueRecoveryActionWakeup).toHaveBeenCalledTimes(1);
     expect(enqueueRecoveryActionWakeup).toHaveBeenCalledWith(
       coderId,
       expect.objectContaining({
-        reason: "issue_recovery_action_restored",
-        payload: expect.objectContaining({ issueId: sourceIssueId, recoveryActionId: action.id }),
+        source: "assignment",
+        reason: "issue_assigned",
+        payload: expect.objectContaining({
+          issueId: sourceIssueId,
+          recoveryActionId: action.id,
+          mutation: "recovery_action_resolution",
+        }),
+        contextSnapshot: expect.objectContaining({
+          issueId: sourceIssueId,
+          source: "issue.recovery_action_resolution",
+        }),
       }),
     );
+    const wakeOpts = enqueueRecoveryActionWakeup.mock.calls[0]?.[1] as {
+      contextSnapshot?: Record<string, unknown>;
+    };
+    expect(wakeOpts.contextSnapshot).not.toHaveProperty("wakeReason");
+    expect(wakeOpts.contextSnapshot).not.toHaveProperty("recoveryActionId");
   });
 
   it("does not enqueue a restored wake when todo status and assignee are unchanged", async () => {

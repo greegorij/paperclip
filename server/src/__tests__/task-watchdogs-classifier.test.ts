@@ -368,6 +368,40 @@ describe("task watchdog subtree classifier", () => {
     expect(result.state).toBe("stopped");
   });
 
+  it("treats assigned todo without a run, wake, retry, or monitor as stopped work", () => {
+    const result = classify({
+      issues: [
+        issue({ status: "blocked" }),
+        issue({
+          id: childId,
+          identifier: "PAP-2",
+          parentId: sourceId,
+          status: "todo",
+          assigneeAgentId: "agent-1",
+        }),
+      ],
+    });
+
+    expect(result.state).toBe("stopped");
+    if (result.state !== "stopped") return;
+    expect(result.stoppedLeaves).toEqual([
+      expect.objectContaining({
+        issueId: childId,
+        status: "todo",
+        assigneeAgentId: "agent-1",
+      }),
+    ]);
+  });
+
+  it("does not treat assigned todo alone as a live path", () => {
+    const result = classify({
+      issues: [issue({ status: "todo", assigneeAgentId: "agent-1" })],
+    });
+
+    expect(result.state).toBe("stopped");
+    expect(result).not.toMatchObject({ state: "live" });
+  });
+
   it("does not evaluate a task-watchdog issue as a watched source", () => {
     const result = classify({
       watchdog: {

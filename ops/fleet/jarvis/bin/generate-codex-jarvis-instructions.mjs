@@ -12,7 +12,9 @@ import {
   writeSync,
 } from "node:fs";
 import {
-  generateCodexJarvisInstructions,
+  generateCodexJarvisArtifacts,
+  JARVIS_CODEX_COMPACT_ENTRY_FILE,
+  JARVIS_CODEX_FULL_ENTRY_FILE,
 } from "../lib/codex-jarvis-instructions.mjs";
 import { resolveFleetPath } from "../lib/paths.mjs";
 
@@ -72,25 +74,45 @@ export function main(argv = process.argv.slice(2)) {
   const cockpitFile = path.resolve(
     String(args["cockpit-file"] ?? resolveFleetPath("package", "agents", "jarvis", "AGENTS.md")),
   );
-  const outFile = path.resolve(
-    String(args.out ?? resolveFleetPath("package", "agents", "jarvis", "AGENTS-CODEX.md")),
+  const outDir = path.dirname(
+    path.resolve(
+      String(
+        args.out ?? resolveFleetPath("package", "agents", "jarvis", JARVIS_CODEX_FULL_ENTRY_FILE),
+      ),
+    ),
+  );
+  const outFull = path.resolve(
+    String(
+      args.out ?? resolveFleetPath("package", "agents", "jarvis", JARVIS_CODEX_FULL_ENTRY_FILE),
+    ),
+  );
+  const outCompact = path.resolve(
+    String(
+      args["compact-out"]
+        ?? path.join(outDir, JARVIS_CODEX_COMPACT_ENTRY_FILE),
+    ),
   );
 
   const source = readFileSync(headlessFile, "utf8");
   const cockpit = readFileSync(cockpitFile, "utf8");
-  const generated = generateCodexJarvisInstructions({
+  const generated = generateCodexJarvisArtifacts({
     headlessBossClaude: source,
     cockpitAgentsMd: cockpit,
   });
-  mkdirSync(path.dirname(outFile), { recursive: true });
-  writeFileAtomically(outFile, generated.content);
+  mkdirSync(path.dirname(outFull), { recursive: true });
+  mkdirSync(path.dirname(outCompact), { recursive: true });
+  writeFileAtomically(outFull, generated.full.content);
+  writeFileAtomically(outCompact, generated.compact.content);
 
   process.stdout.write(
     `${JSON.stringify(
       {
-        out: path.basename(outFile),
-        sourceSha256: generated.sourceSha256,
-        cockpitSha256: generated.cockpitSha256,
+        out: path.basename(outFull),
+        compactOut: path.basename(outCompact),
+        sourceSha256: generated.full.sourceSha256,
+        cockpitSha256: generated.full.cockpitSha256,
+        compactChars: generated.compact.content.length,
+        compactMaxChars: generated.compact.maxChars,
       },
       null,
       2,

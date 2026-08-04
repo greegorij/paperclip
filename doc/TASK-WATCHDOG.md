@@ -93,6 +93,8 @@ For each active watchdog the tick:
 
 When the subtree changes between scans (someone restarts work, adds a blocker, or accepts an interaction) the stop fingerprint changes too, and the watchdog will be woken again for the new state — even if the previous run already disposed of an earlier fingerprint.
 
+Startup recovery retries only a generated watchdog review that is `blocked`, has no unresolved blocker or live path, and whose prior wake has no succeeded heartbeat. A succeeded review is a completed disposition and suppresses repeat startup recovery; a blocked review with an incomplete wake remains eligible once the wake gates allow it.
+
 ---
 
 ## What the watchdog agent does

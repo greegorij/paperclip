@@ -8,6 +8,9 @@ export const ISSUE_BLOCKERS_RESOLVED_WAKE_REASON = "issue_blockers_resolved";
 /** Wake dependents when a blocker dies (cancelled / stranded) rather than resolving to done. */
 export const ISSUE_BLOCKER_STRANDED_WAKE_REASON = "issue_blocker_stranded";
 
+/** Wake an assignee when an issue is restored onto an actionable status (e.g. blocked→todo). */
+export const ISSUE_STATUS_CHANGED_WAKE_REASON = "issue_status_changed";
+
 export type IssueBlockerFate = "cancelled" | "stranded";
 
 const IDEMPOTENT_DEPENDENCY_WAKE_STATUSES = [
@@ -25,6 +28,58 @@ export function buildIssueBlockersResolvedWakeIdempotencyKey(input: {
     ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
     input.dependentIssueId,
     input.resolvedBlockerIssueId,
+  ].join(":");
+}
+
+function toEpochMs(value: Date | string | null | undefined): number | null {
+  if (value == null) return null;
+  const ms = value instanceof Date ? value.getTime() : new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * Suppress `issue_blockers_resolved` when the dependent's current blocked
+ * episode began after every known blocker completion — historical done edges
+ * that predate this wait must not immediately rewake (route restore or
+ * liveness backstop).
+ *
+ * Returns false when chronology cannot be proven (missing
+ * `blockedTransitionAt`, empty blocker set, or any blocker lacking
+ * `completedAt`) so legacy rows keep the prior heal behavior.
+ */
+export function shouldSuppressResolvedDependencyWakeForHistoricalBlockers(input: {
+  blockedTransitionAt: Date | string | null | undefined;
+  blockerCompletedAt: Array<Date | string | null | undefined>;
+}): boolean {
+  const transitionMs = toEpochMs(input.blockedTransitionAt);
+  if (transitionMs == null) return false;
+  if (input.blockerCompletedAt.length === 0) return false;
+
+  const completionMs = input.blockerCompletedAt.map(toEpochMs);
+  if (completionMs.some((ms) => ms == null)) return false;
+
+  return completionMs.every((ms) => (ms as number) <= transitionMs);
+}
+
+/**
+ * Idempotency for restore-to-actionable wakes. Bound to the concrete status write
+ * (`updatedAt`) so a later legitimate blocked→todo can wake again, while retries
+ * of the same mutation do not stack duplicate wakes.
+ */
+export function buildIssueStatusChangedWakeIdempotencyKey(input: {
+  issueId: string;
+  fromStatus: string;
+  toStatus: string;
+  updatedAt: Date | string;
+}) {
+  const updatedAtMs = input.updatedAt instanceof Date
+    ? input.updatedAt.getTime()
+    : new Date(input.updatedAt).getTime();
+  return [
+    ISSUE_STATUS_CHANGED_WAKE_REASON,
+    input.issueId,
+    `${input.fromStatus}->${input.toStatus}`,
+    Number.isFinite(updatedAtMs) ? String(updatedAtMs) : String(input.updatedAt),
   ].join(":");
 }
 
@@ -214,6 +269,17 @@ export async function findExistingIssueBlockersResolvedWake(
 
 /** Same idempotency lookup as resolved wakes; shared statuses apply to stranded wakes too. */
 export async function findExistingIssueBlockerStrandedWake(
+  db: Db,
+  input: {
+    companyId: string;
+    idempotencyKey: string;
+  },
+) {
+  return findExistingIssueBlockersResolvedWake(db, input);
+}
+
+/** Same idempotency lookup for restore-to-actionable status-change wakes. */
+export async function findExistingIssueStatusChangedWake(
   db: Db,
   input: {
     companyId: string;

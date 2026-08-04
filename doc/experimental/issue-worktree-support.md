@@ -22,6 +22,8 @@ We are intentionally not shipping the UI for this yet. The runtime code remains 
 - seeded worktree instances can keep local-encrypted secrets working
 - seeded worktree instances can rebind same-repo project workspace paths onto the current git worktree
 
+Child issues remain in their parent issue's project: an omitted project is inherited, an explicit foreign project is rejected, and an execution workspace must belong to that project. A child cannot carry an execution workspace from another project.
+
 ## Hidden UI entrypoints
 
 These are the current user-facing UI surfaces for the feature, now intentionally disabled:

@@ -11,6 +11,19 @@ import {
 const CODEX_USAGE_SOURCE_RPC = "codex-rpc";
 const CODEX_USAGE_SOURCE_WHAM = "codex-wham";
 const MAX_QUOTA_ERROR_BODY_BYTES = 4_000;
+/**
+ * Cap for the `degraded` notice. It is built from subprocess stderr, which is
+ * fully controlled by an external tool and unbounded in length — and unlike the
+ * error path it now leaves the server on a SUCCESS response.
+ */
+const MAX_QUOTA_DEGRADED_CHARS = 300;
+
+/**
+ * Last degraded notice we logged. The quota route is polled continuously, so a
+ * persistent primary-source outage would otherwise write thousands of identical
+ * warnings a day. Log state changes, not every read.
+ */
+let lastLoggedDegradedNotice: string | null = null;
 
 export function codexHomeDir(): string {
   const fromEnv = process.env.CODEX_HOME;
@@ -241,6 +254,21 @@ export function minutesToWindowLabel(
   return `${wholeMinutes}m limit`;
 }
 
+/**
+ * Map a WHAM window duration in seconds to minutes for {@link minutesToWindowLabel}.
+ * 604800 → 10080 (weekly). Returns null when the provider omits the duration.
+ */
+export function secondsToWindowMinutes(seconds: number | null | undefined): number | null {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return null;
+  return seconds / 60;
+}
+
+/** Clamp provider diagnostics so unbounded subprocess output cannot flood a response or the journal. */
+export function truncateDegradedNotice(notice: string): string {
+  if (notice.length <= MAX_QUOTA_DEGRADED_CHARS) return notice;
+  return `${notice.slice(0, MAX_QUOTA_DEGRADED_CHARS - 1)}…`;
+}
+
 /** Non-secret auth metadata for quota-probe JSON/text diagnostics. */
 export interface CodexAuthProbeDiagnostics {
   present: true;
@@ -353,7 +381,7 @@ export async function fetchCodexQuota(
   if (rateLimit?.primary_window != null) {
     const w = rateLimit.primary_window;
     windows.push({
-      label: "5h limit",
+      label: minutesToWindowLabel(secondsToWindowMinutes(w.limit_window_seconds), "5h limit"),
       usedPercent: normalizeCodexUsedPercent(w.used_percent),
       resetsAt:
         typeof w.reset_at === "number"
@@ -366,7 +394,7 @@ export async function fetchCodexQuota(
   if (rateLimit?.secondary_window != null) {
     const w = rateLimit.secondary_window;
     windows.push({
-      label: "Weekly limit",
+      label: minutesToWindowLabel(secondsToWindowMinutes(w.limit_window_seconds), "Weekly limit"),
       usedPercent: normalizeCodexUsedPercent(w.used_percent),
       resetsAt:
         typeof w.reset_at === "number"
@@ -666,8 +694,16 @@ export async function getQuotaWindows(): Promise<ProviderQuotaResult> {
   try {
     const rpc = await fetchCodexRpcQuota();
     if (rpc.windows.length > 0) {
+      // Recovery is only observable here — every other path into the fallback
+      // block has already pushed a reason, so clearing the de-dup state further
+      // down would be unreachable and a repeat outage would go unlogged.
+      if (lastLoggedDegradedNotice !== null) {
+        console.warn(`[codex-quota] primary quota source (${CODEX_USAGE_SOURCE_RPC}) recovered`);
+        lastLoggedDegradedNotice = null;
+      }
       return { provider: "openai", source: CODEX_USAGE_SOURCE_RPC, ok: true, windows: rpc.windows };
     }
+    errors.push("Codex app-server returned no quota windows");
   } catch (error) {
     errors.push(formatProviderError("Codex app-server", error));
     const errorFamily = readCodexQuotaErrorFamily(error);
@@ -680,7 +716,18 @@ export async function getQuotaWindows(): Promise<ProviderQuotaResult> {
   if (auth) {
     try {
       const windows = await fetchCodexQuota(auth.token, auth.accountId);
-      return { provider: "openai", source: CODEX_USAGE_SOURCE_WHAM, ok: true, windows };
+      // Reaching here always means the primary source was skipped for a reason.
+      // What leaves the server is built from constants and an already-classified
+      // error family only — raw subprocess stderr stays in the journal, because
+      // this rides out on a 200 and reaches the browser.
+      const degraded = rpcErrorFamily
+        ? `primary quota source (${CODEX_USAGE_SOURCE_RPC}) unavailable (${rpcErrorFamily}), served from ${CODEX_USAGE_SOURCE_WHAM}`
+        : `primary quota source (${CODEX_USAGE_SOURCE_RPC}) unavailable, served from ${CODEX_USAGE_SOURCE_WHAM}`;
+      if (degraded !== lastLoggedDegradedNotice) {
+        console.warn(`[codex-quota] ${truncateDegradedNotice(`${degraded}: ${errors.join("; ")}`)}`);
+        lastLoggedDegradedNotice = degraded;
+      }
+      return { provider: "openai", source: CODEX_USAGE_SOURCE_WHAM, ok: true, degraded, windows };
     } catch (error) {
       errors.push(formatProviderError("ChatGPT WHAM usage", error));
       const errorFamily = readCodexQuotaErrorFamily(error);
@@ -690,7 +737,7 @@ export async function getQuotaWindows(): Promise<ProviderQuotaResult> {
           source: CODEX_USAGE_SOURCE_WHAM,
           ok: false,
           errorFamily,
-          error: errors.join("; "),
+          error: truncateDegradedNotice(errors.join("; ")),
           windows: [],
         };
       }
@@ -702,7 +749,7 @@ export async function getQuotaWindows(): Promise<ProviderQuotaResult> {
   const result: ProviderQuotaResult = {
     provider: "openai",
     ok: false,
-    error: errors.join("; "),
+    error: truncateDegradedNotice(errors.join("; ")),
     windows: [],
   };
   if (rpcErrorFamily) {

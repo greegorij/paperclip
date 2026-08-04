@@ -52,6 +52,7 @@ import {
   buildIssueBlockersResolvedWakeIdempotencyKey,
   findExistingIssueBlockersResolvedWakeForAnyKey,
   releaseDependentFromDeadBlocker,
+  shouldSuppressResolvedDependencyWakeForHistoricalBlockers,
 } from "../issue-dependency-wakeups.js";
 import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
 import { getRunLogStore } from "../run-log-store.js";
@@ -5162,6 +5163,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       interactionSkipped: 0,
       pauseHoldSkipped: 0,
       notReadySkipped: 0,
+      historicalBlockerSkipped: 0,
       candidateLimitSkipped: 0,
       deferredOrFailed: 0,
       enqueueFailed: 0,
@@ -5199,6 +5201,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             companyId: issues.companyId,
             identifier: issues.identifier,
             assigneeAgentId: issues.assigneeAgentId,
+            blockedTransitionAt: issues.blockedTransitionAt,
             totalCount: sql<number>`count(*) over()::int`,
           })
           .from(issueRelations)
@@ -5214,6 +5217,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           companyId: issues.companyId,
           identifier: issues.identifier,
           assigneeAgentId: issues.assigneeAgentId,
+          blockedTransitionAt: issues.blockedTransitionAt,
           totalCount: sql<number>`count(*) over()::int`,
         })
         .from(issues)
@@ -5263,6 +5267,22 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         companyCandidates.map((candidate) => candidate.id),
       );
 
+      const companyBlockerIssueIds = [
+        ...new Set(
+          companyCandidates.flatMap((candidate) => readinessMap.get(candidate.id)?.blockerIssueIds ?? []),
+        ),
+      ];
+      const completionById = new Map<string, Date | null>(
+        companyBlockerIssueIds.length === 0
+          ? []
+          : (
+              await db
+                .select({ id: issues.id, completedAt: issues.completedAt })
+                .from(issues)
+                .where(and(eq(issues.companyId, companyId), inArray(issues.id, companyBlockerIssueIds)))
+            ).map((row) => [row.id, row.completedAt] as const),
+      );
+
       for (const candidate of companyCandidates) {
         const agentId = candidate.assigneeAgentId;
         if (!agentId) continue;
@@ -5276,6 +5296,16 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           !resolvedBlockerIssueId
         ) {
           result.notReadySkipped += 1;
+          continue;
+        }
+
+        if (
+          shouldSuppressResolvedDependencyWakeForHistoricalBlockers({
+            blockedTransitionAt: candidate.blockedTransitionAt,
+            blockerCompletedAt: readiness.blockerIssueIds.map((blockerId) => completionById.get(blockerId) ?? null),
+          })
+        ) {
+          result.historicalBlockerSkipped += 1;
           continue;
         }
 
@@ -5452,6 +5482,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       dependencyWakeInteractionSkipped: 0,
       dependencyWakePauseHoldSkipped: 0,
       dependencyWakeNotReadySkipped: 0,
+      dependencyWakeHistoricalBlockerSkipped: 0,
       dependencyWakeCandidateLimitSkipped: 0,
       dependencyWakeDeferredOrFailed: 0,
       dependencyWakeEnqueueFailed: 0,
@@ -5471,6 +5502,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     result.dependencyWakeInteractionSkipped = dependencyWakeBackstop.interactionSkipped;
     result.dependencyWakePauseHoldSkipped = dependencyWakeBackstop.pauseHoldSkipped;
     result.dependencyWakeNotReadySkipped = dependencyWakeBackstop.notReadySkipped;
+    result.dependencyWakeHistoricalBlockerSkipped = dependencyWakeBackstop.historicalBlockerSkipped;
     result.dependencyWakeCandidateLimitSkipped = dependencyWakeBackstop.candidateLimitSkipped;
     result.dependencyWakeDeferredOrFailed = dependencyWakeBackstop.deferredOrFailed;
     result.dependencyWakeEnqueueFailed = dependencyWakeBackstop.enqueueFailed;

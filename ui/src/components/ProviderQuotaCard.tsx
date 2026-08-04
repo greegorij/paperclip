@@ -32,6 +32,8 @@ interface ProviderQuotaCardProps {
   quotaWindows?: QuotaWindow[];
   quotaError?: string | null;
   quotaSource?: string | null;
+  /** set when the reading succeeded but came from a degraded/fallback source */
+  quotaDegraded?: string | null;
   quotaLoading?: boolean;
 }
 
@@ -46,6 +48,7 @@ export function ProviderQuotaCard({
   quotaWindows = [],
   quotaError = null,
   quotaSource = null,
+  quotaDegraded = null,
   quotaLoading = false,
 }: ProviderQuotaCardProps) {
   // single-pass aggregation over rows — memoized so the 8 derived values are not
@@ -127,7 +130,8 @@ export function ProviderQuotaCard({
   const isCodexQuotaPanel = provider === "openai" && quotaSource?.startsWith("codex-");
   const supportsSubscriptionQuota = provider === "anthropic" || provider === "openai";
   const showSubscriptionQuotaSection =
-    supportsSubscriptionQuota && (quotaLoading || quotaWindows.length > 0 || quotaError != null);
+    supportsSubscriptionQuota
+    && (quotaLoading || quotaWindows.length > 0 || quotaError != null || quotaDegraded != null);
 
   return (
     <Card>
@@ -319,6 +323,12 @@ export function ProviderQuotaCard({
                   </span>
                 ) : null}
               </div>
+              {quotaDegraded && !quotaLoading ? (
+                <p className="text-xs text-(--status-task-todo)" title={quotaDegraded}>
+                  Degraded reading — primary source unavailable, served from{" "}
+                  {quotaSourceDisplayName(quotaSource ?? "")}. Windows may be incomplete.
+                </p>
+              ) : null}
               {quotaLoading ? (
                 <QuotaPanelSkeleton />
               ) : isClaudeQuotaPanel ? (

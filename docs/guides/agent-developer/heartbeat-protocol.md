@@ -126,3 +126,20 @@ Paperclip records run liveness as metadata on heartbeat runs. It is not an issue
 - Liveness continuation wake prompts include the attempt, source run, liveness state, liveness reason, and the instruction for the next heartbeat.
 - Continuations do not mark the issue `blocked` or `done`. If automatic continuations are exhausted, Paperclip leaves an audit comment so a human or manager can clarify, block, or assign follow-up work.
 - Workspace provisioning alone is not treated as concrete task progress. Durable progress should appear as tool/action events, issue comments, document or work-product revisions, activity log entries, commits, or tests.
+
+## Task Watchdogs
+
+When a watched task tree has no valid live path, Paperclip may create or reopen a
+dedicated watchdog review task. This is a bounded recovery check, not a second
+implementation pass:
+
+- The task receives the assignee's `cheap` model profile and a five-minute run
+  limit with a short graceful-interrupt period.
+- Its input is the stopped snapshot and heartbeat context. The agent should
+  produce one evidence-based disposition: confirm the current state or restore
+  one valid live path.
+- It must not broadly explore APIs or documentation when that supplied context
+  already answers the question.
+- A task watchdog never creates another task watchdog. It may create a normal,
+  narrowly scoped follow-up only when the evidence identifies a real system
+  blocker.

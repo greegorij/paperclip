@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyId": "jarvis-shadow-model-policy",
-  "version": "2026-08-01.1",
+  "version": "2026-08-02.1",
   "mode": "shadow",
   "providers": {
     "openai": {
@@ -170,6 +170,23 @@
         "mode": "subscription",
         "quotaSource": "cursor-subscription",
         "verifiedOn": "2026-08-01"
+      }
+    },
+    "codex-mini-latest": {
+      "provider": "openai",
+      "adapterType": "codex_local",
+      "allowedDataClasses": [
+        "public",
+        "internal",
+        "confidential",
+        "sanitized"
+      ],
+      "availability": "candidate",
+      "billing": "subscription",
+      "pricing": {
+        "mode": "subscription",
+        "quotaSource": "openai-codex-coding-subscription",
+        "verifiedOn": "2026-08-02"
       }
     }
   },
@@ -636,6 +653,47 @@
         "maxEscalations": 1,
         "maxDailyRuns": 1,
         "maxTokensPerRun": 120000,
+        "maxRunSeconds": 900,
+        "maxDailyTokens": 240000
+      }
+    },
+    "mi-sie-kodu-codex-szybki": {
+      "primary": {
+        "model": "codex-mini-latest",
+        "workspaceAccess": "rw"
+      },
+      "fallback": [
+        {
+          "model": "cursor-auto"
+        },
+        {
+          "model": "gpt-5.6-sol"
+        }
+      ],
+      "effort": "low",
+      "dataClass": "confidential",
+      "hardGates": [
+        "shadow-read-only",
+        "no-live-apply",
+        "no-secret-export",
+        "no-profile-change-in-run",
+        "approval-required"
+      ],
+      "escalation": {
+        "max": 1,
+        "when": [
+          "tool-failure",
+          "high-stakes",
+          "write-operation"
+        ],
+        "target": "stronger-model"
+      },
+      "validator": "independent-review",
+      "limits": {
+        "maxAttempts": 2,
+        "maxEscalations": 1,
+        "maxDailyRuns": 8,
+        "maxTokensPerRun": 60000,
         "maxRunSeconds": 900,
         "maxDailyTokens": 240000
       }

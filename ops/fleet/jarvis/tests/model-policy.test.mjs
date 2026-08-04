@@ -21,6 +21,7 @@ const SHADOW_EXPECTED_SLUGS = Object.freeze([
   "kurator-crm",
   "kurator-vaultu",
   "mi-sie-kodu-codex",
+  "mi-sie-kodu-codex-szybki",
   "mi-sie-kodu-cursor",
   "mi-sie-kodu-glm",
   "mi-sie-recenzji-glm",
@@ -510,10 +511,10 @@ test("validateModelPolicy rejects high-responsibility role without independent-r
   );
 });
 
-test("shadow model policy file validates for all 29 expected roles", () => {
-  assert.equal(SHADOW_EXPECTED_SLUGS.length, 29);
+test("shadow model policy file validates for all 30 expected roles", () => {
+  assert.equal(SHADOW_EXPECTED_SLUGS.length, 30);
   const policy = JSON.parse(readFileSync(SHADOW_POLICY_PATH, "utf8"));
-  assert.equal(Object.keys(policy.roles).length, 29);
+  assert.equal(Object.keys(policy.roles).length, 30);
   const result = validateModelPolicy({
     policy,
     expectedSlugs: SHADOW_EXPECTED_SLUGS,
@@ -535,4 +536,24 @@ test("shadow policy keeps Cursor default executor with a coding-model candidate 
 
   const fallbackModels = role.fallback.map((entry) => entry.model);
   assert.deepEqual(fallbackModels, ["gpt-5.3-codex-high", "gpt-5.6-sol"]);
+});
+
+test("shadow policy encodes fast Codex Mini muscle on a separate coding quota", () => {
+  const policy = JSON.parse(readFileSync(SHADOW_POLICY_PATH, "utf8"));
+  const role = policy.roles["mi-sie-kodu-codex-szybki"];
+  assert.ok(role);
+  assert.equal(role.primary.model, "codex-mini-latest");
+  assert.equal(role.effort, "low");
+  assert.equal(role.dataClass, "confidential");
+  assert.equal(role.validator, "independent-review");
+  assert.equal(role.limits.maxAttempts, 2);
+  assert.equal(role.limits.maxDailyRuns, 8);
+  assert.equal(role.limits.maxRunSeconds, 900);
+  assert.deepEqual(
+    role.fallback.map((entry) => entry.model),
+    ["cursor-auto", "gpt-5.6-sol"],
+  );
+  const catalog = policy.modelCatalog["codex-mini-latest"];
+  assert.equal(catalog.adapterType, "codex_local");
+  assert.equal(catalog.pricing.quotaSource, "openai-codex-coding-subscription");
 });

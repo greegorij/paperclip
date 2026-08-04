@@ -64,15 +64,28 @@ export function loadPackage(packageDir = PACKAGE_DIR) {
   };
 }
 
+/** Literal marker written by redactSecrets for secretId / secret-like fields. */
+export const SECRET_REDACTION_MARKER = "[redacted]";
+
 /** Redact secrets from objects before logging/reporting. */
 export function redactSecrets(value, depth = 0) {
   if (depth > 12) return "[truncated]";
   if (Array.isArray(value)) return value.map((v) => redactSecrets(v, depth + 1));
   if (value && typeof value === "object") {
     const out = {};
+    const record = value;
+    const bindingType = record.type;
     for (const [k, v] of Object.entries(value)) {
       if (/secret|token|password|api[_-]?key|authorization|bearer/i.test(k)) {
-        out[k] = typeof v === "string" && v ? "[redacted]" : v;
+        out[k] = typeof v === "string" && v ? SECRET_REDACTION_MARKER : redactSecrets(v, depth + 1);
+      } else if (
+        (bindingType === "secret_ref" || bindingType === "user_secret_ref")
+        && (k === "value" || k === "secretId")
+      ) {
+        // Never surface secret IDs or accidental plaintext values on ref objects.
+        out[k] = typeof v === "string" && v ? SECRET_REDACTION_MARKER : redactSecrets(v, depth + 1);
+      } else if (k === "value" && typeof v === "string" && /^(sk-|pcp_|ghp_|xox)/.test(v)) {
+        out[k] = SECRET_REDACTION_MARKER;
       } else {
         out[k] = redactSecrets(v, depth + 1);
       }
@@ -80,7 +93,7 @@ export function redactSecrets(value, depth = 0) {
     return out;
   }
   if (typeof value === "string" && /^(sk-|pcp_|ghp_|xox)/.test(value)) {
-    return "[redacted]";
+    return SECRET_REDACTION_MARKER;
   }
   return value;
 }

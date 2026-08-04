@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   mapCodexRpcQuota,
   minutesToWindowLabel,
+  secondsToWindowMinutes,
+  truncateDegradedNotice,
   toCodexAuthProbeDiagnostics,
   type CodexAuthInfo,
 } from "./quota.js";
@@ -24,6 +26,56 @@ describe("minutesToWindowLabel", () => {
     expect(minutesToWindowLabel(undefined, "Weekly limit")).toBe("Weekly limit");
     expect(minutesToWindowLabel(0, "5h limit")).toBe("5h limit");
     expect(minutesToWindowLabel(Number.NaN, "Weekly limit")).toBe("Weekly limit");
+  });
+});
+
+describe("secondsToWindowMinutes", () => {
+  it("converts provider seconds to minutes", () => {
+    expect(secondsToWindowMinutes(604_800)).toBe(10_080);
+    expect(secondsToWindowMinutes(18_000)).toBe(300);
+  });
+
+  it("returns null for missing or nonsensical durations", () => {
+    expect(secondsToWindowMinutes(null)).toBeNull();
+    expect(secondsToWindowMinutes(undefined)).toBeNull();
+    expect(secondsToWindowMinutes(0)).toBeNull();
+    expect(secondsToWindowMinutes(Number.NaN)).toBeNull();
+  });
+});
+
+describe("wham window labelling (regression: weekly window vanished on the fallback path)", () => {
+  // Pro plans report ONE window and it is the weekly one, in primary_window,
+  // with secondary_window null. Labelling by position called it "5h limit" and
+  // dropped the weekly row entirely. Label from the reported duration instead.
+  it("labels a 7-day primary_window as weekly", () => {
+    expect(
+      minutesToWindowLabel(secondsToWindowMinutes(604_800), "5h limit"),
+    ).toBe("Weekly limit");
+  });
+
+  it("still labels a 5h primary_window as 5h", () => {
+    expect(
+      minutesToWindowLabel(secondsToWindowMinutes(18_000), "5h limit"),
+    ).toBe("5h limit");
+  });
+
+  it("falls back to the positional label when the provider omits the duration", () => {
+    expect(minutesToWindowLabel(secondsToWindowMinutes(null), "5h limit")).toBe("5h limit");
+    expect(
+      minutesToWindowLabel(secondsToWindowMinutes(undefined), "Weekly limit"),
+    ).toBe("Weekly limit");
+  });
+});
+
+describe("truncateDegradedNotice", () => {
+  it("leaves short notices untouched", () => {
+    expect(truncateDegradedNotice("primary source unavailable")).toBe("primary source unavailable");
+  });
+
+  it("clamps unbounded subprocess output", () => {
+    const clamped = truncateDegradedNotice("x".repeat(5_000));
+    expect(clamped).toHaveLength(300);
+    expect(clamped.endsWith("…")).toBe(true);
   });
 });
 

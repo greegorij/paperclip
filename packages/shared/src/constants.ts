@@ -201,6 +201,15 @@ export const ISSUE_STATUSES = [
 ] as const;
 export type IssueStatus = (typeof ISSUE_STATUSES)[number];
 
+/** Issue statuses that are finished work — not counted as active child load. */
+export const TERMINAL_ISSUE_STATUSES = ["done", "cancelled"] as const;
+export type TerminalIssueStatus = (typeof TERMINAL_ISSUE_STATUSES)[number];
+export function isTerminalIssueStatus(
+  status: string | null | undefined,
+): status is TerminalIssueStatus {
+  return status === "done" || status === "cancelled";
+}
+
 export const INBOX_MINE_ISSUE_STATUSES = [
   "backlog",
   "todo",

@@ -3784,6 +3784,85 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
   });
 
+  it("releases the in_progress execution lock on manual cancel without queuing continuation recovery", async () => {
+    const { agentId, runId, issueId } = await seedRunFixture({
+      agentStatus: "running",
+      includeIssue: true,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const cancelled = await heartbeat.cancelRun(runId);
+    expect(cancelled?.status).toBe("cancelled");
+
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue).toMatchObject({
+      status: "in_progress",
+      assigneeAgentId: agentId,
+      executionRunId: null,
+      checkoutRunId: null,
+    });
+
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.id).toBe(runId);
+    expect(runs[0]?.status).toBe("cancelled");
+
+    const continuationWakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.agentId, agentId),
+          eq(agentWakeupRequests.reason, "issue_continuation_needed"),
+        ),
+      );
+    expect(continuationWakeups).toHaveLength(0);
+  });
+
+  it("releases the in_progress execution lock on agent pause cancel without queuing continuation recovery", async () => {
+    const { agentId, runId, issueId } = await seedRunFixture({
+      agentStatus: "paused",
+      includeIssue: true,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const cancelledCount = await heartbeat.cancelActiveForAgent(agentId);
+    expect(cancelledCount).toBe(1);
+
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue).toMatchObject({
+      status: "in_progress",
+      assigneeAgentId: agentId,
+      executionRunId: null,
+      checkoutRunId: null,
+    });
+    // Pause cancel must not escalate the parked card to blocked either.
+    expect(issue?.status).toBe("in_progress");
+
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.id).toBe(runId);
+    expect(runs[0]?.status).toBe("cancelled");
+    expect(runs[0]?.errorCode).toBe("agent_paused");
+
+    const continuationWakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.agentId, agentId),
+          eq(agentWakeupRequests.reason, "issue_continuation_needed"),
+        ),
+      );
+    expect(continuationWakeups).toHaveLength(0);
+
+    const recoveryActions = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId));
+    expect(recoveryActions).toHaveLength(0);
+  });
+
   it("records operator interrupt cancellation metadata without changing terminal status", async () => {
     const { runId, issueId } = await seedRunFixture({
       agentStatus: "running",

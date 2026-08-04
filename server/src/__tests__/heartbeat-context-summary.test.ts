@@ -69,7 +69,62 @@ describe("buildPaperclipTaskMarkdown", () => {
 
     expect(acceptedConfirmation).toContain("Accepted plan directive:");
     expect(acceptedConfirmation).toContain("Create child issues from the approved plan only");
+    expect(acceptedConfirmation).toContain(
+      "supersedes any planning-only constraints in the original issue description",
+    );
     expect(acceptedConfirmation).not.toContain("- Work mode: \"planning\"");
+  });
+
+  it("frames the original description as superseded scope on accepted-plan continuation", () => {
+    const planningDescription = [
+      "Plan the rollout only.",
+      "Do not create child issues yet — wait for board confirmation.",
+      "Scope: auth middleware, session refresh, and audit logging.",
+    ].join("\n");
+
+    const acceptedConfirmation = buildPaperclipTaskMarkdown({
+      issue: {
+        id: "issue-plan-accept",
+        identifier: "PAP-418",
+        title: "Plan the rollout",
+        workMode: "planning",
+        description: planningDescription,
+      },
+      interaction: {
+        kind: "request_confirmation",
+        status: "accepted",
+      },
+    });
+
+    expect(acceptedConfirmation).toContain("Create child issues from the approved plan only");
+    expect(acceptedConfirmation).toContain(
+      "supersedes any planning-only constraints in the original issue description",
+    );
+    expect(acceptedConfirmation).toContain(
+      "Original issue description (scope/background only; superseded where it conflicts with the accepted-plan directive above):",
+    );
+    expect(acceptedConfirmation).toContain("Scope: auth middleware, session refresh, and audit logging.");
+    expect(acceptedConfirmation).toContain("Do not create child issues yet — wait for board confirmation.");
+    expect(acceptedConfirmation).not.toContain("\nIssue description:\n");
+    expect(acceptedConfirmation).not.toContain("Make the plan only.");
+
+    const standardContinuation = buildPaperclipTaskMarkdown({
+      issue: {
+        id: "issue-plan-accept-standard",
+        identifier: "PAP-419",
+        title: "Ship after plan accept",
+        workMode: "standard",
+        description: planningDescription,
+      },
+      acceptedPlanContinuation: true,
+    });
+
+    expect(standardContinuation).toContain("Accepted plan directive:");
+    expect(standardContinuation).toContain(
+      "Original issue description (scope/background only; superseded where it conflicts with the accepted-plan directive above):",
+    );
+    expect(standardContinuation).toContain("Scope: auth middleware, session refresh, and audit logging.");
+    expect(standardContinuation).not.toContain("\nIssue description:\n");
   });
 
   it("adds answer-only guidance for ask-mode issues", () => {

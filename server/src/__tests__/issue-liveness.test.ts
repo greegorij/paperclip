@@ -152,6 +152,41 @@ describe("issue graph liveness classifier", () => {
     expect(findings).toEqual([]);
   });
 
+  it("detects an assigned todo blocker leaf with no action path as stopped, not live", () => {
+    const findings = classifyIssueGraphLiveness({
+      issues: [
+        issue(),
+        issue({
+          id: blockerId,
+          identifier: "PAP-1704",
+          title: "Assigned but unwoken unblock work",
+          status: "todo",
+          assigneeAgentId: "blocker-agent",
+        }),
+      ],
+      relations: blocks,
+      agents: [
+        agent(),
+        manager,
+        agent({ id: "blocker-agent", name: "Blocker Agent", reportsTo: managerId }),
+      ],
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      issueId: blockedId,
+      identifier: "PAP-1703",
+      state: "blocked_by_assigned_issue_without_action_path",
+      recoveryIssueId: blockerId,
+      recommendedOwnerAgentId: "blocker-agent",
+      dependencyPath: [
+        expect.objectContaining({ issueId: blockedId }),
+        expect.objectContaining({ issueId: blockerId, status: "todo" }),
+      ],
+      incidentKey: `harness_liveness:${companyId}:${blockedId}:blocked_by_assigned_issue_without_action_path:${blockerId}`,
+    });
+  });
+
   it("detects an assigned backlog blocker leaf with no action path", () => {
     const findings = classifyIssueGraphLiveness({
       issues: [

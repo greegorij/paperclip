@@ -4444,6 +4444,191 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(child.executionWorkspaceId).toBe(executionWorkspaceId);
   });
 
+  it("inherits parent projectId on the public agent-style create path when projectId is omitted", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const parentIssueId = randomUUID();
+    const agentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Parent project",
+      status: "in_progress",
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Worker",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      projectId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+
+    // Agents create children via POST /companies/:id/issues with parentId
+    // (not createChild). projectId is typically omitted and must be inherited.
+    const child = await svc.create(companyId, {
+      parentId: parentIssueId,
+      title: "Agent follow-up",
+      status: "todo",
+      priority: "medium",
+      createdByAgentId: agentId,
+      originKind: "manual",
+    });
+
+    expect(child.parentId).toBe(parentIssueId);
+    expect(child.projectId).toBe(projectId);
+  });
+
+  it("rejects explicit child projectId mismatch against the parent with 422", async () => {
+    const companyId = randomUUID();
+    const parentProjectId = randomUUID();
+    const otherProjectId = randomUUID();
+    const parentIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(projects).values([
+      {
+        id: parentProjectId,
+        companyId,
+        name: "Parent project",
+        status: "in_progress",
+      },
+      {
+        id: otherProjectId,
+        companyId,
+        name: "Other project",
+        status: "in_progress",
+      },
+    ]);
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      projectId: parentProjectId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+    });
+
+    await expect(svc.create(companyId, {
+      parentId: parentIssueId,
+      projectId: otherProjectId,
+      title: "Cross-project child",
+    })).rejects.toMatchObject({
+      status: 422,
+      message: "Child issue projectId must match parent issue projectId",
+    });
+  });
+
+  it("rejects child executionWorkspaceId from a different project than the parent with 422", async () => {
+    const companyId = randomUUID();
+    const parentProjectId = randomUUID();
+    const otherProjectId = randomUUID();
+    const parentIssueId = randomUUID();
+    const parentProjectWorkspaceId = randomUUID();
+    const otherProjectWorkspaceId = randomUUID();
+    const foreignExecutionWorkspaceId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+
+    await db.insert(projects).values([
+      {
+        id: parentProjectId,
+        companyId,
+        name: "Parent project",
+        status: "in_progress",
+      },
+      {
+        id: otherProjectId,
+        companyId,
+        name: "Other project",
+        status: "in_progress",
+      },
+    ]);
+
+    await db.insert(projectWorkspaces).values([
+      {
+        id: parentProjectWorkspaceId,
+        companyId,
+        projectId: parentProjectId,
+        name: "Parent workspace",
+        isPrimary: true,
+      },
+      {
+        id: otherProjectWorkspaceId,
+        companyId,
+        projectId: otherProjectId,
+        name: "Other workspace",
+        isPrimary: true,
+      },
+    ]);
+
+    await db.insert(executionWorkspaces).values({
+      id: foreignExecutionWorkspaceId,
+      companyId,
+      projectId: otherProjectId,
+      projectWorkspaceId: otherProjectWorkspaceId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      name: "Foreign worktree",
+      status: "active",
+      providerType: "git_worktree",
+    });
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      projectId: parentProjectId,
+      projectWorkspaceId: parentProjectWorkspaceId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+    });
+
+    await expect(svc.create(companyId, {
+      parentId: parentIssueId,
+      title: "Child with foreign execution workspace",
+      executionWorkspaceId: foreignExecutionWorkspaceId,
+    })).rejects.toMatchObject({
+      status: 422,
+      message: "Execution workspace must belong to the selected project",
+    });
+  });
+
   it("rejects explicitly pinned isolated git worktrees without a project or reusable workspace", async () => {
     const companyId = randomUUID();
 

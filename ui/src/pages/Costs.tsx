@@ -508,6 +508,16 @@ export function Costs() {
     return map;
   }, [quotaData]);
 
+  const quotaDegradedByProvider = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const result of quotaData ?? []) {
+      if (result.ok && typeof result.degraded === "string" && result.degraded.length > 0) {
+        map.set(result.provider, result.degraded);
+      }
+    }
+    return map;
+  }, [quotaData]);
+
   const quotaSourcesByProvider = useMemo(() => {
     const map = new Map<string, string>();
     for (const result of quotaData ?? []) {
@@ -1101,6 +1111,7 @@ export function Costs() {
                           quotaWindows={quotaWindowsByProvider.get(provider) ?? []}
                           quotaError={quotaErrorsByProvider.get(provider) ?? null}
                           quotaSource={quotaSourcesByProvider.get(provider) ?? null}
+                          quotaDegraded={quotaDegradedByProvider.get(provider) ?? null}
                           quotaLoading={quotaLoading}
                         />
                       ))}
@@ -1121,6 +1132,7 @@ export function Costs() {
                       quotaWindows={quotaWindowsByProvider.get(provider) ?? []}
                       quotaError={quotaErrorsByProvider.get(provider) ?? null}
                       quotaSource={quotaSourcesByProvider.get(provider) ?? null}
+                      quotaDegraded={quotaDegradedByProvider.get(provider) ?? null}
                       quotaLoading={quotaLoading}
                     />
                   </TabsContent>

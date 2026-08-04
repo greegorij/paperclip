@@ -29,8 +29,10 @@ export function assertSnapshotCompleteness(snap, {
   expectedPortableCount = FLEET_INVARIANTS.portableAgentCount,
   expectedBuiltInCount = FLEET_INVARIANTS.managedBuiltInCount,
   requiredBuiltInKeys = FLEET_INVARIANTS.requiredBuiltInKeys,
+  allowEmptyInstructionsRepair = false,
 } = {}) {
   const errors = [];
+  const warnings = [];
   const agents = snap?.agents ?? [];
   const builtIns = snap?.builtIns ?? [];
   const skillSnapshots = snap?.skillSnapshots ?? [];
@@ -191,11 +193,22 @@ export function assertSnapshotCompleteness(snap, {
 
   for (const agent of agents) {
     const label = agent.slug ?? agent.name ?? agent.id;
+    const slug = typeof agent.slug === "string" && agent.slug.trim() !== ""
+      ? agent.slug
+      : null;
+    const isBuiltIn = Boolean(builtInKey(agent));
     if (!nonEmptyInstructions(agent.instructions)) {
-      errors.push({
+      // Built-ins are never repairable via empty-bundle seed — always errors.
+      const repairable = allowEmptyInstructionsRepair && !isBuiltIn;
+      const item = {
         code: "agent-instructions-empty",
-        message: `${label}: AGENTS.md missing/empty after trim`,
-      });
+        ...(slug ? { slug } : {}),
+        message: repairable
+          ? `${label}: AGENTS.md missing/empty after trim (repairable via apply empty-bundle seed)`
+          : `${label}: AGENTS.md missing/empty after trim`,
+      };
+      if (repairable) warnings.push(item);
+      else errors.push(item);
     }
     if (!Array.isArray(agent.desiredSkills)) {
       errors.push({
@@ -256,6 +269,7 @@ export function assertSnapshotCompleteness(snap, {
   return {
     ok: errors.length === 0,
     errors,
+    warnings,
     portableCount: portableAgents.length,
     builtInCount: builtIns.length,
   };

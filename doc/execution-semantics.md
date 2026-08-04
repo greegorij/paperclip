@@ -338,6 +338,12 @@ A board comment can be an interrupt, an ownership change, both, or neither. Pape
 
 An interrupt stops the current live execution path for the issue. It does not, by itself, select the next owner. If an active run is interrupted by the board, the run may still terminate with the underlying `cancelled` status, but the issue activity and wake context should make the operator intent visible as an interruption rather than an unexplained runtime failure.
 
+### Manual stop and agent pause
+
+A board/control-plane run cancel and an agent pause that cancels active runs are intentional stops. They must release the issue execution/checkout lock for the cancelled run, but they must **not** auto-queue `issue_continuation_needed` or `assignment_recovery` for a still-open agent-owned `todo` / `in_progress` card.
+
+That differs from crash/restart and process-loss continuity recovery, where a cancelled/failed/timed-out run with no remaining live path may queue one bounded automatic recovery wake. Manual stop and pause leave the issue parked for an explicit later wake (resume, reassignment, comment wake, monitor, or operator action). Already-queued work for other reasons is unaffected; only the immediate lock-release recovery path is suppressed.
+
 An ownership change selects who owns the issue after the comment is committed:
 
 - setting `assigneeAgentId` makes the named agent the owner
@@ -740,6 +746,8 @@ Examples:
 - requeue one dispatch wake for an assigned `todo` issue whose latest run failed, timed out, or was cancelled
 - requeue one continuation wake for an assigned `in_progress` issue whose live execution path disappeared
 - assign an orphan blocker back to its creator when that blocker is already preventing other work
+
+Exceptions: a board/control-plane cancel of the active run, and cancellation of active runs during agent pause, release the execution lock without auto-recovery (see Manual stop and agent pause). Daily-cap and provider-quota gate cancellations use the same suppress-immediate-recovery contract.
 
 Auto-recovery preserves the existing owner. It does not choose a replacement agent.
 

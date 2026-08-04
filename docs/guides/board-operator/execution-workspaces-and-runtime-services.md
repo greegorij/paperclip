@@ -43,6 +43,7 @@ Issues are attached to execution workspace behavior, not to automatic runtime ma
 
 - An issue may create a new execution workspace when you choose an isolated workspace mode.
 - An issue may reuse an existing execution workspace when you choose reuse.
+- Ask and planning issues are read-only work: they do not reuse an execution workspace even if an earlier issue left one selected.
 - Multiple issues may intentionally share one execution workspace so they can work against the same branch and running runtime services.
 - Assigning or running an issue does not automatically start or stop workspace services for that workspace.
 

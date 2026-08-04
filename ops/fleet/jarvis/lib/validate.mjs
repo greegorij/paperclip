@@ -10,6 +10,7 @@ import {
 } from "./fleet-invariants.mjs";
 import { assertSnapshotCompleteness } from "./snapshot-completeness.mjs";
 import { detectProviderProfileState } from "./profile-switch.mjs";
+import { loadValidatedRuntimeCapabilities } from "./runtime-capabilities.mjs";
 
 function expectedModelForAgent(slug, adapterType, modelsDesired) {
   const explicit = modelsDesired.agents[slug];
@@ -116,6 +117,15 @@ const MANAGED_RUNTIME_ADAPTER_CONFIG_KEYS = Object.freeze([
   "extraArgs",
 ]);
 
+const FAST_CODEX_RUNTIME_SLUG = "mi-sie-kodu-codex-szybki";
+const FAST_CODEX_TIMEOUT_SEC = 900;
+const FAST_CODEX_OUTPUT_INACTIVITY_TIMEOUT_MS = 360000;
+const FAST_CODEX_ADAPTER_CONFIG_KEYS = Object.freeze([
+  ...MANAGED_RUNTIME_ADAPTER_CONFIG_KEYS,
+  "timeoutSec",
+  "outputInactivityTimeoutMs",
+]);
+
 const MANAGED_RUNTIME_HEARTBEAT_KEYS = Object.freeze([
   "enabled",
   "wakeOnDemand",
@@ -135,6 +145,7 @@ function validateExpectedRuntimePolicyShape(agent, errors) {
 
   const isManagedOpenAiPolicy =
     "status" in policy || "adapterType" in policy || "model" in policy || "heartbeat" in policy;
+  const isFastCodexRuntime = agent.slug === FAST_CODEX_RUNTIME_SLUG;
 
   if (isManagedOpenAiPolicy) {
     if (!hasExactObjectKeys(policy, MANAGED_RUNTIME_POLICY_KEYS)) {
@@ -169,11 +180,14 @@ function validateExpectedRuntimePolicyShape(agent, errors) {
     }
   }
 
-  if (typeof policy.maxConcurrentRuns === "number" && policy.maxConcurrentRuns !== 1) {
-    errors.push({
-      code: "runtime-policy-max-concurrent",
-      message: `${agent.slug}: expectedRuntimePolicy.maxConcurrentRuns must equal 1`,
-    });
+  if (typeof policy.maxConcurrentRuns === "number") {
+    const expectedMaxConcurrentRuns = isFastCodexRuntime ? 2 : 1;
+    if (policy.maxConcurrentRuns !== expectedMaxConcurrentRuns) {
+      errors.push({
+        code: "runtime-policy-max-concurrent",
+        message: `${agent.slug}: expectedRuntimePolicy.maxConcurrentRuns must equal ${expectedMaxConcurrentRuns}`,
+      });
+    }
   }
 
   const adapterConfig = policy.adapterConfig;
@@ -183,11 +197,30 @@ function validateExpectedRuntimePolicyShape(agent, errors) {
       message: `${agent.slug}: expectedRuntimePolicy.adapterConfig must be an object`,
     });
   } else {
-    if (isManagedOpenAiPolicy && !hasExactObjectKeys(adapterConfig, MANAGED_RUNTIME_ADAPTER_CONFIG_KEYS)) {
-      errors.push({
-        code: "runtime-policy-adapter-config-structure",
-        message: `${agent.slug}: expectedRuntimePolicy.adapterConfig must include exactly ${MANAGED_RUNTIME_ADAPTER_CONFIG_KEYS.join(", ")}`,
-      });
+    if (isManagedOpenAiPolicy) {
+      const expectedAdapterKeys = isFastCodexRuntime
+        ? FAST_CODEX_ADAPTER_CONFIG_KEYS
+        : MANAGED_RUNTIME_ADAPTER_CONFIG_KEYS;
+      if (!hasExactObjectKeys(adapterConfig, expectedAdapterKeys)) {
+        errors.push({
+          code: "runtime-policy-adapter-config-structure",
+          message: `${agent.slug}: expectedRuntimePolicy.adapterConfig must include exactly ${expectedAdapterKeys.join(", ")}`,
+        });
+      }
+      if (isFastCodexRuntime) {
+        if (adapterConfig.timeoutSec !== FAST_CODEX_TIMEOUT_SEC) {
+          errors.push({
+            code: "runtime-policy-timeout",
+            message: `${agent.slug}: adapterConfig.timeoutSec must equal ${FAST_CODEX_TIMEOUT_SEC}`,
+          });
+        }
+        if (adapterConfig.outputInactivityTimeoutMs !== FAST_CODEX_OUTPUT_INACTIVITY_TIMEOUT_MS) {
+          errors.push({
+            code: "runtime-policy-inactivity-timeout",
+            message: `${agent.slug}: adapterConfig.outputInactivityTimeoutMs must equal ${FAST_CODEX_OUTPUT_INACTIVITY_TIMEOUT_MS}`,
+          });
+        }
+      }
     }
     if (adapterConfig.filesystemScope !== "workspace") {
       errors.push({
@@ -297,7 +330,7 @@ export function validateFleet({
   } else {
     ok.push({
       code: "fleet-invariant",
-      message: `29 = ${FLEET_INVARIANTS.portableAgentCount} portable + ${FLEET_INVARIANTS.managedBuiltInCount} built-ins`,
+      message: `30 = ${FLEET_INVARIANTS.portableAgentCount} portable + ${FLEET_INVARIANTS.managedBuiltInCount} built-ins`,
     });
   }
 
@@ -376,6 +409,26 @@ export function validateFleet({
           message: `${slug} still has forbidden skill ${forbidden}`,
         });
       }
+    }
+  }
+
+  // Runtime capabilities (additive sandbox grants) — fail-closed when present/invalid
+  {
+    const knownSlugs = [
+      ...(desired.agents?.agents ?? []).map((agent) => agent.slug),
+      "summarizer",
+      "reflection-coach",
+    ];
+    const runtimeCapabilities = loadValidatedRuntimeCapabilities(desiredDir, { knownSlugs });
+    if (!runtimeCapabilities.ok) {
+      for (const message of runtimeCapabilities.errors) {
+        errors.push({ code: "runtime-capabilities-invalid", message });
+      }
+    } else {
+      ok.push({
+        code: "runtime-capabilities-valid",
+        message: `runtime-capabilities.json schemaVersion ${runtimeCapabilities.doc?.schemaVersion} ok`,
+      });
     }
   }
 
@@ -476,7 +529,9 @@ export function validateFleet({
 
   if (liveSnapshot) {
     const switchableSlugs = new Set((desired.profiles?.switchableAgents ?? []).map(String));
-    const completeness = assertSnapshotCompleteness(liveSnapshot);
+    const completeness = assertSnapshotCompleteness(liveSnapshot, {
+      allowEmptyInstructionsRepair: forApply,
+    });
     if (!completeness.ok) {
       for (const item of completeness.errors) {
         errors.push(item);
@@ -487,10 +542,28 @@ export function validateFleet({
         message: "Snapshot completeness object and counters match arrays",
       });
     }
+    for (const item of completeness.warnings ?? []) {
+      if (forApply) warnings.push(item);
+      else errors.push(item);
+    }
     if (desired.profiles) {
+      const knownSlugs = [
+        ...(desired.agents?.agents ?? []).map((agent) => agent.slug),
+        "summarizer",
+        "reflection-coach",
+      ];
+      const runtimeCapabilities = loadValidatedRuntimeCapabilities(desiredDir, { knownSlugs });
+      if (!runtimeCapabilities.ok) {
+        for (const message of runtimeCapabilities.errors) {
+          errors.push({ code: "runtime-capabilities-invalid", message });
+        }
+      }
       const providerState = detectProviderProfileState({
         profilesDoc: desired.profiles,
         liveSnapshot,
+        runtimeCapabilitiesBySlug: runtimeCapabilities.ok ? runtimeCapabilities.bySlug : null,
+        // Standard (redacted) snapshots keep secretId as [redacted]; allow only for offline detect.
+        allowRedactedSecretRefs: true,
       });
       if (!providerState.ok) {
         errors.push({
@@ -517,7 +590,7 @@ export function validateFleet({
         message: `Live has ${liveAgents.length} agents, expected ${FLEET_INVARIANTS.expectedLiveAgentCount}`,
       });
     } else {
-      ok.push({ code: "live-agent-count", message: "29 live agents" });
+      ok.push({ code: "live-agent-count", message: "30 live agents" });
     }
 
     const skillSnapByAgent = new Map(
@@ -537,10 +610,21 @@ export function validateFleet({
       }
       const instructions = resolveAgentInstructions(agent, liveSnapshot);
       if (instructions == null || String(instructions).trim() === "") {
-        errors.push({
+        const packageInstructions = !isBuiltIn && agent.slug
+          ? pkg.agentBySlug?.[agent.slug]?.instructions
+          : null;
+        const repairable =
+          forApply
+          && typeof packageInstructions === "string"
+          && packageInstructions.trim().length > 0;
+        const item = {
           code: "agent-instructions-missing",
-          message: `${label}: instructions missing/empty from snapshot`,
-        });
+          message: repairable
+            ? `${label}: instructions missing/empty from snapshot (repairable from package AGENTS.md)`
+            : `${label}: instructions missing/empty from snapshot`,
+        };
+        if (repairable) warnings.push(item);
+        else errors.push(item);
       }
       if (!skillSnapByAgent.has(agent.id)) {
         errors.push({

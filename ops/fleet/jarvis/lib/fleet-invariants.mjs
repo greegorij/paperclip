@@ -3,8 +3,8 @@
  * validate that overlays match these constants, and that live snapshots satisfy them.
  */
 export const FLEET_INVARIANTS = Object.freeze({
-  expectedLiveAgentCount: 29,
-  portableAgentCount: 27,
+  expectedLiveAgentCount: 30,
+  portableAgentCount: 28,
   managedBuiltInCount: 2,
   requiredBuiltInKeys: Object.freeze(["summarizer", "reflection-coach"]),
 });

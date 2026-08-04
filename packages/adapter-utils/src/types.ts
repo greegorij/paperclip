@@ -353,6 +353,11 @@ export interface ProviderQuotaResult {
   errorFamily?: AdapterExecutionErrorFamily | null;
   /** error message when ok is false */
   error?: string;
+  /**
+   * Set when ok is true but the reading came from a degraded/fallback source.
+   * Carries why the primary source was skipped, so a silent downgrade stays visible.
+   */
+  degraded?: string | null;
   windows: QuotaWindow[];
 }
 

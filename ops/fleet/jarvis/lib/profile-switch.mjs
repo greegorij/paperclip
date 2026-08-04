@@ -15,9 +15,17 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { assertBackupGate } from "./backup-gate.mjs";
 import { createApiClient } from "./api-client.mjs";
-import { generateCodexJarvisInstructions } from "./codex-jarvis-instructions.mjs";
-import { loadDesired, redactSecrets } from "./load.mjs";
-import { DESIRED_DIR } from "./paths.mjs";
+import {
+  generateCodexJarvisArtifacts,
+  JARVIS_CODEX_COMPACT_ENTRY_FILE,
+  JARVIS_CODEX_FULL_ENTRY_FILE,
+} from "./codex-jarvis-instructions.mjs";
+import { loadDesired, loadPackage, redactSecrets, SECRET_REDACTION_MARKER } from "./load.mjs";
+import {
+  applyRuntimeCapabilitiesToAdapterConfig,
+  loadValidatedRuntimeCapabilities,
+} from "./runtime-capabilities.mjs";
+import { DESIRED_DIR, PACKAGE_DIR } from "./paths.mjs";
 import { snapshotFleet } from "./snapshot.mjs";
 
 const MODEL_POLICY_FILENAME = "model-policy.shadow.v1.json";
@@ -45,6 +53,25 @@ const PRESERVED_ADAPTER_CONFIG_KEYS = Object.freeze([
   "agentsMdPath",
   "paperclipSkillSync",
 ]);
+/** Mirrors packages/shared envBindingSecretRefSchema / envBindingUserSecretRefSchema (local, no package dep). */
+const SECRET_REF_ALLOWED_KEYS = Object.freeze([
+  "type",
+  "secretId",
+  "version",
+  "projectionClass",
+  "projectionAllowlistKey",
+]);
+const USER_SECRET_REF_ALLOWED_KEYS = Object.freeze([
+  "type",
+  "key",
+  "version",
+  "required",
+  "allowMissingOverride",
+]);
+const SECRET_PROJECTION_CLASSES = Object.freeze(["unclassified", "class_3_static_lease"]);
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const USER_SECRET_KEY_RE = /^[a-zA-Z0-9_.-]{1,120}$/;
 const REQUIRED_PROFILES = Object.freeze(["openai-first", "anthropic-first"]);
 const PATCH_TIMEOUT_SEC = 1200;
 const PATCH_INACTIVITY_TIMEOUT_MS = 600000;
@@ -55,8 +82,17 @@ const ANTHROPIC_WORKER_CONFIG_ENV = "JARVIS_CLAUDE_WORKER_CONFIG_DIR";
 const ANTHROPIC_BOSS_CONFIG_ENV = "JARVIS_CLAUDE_BOSS_CONFIG_DIR";
 const BOSS_INSTRUCTIONS_SOURCE_ENV = "JARVIS_CLAUDE_BOSS_INSTRUCTIONS_FILE";
 const JARVIS_SLUG = "jarvis";
-const JARVIS_CODEX_AGENTS_FILE = "AGENTS-CODEX.md";
+/** Audit/reference full harness — parity-checked, not the openai-first runtime entry. */
+const JARVIS_CODEX_FULL_AGENTS_FILE = JARVIS_CODEX_FULL_ENTRY_FILE;
+/** Runtime entrypoint materialized + pointed by openai-first instructionsEntryFile. */
+const JARVIS_CODEX_AGENTS_FILE = JARVIS_CODEX_COMPACT_ENTRY_FILE;
 const JARVIS_ANTHROPIC_AGENTS_FILE = "AGENTS.md";
+const JARVIS_CODEX_FULL_ARTIFACT_RELATIVE = path.join(
+  "package",
+  "agents",
+  "jarvis",
+  JARVIS_CODEX_FULL_AGENTS_FILE,
+);
 const JARVIS_CODEX_ARTIFACT_RELATIVE = path.join(
   "package",
   "agents",
@@ -281,31 +317,44 @@ function buildOpenAiJarvisArtifact({ desiredDir, runtimeEnv = process.env }) {
     envName: BOSS_INSTRUCTIONS_SOURCE_ENV,
   });
   const cockpitPath = resolveJarvisPath(desiredDir, path.join("package", "agents", JARVIS_SLUG, "AGENTS.md"));
-  const codexPath = resolveJarvisPath(desiredDir, JARVIS_CODEX_ARTIFACT_RELATIVE);
+  const fullPath = resolveJarvisPath(desiredDir, JARVIS_CODEX_FULL_ARTIFACT_RELATIVE);
+  const compactPath = resolveJarvisPath(desiredDir, JARVIS_CODEX_ARTIFACT_RELATIVE);
   if (!existsSync(cockpitPath)) {
     throw new Error(`cockpit AGENTS.md not found: ${cockpitPath}`);
   }
-  if (!existsSync(codexPath)) {
-    throw new Error(`committed AGENTS-CODEX.md not found: ${codexPath}`);
+  if (!existsSync(fullPath)) {
+    throw new Error(`committed ${JARVIS_CODEX_FULL_AGENTS_FILE} not found: ${fullPath}`);
+  }
+  if (!existsSync(compactPath)) {
+    throw new Error(`committed ${JARVIS_CODEX_AGENTS_FILE} not found: ${compactPath}`);
   }
   const source = readFileSync(sourcePath, "utf8");
   const cockpit = readFileSync(cockpitPath, "utf8");
-  const committed = readFileSync(codexPath, "utf8");
-  const generated = generateCodexJarvisInstructions({
+  const committedFull = readFileSync(fullPath, "utf8");
+  const committedCompact = readFileSync(compactPath, "utf8");
+  const generated = generateCodexJarvisArtifacts({
     headlessBossClaude: source,
     cockpitAgentsMd: cockpit,
   });
-  if (generated.content !== committed) {
+  if (generated.full.content !== committedFull) {
     throw new Error(
-      `AGENTS-CODEX.md mismatch (generated=${hashPrefix(generated.content)} committed=${hashPrefix(committed)})`,
+      `${JARVIS_CODEX_FULL_AGENTS_FILE} mismatch (generated=${hashPrefix(generated.full.content)} committed=${hashPrefix(committedFull)})`,
+    );
+  }
+  if (generated.compact.content !== committedCompact) {
+    throw new Error(
+      `${JARVIS_CODEX_AGENTS_FILE} mismatch (generated=${hashPrefix(generated.compact.content)} committed=${hashPrefix(committedCompact)})`,
     );
   }
   return {
     sourcePath,
-    sourceSha256: generated.sourceSha256,
-    cockpitSha256: generated.cockpitSha256,
-    content: committed,
-    contentHashPrefix: hashPrefix(committed),
+    sourceSha256: generated.full.sourceSha256,
+    cockpitSha256: generated.full.cockpitSha256,
+    content: committedCompact,
+    contentHashPrefix: hashPrefix(committedCompact),
+    fullContent: committedFull,
+    fullContentHashPrefix: hashPrefix(committedFull),
+    entryFile: JARVIS_CODEX_AGENTS_FILE,
   };
 }
 
@@ -500,11 +549,161 @@ export function validateProviderProfilesDocument({
   };
 }
 
-function preserveManagedAdapterConfigFields(liveAdapterConfig) {
+function isSecretVersionSelector(value) {
+  return value === "latest" || (Number.isInteger(value) && value > 0);
+}
+
+/**
+ * Strict local parse of a Paperclip secret_ref object.
+ * Fail-closed on malformed shapes; never accepts or preserves plaintext values.
+ * When allowRedactedSecretRefs is true (offline detect/preview only), the literal
+ * SECRET_REDACTION_MARKER is accepted as secretId so redacted snapshots still deep-equal.
+ * Mutating paths must leave the flag false and fail closed on the marker.
+ */
+function parseSecretRefBinding(record, label, { allowRedactedSecretRefs = false } = {}) {
+  const unknown = Object.keys(record).filter((key) => !SECRET_REF_ALLOWED_KEYS.includes(key));
+  if (unknown.length > 0) {
+    throw new Error(`malformed secret_ref at ${label}: unexpected fields ${unknown.join(", ")}`);
+  }
+  const secretIdOk = typeof record.secretId === "string"
+    && (
+      UUID_RE.test(record.secretId)
+      || (allowRedactedSecretRefs === true && record.secretId === SECRET_REDACTION_MARKER)
+    );
+  if (!secretIdOk) {
+    throw new Error(
+      allowRedactedSecretRefs
+        ? `malformed secret_ref at ${label}: secretId must be a uuid or ${SECRET_REDACTION_MARKER}`
+        : `malformed secret_ref at ${label}: secretId must be a uuid`,
+    );
+  }
+  const out = {
+    type: "secret_ref",
+    secretId: record.secretId,
+  };
+  if (record.version !== undefined) {
+    if (!isSecretVersionSelector(record.version)) {
+      throw new Error(`malformed secret_ref at ${label}: version must be "latest" or a positive integer`);
+    }
+    out.version = record.version;
+  }
+  if (record.projectionClass !== undefined) {
+    if (!SECRET_PROJECTION_CLASSES.includes(record.projectionClass)) {
+      throw new Error(
+        `malformed secret_ref at ${label}: projectionClass must be one of ${SECRET_PROJECTION_CLASSES.join(", ")}`,
+      );
+    }
+    out.projectionClass = record.projectionClass;
+  }
+  if (record.projectionAllowlistKey !== undefined) {
+    if (record.projectionAllowlistKey !== null) {
+      if (
+        typeof record.projectionAllowlistKey !== "string"
+        || record.projectionAllowlistKey.trim() === ""
+        || record.projectionAllowlistKey.trim().length > 160
+      ) {
+        throw new Error(
+          `malformed secret_ref at ${label}: projectionAllowlistKey must be null or a non-empty string (<=160)`,
+        );
+      }
+      out.projectionAllowlistKey = record.projectionAllowlistKey.trim();
+    } else {
+      out.projectionAllowlistKey = null;
+    }
+  }
+  return out;
+}
+
+/**
+ * Strict local parse of a Paperclip user_secret_ref object.
+ * Fail-closed on malformed shapes; never accepts plaintext values.
+ */
+function parseUserSecretRefBinding(record, label) {
+  const unknown = Object.keys(record).filter((key) => !USER_SECRET_REF_ALLOWED_KEYS.includes(key));
+  if (unknown.length > 0) {
+    throw new Error(`malformed user_secret_ref at ${label}: unexpected fields ${unknown.join(", ")}`);
+  }
+  if (typeof record.key !== "string" || !USER_SECRET_KEY_RE.test(record.key)) {
+    throw new Error(
+      `malformed user_secret_ref at ${label}: key must match /^[a-zA-Z0-9_.-]{1,120}$/`,
+    );
+  }
+  const out = {
+    type: "user_secret_ref",
+    key: record.key,
+  };
+  if (record.version !== undefined) {
+    if (!isSecretVersionSelector(record.version)) {
+      throw new Error(
+        `malformed user_secret_ref at ${label}: version must be "latest" or a positive integer`,
+      );
+    }
+    out.version = record.version;
+  }
+  if (record.required !== undefined) {
+    if (typeof record.required !== "boolean") {
+      throw new Error(`malformed user_secret_ref at ${label}: required must be a boolean`);
+    }
+    out.required = record.required;
+  }
+  if (record.allowMissingOverride !== undefined) {
+    if (typeof record.allowMissingOverride !== "boolean") {
+      throw new Error(
+        `malformed user_secret_ref at ${label}: allowMissingOverride must be a boolean`,
+      );
+    }
+    out.allowMissingOverride = record.allowMissingOverride;
+  }
+  return out;
+}
+
+/**
+ * Returns a preserved secret/user_secret ref, null when the value is not a ref
+ * candidate (plain/unknown — caller drops), or throws on malformed ref shapes.
+ */
+function tryPreserveSecretBinding(value, label, { allowRedactedSecretRefs = false } = {}) {
+  const record = asRecord(value);
+  if (!record || typeof record.type !== "string") return null;
+  if (record.type === "secret_ref") {
+    return parseSecretRefBinding(record, label, { allowRedactedSecretRefs });
+  }
+  if (record.type === "user_secret_ref") return parseUserSecretRefBinding(record, label);
+  return null;
+}
+
+function preserveEnvSecretRefBindings(
+  liveEnv,
+  labelPrefix = "adapterConfig.env",
+  { allowRedactedSecretRefs = false } = {},
+) {
+  const live = asRecord(liveEnv);
+  if (!live) return {};
+  const out = {};
+  for (const [key, value] of Object.entries(live)) {
+    const preserved = tryPreserveSecretBinding(value, `${labelPrefix}.${key}`, {
+      allowRedactedSecretRefs,
+    });
+    if (preserved) out[key] = preserved;
+  }
+  return out;
+}
+
+function preserveManagedAdapterConfigFields(
+  liveAdapterConfig,
+  { allowRedactedSecretRefs = false } = {},
+) {
   const out = {};
   const live = asRecord(liveAdapterConfig) ?? {};
   for (const key of PRESERVED_ADAPTER_CONFIG_KEYS) {
     if (live[key] !== undefined) out[key] = cloneJson(live[key]);
+  }
+  for (const [key, value] of Object.entries(live)) {
+    if (PRESERVED_ADAPTER_CONFIG_KEYS.includes(key)) continue;
+    if (key === "env") continue;
+    const preserved = tryPreserveSecretBinding(value, `adapterConfig.${key}`, {
+      allowRedactedSecretRefs,
+    });
+    if (preserved) out[key] = preserved;
   }
   return out;
 }
@@ -533,14 +732,30 @@ function withJarvisInstructionsPath({
   };
 }
 
-function buildTargetAdapterConfig(profileName, profileEntry, liveAgent, { runtimeEnv = process.env } = {}) {
+function buildTargetAdapterConfig(
+  profileName,
+  profileEntry,
+  liveAgent,
+  {
+    runtimeEnv = process.env,
+    runtimeCapabilitiesBySlug = null,
+    allowRedactedSecretRefs = false,
+  } = {},
+) {
+  const liveAdapterConfig = asRecord(liveAgent.adapterConfig) ?? {};
   const preserved = withJarvisInstructionsPath({
     profileName,
     slug: profileEntry.slug,
-    preserved: preserveManagedAdapterConfigFields(liveAgent.adapterConfig),
+    preserved: preserveManagedAdapterConfigFields(liveAdapterConfig, {
+      allowRedactedSecretRefs,
+    }),
   });
+  const preservedEnv = preserveEnvSecretRefBindings(liveAdapterConfig.env, "adapterConfig.env", {
+    allowRedactedSecretRefs,
+  });
+  let adapterConfig;
   if (profileName === "openai-first") {
-    return {
+    adapterConfig = {
       ...preserved,
       engine: "cli",
       model: profileEntry.model,
@@ -557,30 +772,38 @@ function buildTargetAdapterConfig(profileName, profileEntry, liveAgent, { runtim
       outputInactivityTimeoutMs: PATCH_INACTIVITY_TIMEOUT_MS,
       graceSec: PATCH_GRACE_SEC,
     };
-  }
-  const configEnvName = profileEntry.claudeConfigProfile === "boss"
-    ? ANTHROPIC_BOSS_CONFIG_ENV
-    : ANTHROPIC_WORKER_CONFIG_ENV;
-  const configDir = runtimeEnv?.[configEnvName];
-  return {
-    ...preserved,
-    engine: "cli",
-    model: profileEntry.model,
-    maxTurnsPerRun: profileEntry.maxTurnsPerRun,
-    dangerouslySkipPermissions: true,
-    filesystemScope: "workspace",
-    networkScope: "allowlist",
-    networkAllowlist: [...ANTHROPIC_SAFE_ALLOWLIST],
-    timeoutSec: PATCH_TIMEOUT_SEC,
-    graceSec: PATCH_GRACE_SEC,
-    chrome: false,
-    env: {
-      CLAUDE_CONFIG_DIR: {
-        type: "plain",
-        value: configDir,
+    if (Object.keys(preservedEnv).length > 0) {
+      adapterConfig.env = preservedEnv;
+    }
+  } else {
+    const configEnvName = profileEntry.claudeConfigProfile === "boss"
+      ? ANTHROPIC_BOSS_CONFIG_ENV
+      : ANTHROPIC_WORKER_CONFIG_ENV;
+    const configDir = runtimeEnv?.[configEnvName];
+    adapterConfig = {
+      ...preserved,
+      engine: "cli",
+      model: profileEntry.model,
+      maxTurnsPerRun: profileEntry.maxTurnsPerRun,
+      dangerouslySkipPermissions: true,
+      filesystemScope: "workspace",
+      networkScope: "allowlist",
+      networkAllowlist: [...ANTHROPIC_SAFE_ALLOWLIST],
+      timeoutSec: PATCH_TIMEOUT_SEC,
+      graceSec: PATCH_GRACE_SEC,
+      chrome: false,
+      env: {
+        ...preservedEnv,
+        // Always rebuild from trusted runtimeEnv; wins over any live CLAUDE_CONFIG_DIR ref/plain.
+        CLAUDE_CONFIG_DIR: {
+          type: "plain",
+          value: configDir,
+        },
       },
-    },
-  };
+    };
+  }
+  const capabilities = runtimeCapabilitiesBySlug?.get?.(profileEntry.slug) ?? null;
+  return applyRuntimeCapabilitiesToAdapterConfig(adapterConfig, capabilities);
 }
 
 function buildTargetRuntimeConfig(liveAgent, profileEntry) {
@@ -606,11 +829,24 @@ function normalizeLiveAgentState(liveAgent) {
   };
 }
 
-function normalizeExpectedState(profileName, profileEntry, liveAgent, { runtimeEnv = process.env } = {}) {
+function normalizeExpectedState(
+  profileName,
+  profileEntry,
+  liveAgent,
+  {
+    runtimeEnv = process.env,
+    runtimeCapabilitiesBySlug = null,
+    allowRedactedSecretRefs = false,
+  } = {},
+) {
   return {
     status: "paused",
     adapterType: profileEntry.adapterType,
-    adapterConfig: buildTargetAdapterConfig(profileName, profileEntry, liveAgent, { runtimeEnv }),
+    adapterConfig: buildTargetAdapterConfig(profileName, profileEntry, liveAgent, {
+      runtimeEnv,
+      runtimeCapabilitiesBySlug,
+      allowRedactedSecretRefs,
+    }),
     runtimeConfig: buildTargetRuntimeConfig(liveAgent, profileEntry),
   };
 }
@@ -625,7 +861,13 @@ function extractProfileBySlug(profilesDoc, profileName) {
   );
 }
 
-function matchesFullSafeProfileState({ profileName, profileEntry, liveAgent }) {
+function matchesFullSafeProfileState({
+  profileName,
+  profileEntry,
+  liveAgent,
+  runtimeCapabilitiesBySlug = null,
+  allowRedactedSecretRefs = false,
+}) {
   try {
     const runtimeEnv = {};
     if (profileName === "anthropic-first") {
@@ -646,7 +888,7 @@ function matchesFullSafeProfileState({ profileName, profileEntry, liveAgent }) {
       profileName,
       profileEntry,
       liveAgent,
-      { runtimeEnv },
+      { runtimeEnv, runtimeCapabilitiesBySlug, allowRedactedSecretRefs },
     );
     return currentState.status === expectedState.status
       && currentState.adapterType === expectedState.adapterType
@@ -657,7 +899,32 @@ function matchesFullSafeProfileState({ profileName, profileEntry, liveAgent }) {
   }
 }
 
-export function detectProviderProfileState({ profilesDoc, liveSnapshot }) {
+export function detectProviderProfileState({
+  profilesDoc,
+  liveSnapshot,
+  runtimeCapabilitiesBySlug = null,
+  desiredDir = DESIRED_DIR,
+  allowRedactedSecretRefs = false,
+}) {
+  let capabilitiesBySlug = runtimeCapabilitiesBySlug;
+  if (capabilitiesBySlug == null) {
+    const loaded = loadValidatedRuntimeCapabilities(desiredDir);
+    if (!loaded.ok) {
+      return {
+        ok: false,
+        profileName: null,
+        switchableSlugs: Array.isArray(profilesDoc?.switchableAgents)
+          ? [...new Set(profilesDoc.switchableAgents.map((slug) => String(slug)))].sort()
+          : [],
+        matchedProfileBySlug: {},
+        issues: loaded.errors.map((detail) => ({
+          code: "runtime-capabilities-invalid",
+          detail,
+        })),
+      };
+    }
+    capabilitiesBySlug = loaded.bySlug;
+  }
   const switchableSlugs = Array.isArray(profilesDoc?.switchableAgents)
     ? [...new Set(profilesDoc.switchableAgents.map((slug) => String(slug)))].sort()
     : [];
@@ -679,7 +946,13 @@ export function detectProviderProfileState({ profilesDoc, liveSnapshot }) {
     for (const profileName of declaredProfileNames) {
       const entry = profileByName.get(profileName)?.get(slug);
       if (!entry) continue;
-      if (matchesFullSafeProfileState({ profileName, profileEntry: entry, liveAgent: live })) {
+      if (matchesFullSafeProfileState({
+        profileName,
+        profileEntry: entry,
+        liveAgent: live,
+        runtimeCapabilitiesBySlug: capabilitiesBySlug,
+        allowRedactedSecretRefs,
+      })) {
         matchedProfiles.push(profileName);
       }
     }
@@ -764,6 +1037,7 @@ export function planProviderProfileSwitch({
   liveSnapshot,
   profileName,
   runtimeEnv = process.env,
+  allowRedactedSecretRefs = false,
 }) {
   const desired = loadDesired(desiredDir);
   const profilesDoc = readProfilesFile(desiredDir);
@@ -778,6 +1052,23 @@ export function planProviderProfileSwitch({
       profileName,
     };
   }
+  const knownSlugs = [
+    ...(desired.agents?.agents ?? []).map((agent) => agent.slug),
+    "summarizer",
+    "reflection-coach",
+  ];
+  const runtimeCapabilities = loadValidatedRuntimeCapabilities(desiredDir, { knownSlugs });
+  if (!runtimeCapabilities.ok) {
+    return {
+      ok: false,
+      error: "runtime capabilities validation failed",
+      issues: runtimeCapabilities.errors,
+      blockers: runtimeCapabilities.errors,
+      planned: [],
+      profileName,
+    };
+  }
+  const runtimeCapabilitiesBySlug = runtimeCapabilities.bySlug;
   if (!REQUIRED_PROFILES.includes(profileName)) {
     return {
       ok: false,
@@ -828,7 +1119,17 @@ export function planProviderProfileSwitch({
       continue;
     }
     const currentState = normalizeLiveAgentState(live);
-    const expectedState = normalizeExpectedState(profileName, profileEntry, live, { runtimeEnv });
+    let expectedState;
+    try {
+      expectedState = normalizeExpectedState(profileName, profileEntry, live, {
+        runtimeEnv,
+        runtimeCapabilitiesBySlug,
+        allowRedactedSecretRefs,
+      });
+    } catch (err) {
+      blockers.push(`${slug}: ${err instanceof Error ? err.message : String(err)}`);
+      continue;
+    }
     const changed =
       currentState.status !== expectedState.status
       || currentState.adapterType !== expectedState.adapterType
@@ -965,24 +1266,32 @@ async function putInstructionsBundleFile(client, agentId, fileName, content) {
 }
 
 async function captureJarvisInstructionsBackup(client, jarvisStep) {
-  const current = await getInstructionsBundleFile(
-    client,
-    jarvisStep.agentId,
-    JARVIS_CODEX_AGENTS_FILE,
-  );
-  if (!current.ok) return current;
-  if (current.missing) {
+  // Prefer compact entry; fall back to legacy full harness for first migration.
+  const candidates = [JARVIS_CODEX_AGENTS_FILE, JARVIS_CODEX_FULL_AGENTS_FILE];
+  let lastError = null;
+  for (const fileName of candidates) {
+    const current = await getInstructionsBundleFile(
+      client,
+      jarvisStep.agentId,
+      fileName,
+    );
+    if (!current.ok) {
+      lastError = current;
+      continue;
+    }
+    if (current.missing) continue;
     return {
-      ok: false,
-      error: "cannot switch safely: previous Jarvis instruction content is missing",
+      ok: true,
+      agentId: jarvisStep.agentId,
+      path: fileName,
+      content: current.content,
+      sha256: sha256(current.content),
     };
   }
+  if (lastError && !lastError.ok) return lastError;
   return {
-    ok: true,
-    agentId: jarvisStep.agentId,
-    path: JARVIS_CODEX_AGENTS_FILE,
-    content: current.content,
-    sha256: sha256(current.content),
+    ok: false,
+    error: "cannot switch safely: previous Jarvis instruction content is missing",
   };
 }
 
@@ -1132,6 +1441,108 @@ function writeSwitchBackupFile({ backupPath, payload }) {
   }
 }
 
+function isEmptyAgentInstructions(value) {
+  return value == null || typeof value !== "string" || value.trim().length === 0;
+}
+
+function agentBuiltInKey(agent) {
+  return agent?.metadata?.paperclipBuiltInAgent?.key ?? null;
+}
+
+/**
+ * When profile-switch apply used --allow-empty-instruction-repair for live
+ * capture, tolerate empty AGENTS.md only for non-switchable portable agents
+ * whose canonical package AGENTS.md is non-empty (deferred fleet apply repair).
+ * Never repairs or writes instructions here. Switchable/affected empties and
+ * missing package seeds fail closed before any mutation.
+ *
+ * Fail-closed against the live snapshot: every agent with null/empty/whitespace
+ * instructions must have a non-empty slug that appears exactly in
+ * completeness.emptyInstructionRepairSlugs. Structured repair slugs that do not
+ * correspond to an actually empty portable agent are rejected before writes.
+ */
+export function assertProfileSwitchEmptyInstructionRepairScope({
+  liveSnapshot,
+  switchableSlugs,
+  packageDir = PACKAGE_DIR,
+}) {
+  const repairSlugs = Array.isArray(liveSnapshot?.completeness?.emptyInstructionRepairSlugs)
+    ? [...new Set(liveSnapshot.completeness.emptyInstructionRepairSlugs.map(String))].sort()
+    : [];
+  const repairSlugSet = new Set(repairSlugs);
+  const switchable = new Set((switchableSlugs ?? []).map(String));
+  const pkg = loadPackage(packageDir);
+  const errors = [];
+
+  const agents = Array.isArray(liveSnapshot?.agents) ? liveSnapshot.agents : [];
+  const actualEmptyBySlug = new Map();
+
+  for (const agent of agents) {
+    if (!isEmptyAgentInstructions(agent?.instructions)) continue;
+
+    const rawSlug = typeof agent?.slug === "string" ? agent.slug.trim() : "";
+    if (rawSlug === "") {
+      const label = agent?.name ?? agent?.id ?? "<unknown>";
+      errors.push(
+        `empty AGENTS.md on agent ${label} requires a non-empty slug to match `
+          + `completeness.emptyInstructionRepairSlugs before profile-switch writes`,
+      );
+      continue;
+    }
+
+    if (actualEmptyBySlug.has(rawSlug)) {
+      errors.push(`empty AGENTS.md: duplicate live agent slug ${rawSlug}`);
+      continue;
+    }
+    actualEmptyBySlug.set(rawSlug, agent);
+
+    if (!repairSlugSet.has(rawSlug)) {
+      errors.push(
+        `empty AGENTS.md on live agent ${rawSlug} is missing from `
+          + `completeness.emptyInstructionRepairSlugs (refuse mismatched repair scope)`,
+      );
+    }
+  }
+
+  const actualEmptySlugs = [...actualEmptyBySlug.keys()].sort();
+  if (repairSlugs.length === 0 && actualEmptySlugs.length === 0) {
+    return { ok: errors.length === 0, errors, repairSlugs };
+  }
+
+  for (const slug of repairSlugs) {
+    const agent = actualEmptyBySlug.get(slug);
+    if (!agent) {
+      errors.push(
+        `completeness.emptyInstructionRepairSlugs lists ${slug} but live snapshot has no `
+          + `agent with null/empty/whitespace instructions under that slug`,
+      );
+      continue;
+    }
+    if (agentBuiltInKey(agent)) {
+      errors.push(
+        `empty AGENTS.md on built-in agent ${slug} is not tolerated by profile-switch`,
+      );
+      continue;
+    }
+    if (switchable.has(slug)) {
+      errors.push(
+        `empty AGENTS.md on switchable/affected agent ${slug} is not tolerated by profile-switch `
+          + `(use fleet apply empty-bundle repair only for non-switchable portables after profile normalization)`,
+      );
+      continue;
+    }
+    const packageInstructions = pkg.agentBySlug?.[slug]?.instructions ?? null;
+    if (typeof packageInstructions !== "string" || packageInstructions.trim().length === 0) {
+      errors.push(
+        `empty AGENTS.md on non-switchable portable ${slug} requires non-empty canonical package `
+          + `AGENTS.md so fleet apply can repair afterward`,
+      );
+    }
+  }
+
+  return { ok: errors.length === 0, errors, repairSlugs };
+}
+
 function buildStateBackupPayload({
   companyId,
   profileName,
@@ -1223,8 +1634,13 @@ function validateRollbackBackupPayload(payload, liveSnapshot, { expectedCompanyI
       if (jarvisInstructions.agentId !== jarvisRow?.agentId) {
         errors.push("backup Jarvis instructions agentId mismatch");
       }
-      if (jarvisInstructions.path !== JARVIS_CODEX_AGENTS_FILE) {
-        errors.push("backup Jarvis instructions path mismatch");
+      if (
+        jarvisInstructions.path !== JARVIS_CODEX_AGENTS_FILE
+        && jarvisInstructions.path !== JARVIS_CODEX_FULL_AGENTS_FILE
+      ) {
+        errors.push(
+          `backup Jarvis instructions path mismatch (expected ${JARVIS_CODEX_AGENTS_FILE} or legacy ${JARVIS_CODEX_FULL_AGENTS_FILE})`,
+        );
       }
       if (typeof jarvisInstructions.content !== "string") {
         errors.push("backup Jarvis instruction content must be a string");
@@ -1245,7 +1661,15 @@ export async function previewProviderProfileSwitch({
   profileName,
   runtimeEnv = process.env,
 }) {
-  const plan = planProviderProfileSwitch({ desiredDir, liveSnapshot, profileName, runtimeEnv });
+  // Offline preview only: allow redacted secretId markers so standard snapshots
+  // deep-compare cleanly. Never used for apply/PATCH construction.
+  const plan = planProviderProfileSwitch({
+    desiredDir,
+    liveSnapshot,
+    profileName,
+    runtimeEnv,
+    allowRedactedSecretRefs: true,
+  });
   const planErrors = plan.blockers ?? plan.issues ?? [plan.error ?? "unknown planning error"];
   return redactSecrets({
     mode: "preview",
@@ -1276,6 +1700,7 @@ export async function previewProviderProfileSwitch({
 
 export async function applyProviderProfileSwitch({
   desiredDir,
+  packageDir = PACKAGE_DIR,
   companyId,
   profileName,
   confirmProfile,
@@ -1285,6 +1710,7 @@ export async function applyProviderProfileSwitch({
   liveSnapshot = null,
   snapshotFn = snapshotFleet,
   runtimeEnv = process.env,
+  allowEmptyInstructionsRepair = false,
 }) {
   const report = {
     mode: "apply",
@@ -1324,7 +1750,38 @@ export async function applyProviderProfileSwitch({
       dryRun: false,
     });
 
-  const fresh = liveSnapshot ?? await snapshotFn({ companyId, internalCapture: true });
+  const fresh = liveSnapshot ?? await snapshotFn({
+    companyId,
+    internalCapture: true,
+    allowEmptyInstructionsRepair: Boolean(allowEmptyInstructionsRepair),
+  });
+  if (allowEmptyInstructionsRepair) {
+    let profilesDoc;
+    try {
+      profilesDoc = readProfilesFile(desiredDir);
+    } catch (err) {
+      report.failed.push({
+        step: "empty-instruction-repair-scope",
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return finishReport(report);
+    }
+    const switchableSlugs = Array.isArray(profilesDoc?.switchableAgents)
+      ? [...new Set(profilesDoc.switchableAgents.map((slug) => String(slug)))].sort()
+      : [];
+    const scope = assertProfileSwitchEmptyInstructionRepairScope({
+      liveSnapshot: fresh,
+      switchableSlugs,
+      packageDir,
+    });
+    if (!scope.ok) {
+      report.failed.push({
+        step: "empty-instruction-repair-scope",
+        error: scope.errors.join("; "),
+      });
+      return finishReport(report);
+    }
+  }
   const liveRuns = await fetchLiveRuns(client, companyId);
   if (!liveRuns.ok) {
     report.failed.push({ step: "live-runs", error: liveRuns.error });
@@ -1343,6 +1800,7 @@ export async function applyProviderProfileSwitch({
     liveSnapshot: fresh,
     profileName,
     runtimeEnv,
+    // Mutating path: refuse redacted secretId markers; require real UUIDs from internalCapture.
   });
   if (!plan.ok) {
     const planErrors = plan.blockers ?? plan.issues ?? [plan.error ?? "unknown planning error"];

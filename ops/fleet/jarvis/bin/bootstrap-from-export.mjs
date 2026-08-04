@@ -24,7 +24,8 @@ const BRANCH_EDIT_BLOCK_RE =
 const SENIOR_REPLACEMENT = `## 🔴 TY NIE PISZESZ KODU — PLANUJESZ, DELEGUESZ, RECENZUJESZ
 
 Nie tworzysz gałęzi, nie edytujesz plików kodu i nie zatwierdzasz zmian osobiście.
-Wykonawcą kodu jest Cursor (domyślnie) albo inny mięsień z Twojego pionu.
+Wykonawcą kodu jest Cursor (domyślnie), szybki Codex Mini (małe dobrze opisane joby),
+albo ciężki Codex / inny mięsień z Twojego pionu.
 Twoja robota: brief/plan → zlecenie → odbiór → werdykt. Gałąź i zatwierdzenie
 zmian to warunek odbioru **u wykonawcy**, nie Twoja osobista sesja edycji.
 
@@ -68,6 +69,16 @@ const SKILL_OVERRIDES = {
     "paperclipai/paperclip/paperclip",
     "local/review",
     "local/contract",
+  ],
+  "konfigurator-systemu": [
+    "paperclipai/paperclip/paperclip",
+    "local/coding-workflow",
+    "local/review",
+    "local/commit",
+    "local/ticket",
+    "local/contract",
+    "local/code-quality",
+    "paperclipai/optional/browser/agent-browser",
   ],
 };
 

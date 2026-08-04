@@ -624,6 +624,71 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
     );
   });
 
+  it("does not backstop-wake when blockers completed before the current blocked episode", async () => {
+    const { companyId, agentId, blockedIssueId, blockerIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    const blockedAt = new Date("2026-08-02T16:00:00.000Z");
+    const completedAt = new Date("2026-08-02T15:00:00.000Z");
+    await db
+      .update(issues)
+      .set({
+        blockedTransitionAt: blockedAt,
+        updatedAt: blockedAt,
+        unblockDescriptor: { owner: "board", action: "Approve the new production exception" },
+      })
+      .where(eq(issues.id, blockedIssueId));
+    await db
+      .update(issues)
+      .set({ completedAt, updatedAt: completedAt })
+      .where(eq(issues.id, blockerIssueId));
+
+    const result = await heartbeatService(db).reconcileIssueGraphLiveness();
+
+    expect(result.dependencyWakesHealed).toBe(0);
+    expect(result.dependencyWakeHistoricalBlockerSkipped).toBe(1);
+
+    const wakes = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakes).toHaveLength(0);
+  });
+
+  it("backstop-wakes when a blocker completes after the current blocked episode", async () => {
+    const { agentId, blockedIssueId, blockerIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    const blockedAt = new Date("2026-08-02T16:00:00.000Z");
+    const completedAt = new Date("2026-08-02T16:30:00.000Z");
+    await db
+      .update(issues)
+      .set({ blockedTransitionAt: blockedAt, updatedAt: blockedAt })
+      .where(eq(issues.id, blockedIssueId));
+    await db
+      .update(issues)
+      .set({ completedAt, updatedAt: completedAt })
+      .where(eq(issues.id, blockerIssueId));
+
+    const result = await heartbeatService(db).reconcileIssueGraphLiveness();
+
+    expect(result.dependencyWakesHealed).toBe(1);
+    expect(result.dependencyWakeHistoricalBlockerSkipped).toBe(0);
+    expect(result.dependencyWakeIssueIds).toEqual([blockedIssueId]);
+
+    const wake = await db
+      .select({
+        reason: agentWakeupRequests.reason,
+        idempotencyKey: agentWakeupRequests.idempotencyKey,
+      })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, agentId))
+      .orderBy(agentWakeupRequests.requestedAt)
+      .then((rows) => rows[0] ?? null);
+    expect(wake).toMatchObject({
+      reason: "issue_blockers_resolved",
+      idempotencyKey: `issue_blockers_resolved:${blockedIssueId}:${blockerIssueId}`,
+    });
+  });
+
   it("counts null dependency wake returns as deferred instead of enqueue failures", async () => {
     await enableAutoRecovery();
     const { companyId, agentId } =

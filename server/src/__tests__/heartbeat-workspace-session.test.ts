@@ -1405,6 +1405,23 @@ describe("effective run execution workspace config freshness", () => {
     expect(realizeWorkspace).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { issueWorkMode: "ask", expectedReuse: false },
+    { issueWorkMode: "planning", expectedReuse: false },
+    { issueWorkMode: "standard", expectedReuse: true },
+  ])('uses workspace reuse only for execution-capable $issueWorkMode work', ({ issueWorkMode, expectedReuse }) => {
+    expect(resolveExecutionWorkspaceReuseRequestForIssue({
+      issueExecutionWorkspaceId: "workspace-old",
+      issueExecutionWorkspacePreference: "reuse_existing",
+      existingExecutionWorkspaceStatus: "active",
+      issueWorkMode,
+    })).toEqual({
+      requestedExecutionWorkspaceId: "workspace-old",
+      requestedShouldReuseExisting: expectedReuse,
+      existingExecutionWorkspaceAvailable: expectedReuse,
+    });
+  });
+
   it("fails loudly when explicit reuse restore returns no workspace", async () => {
     const metadata = buildWorkspaceConfigMetadata();
     const decision = resolveExecutionWorkspaceConfigFreshness({

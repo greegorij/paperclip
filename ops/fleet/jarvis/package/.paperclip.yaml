@@ -281,6 +281,28 @@ agents:
     permissionGrants:
       -
         permissionKey: "tasks:assign"
+  mi-sie-kodu-codex-szybki:
+    role: "engineer"
+    capabilities: "Szybki, ograniczony wykonawca małych dobrze opisanych zmian (kod/testy/config) na osobnym limicie Codex Mini. Alternatywa wobec Cursora; nie do architektury, security ani produkcji."
+    adapter:
+      config:
+        dangerouslyBypassApprovalsAndSandbox: false
+        engine: "cli"
+        model: "codex-mini-latest"
+        modelReasoningEffort: "low"
+        fastMode: true
+      type: "codex_local"
+    runtime:
+      heartbeat:
+        intervalSec: 300
+        maxConcurrentRuns: 2
+        skipTimerWhenNoActionableWork: true
+    permissions:
+      canCreateSkills: true
+      trustPreset: "standard"
+    permissionGrants:
+      -
+        permissionKey: "tasks:assign"
   mi-sie-kodu-cursor:
     role: "engineer"
     capabilities: "Domyślny wykonawca kodu. Wołaj mnie do zmian opisanych konkretnie: plik, zachowanie, kryterium odbioru. Nie projektuję — wykonuję i oddaję do odbioru."
@@ -663,6 +685,7 @@ sidebar:
     - "in-ynier-wdro-e"
     - "konfigurator-systemu"
     - "mi-sie-kodu-codex"
+    - "mi-sie-kodu-codex-szybki"
     - "mi-sie-kodu-cursor"
     - "mi-sie-kodu-glm"
     - "zwiadowca-kodu"

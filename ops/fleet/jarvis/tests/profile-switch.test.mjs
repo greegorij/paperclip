@@ -6,7 +6,14 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { DESIRED_DIR, FIXTURES_DIR, PACKAGE_DIR } from "../lib/paths.mjs";
 import { loadDesired } from "../lib/load.mjs";
-import { generateCodexJarvisInstructions } from "../lib/codex-jarvis-instructions.mjs";
+import {
+  generateCodexJarvisArtifacts,
+  generateCodexJarvisCompactInstructions,
+  generateCodexJarvisInstructions,
+  JARVIS_CODEX_COMPACT_ENTRY_FILE,
+  JARVIS_CODEX_COMPACT_MAX_CHARS,
+  JARVIS_CODEX_FULL_ENTRY_FILE,
+} from "../lib/codex-jarvis-instructions.mjs";
 import {
   validateProviderProfilesDocument,
   detectProviderProfileState,
@@ -14,7 +21,9 @@ import {
   previewProviderProfileSwitch,
   applyProviderProfileSwitch,
   rollbackProviderProfileSwitch,
+  assertProfileSwitchEmptyInstructionRepairScope,
 } from "../lib/profile-switch.mjs";
+import { snapshotFleet } from "../lib/snapshot.mjs";
 
 const liveAligned = JSON.parse(
   readFileSync(path.join(FIXTURES_DIR, "live-aligned.json"), "utf8"),
@@ -65,13 +74,22 @@ const OPENAI_RUNTIME_ENV = {
     "jarvis-paperclip-boss-CLAUDE.md",
   ),
 };
-const JARVIS_CODEX_BUNDLE_PATH = "AGENTS-CODEX.md";
+const JARVIS_CODEX_FULL_BUNDLE_PATH = JARVIS_CODEX_FULL_ENTRY_FILE;
+const JARVIS_CODEX_BUNDLE_PATH = JARVIS_CODEX_COMPACT_ENTRY_FILE;
 const JARVIS_ANTHROPIC_BUNDLE_PATH = "AGENTS.md";
 const JARVIS_COCKPIT_FILE = path.join(PACKAGE_DIR, "agents", "jarvis", "AGENTS.md");
+const COMMITTED_JARVIS_CODEX_FULL_BUNDLE_CONTENT = readFileSync(
+  path.join(PACKAGE_DIR, "agents", "jarvis", JARVIS_CODEX_FULL_BUNDLE_PATH),
+  "utf8",
+);
 const COMMITTED_JARVIS_CODEX_BUNDLE_CONTENT = readFileSync(
   path.join(PACKAGE_DIR, "agents", "jarvis", JARVIS_CODEX_BUNDLE_PATH),
   "utf8",
 );
+const ALLOWED_JARVIS_CODEX_BUNDLE_PATHS = new Set([
+  JARVIS_CODEX_BUNDLE_PATH,
+  JARVIS_CODEX_FULL_BUNDLE_PATH,
+]);
 const HEADLESS_BOSS_FIXTURE_CONTENT = readFileSync(
   path.join(FIXTURES_DIR, "jarvis-paperclip-boss-CLAUDE.md"),
   "utf8",
@@ -190,7 +208,7 @@ function createApiMock(
         if (!agent) return { ok: false, status: 404, data: null };
         const query = new URLSearchParams(bundleMatch[2] ?? "");
         const requestedPath = query.get("path");
-        if (requestedPath !== JARVIS_CODEX_BUNDLE_PATH) {
+        if (!ALLOWED_JARVIS_CODEX_BUNDLE_PATHS.has(requestedPath)) {
           return { ok: false, status: 404, data: null };
         }
         const content = instructionsBundleByAgentId.get(agentId)?.get(requestedPath);
@@ -289,7 +307,7 @@ function createApiMock(
       const pathFromQuery = query.get("path");
       const pathFromBody = typeof body?.path === "string" ? body.path : null;
       const targetPath = pathFromBody ?? pathFromQuery;
-      if (targetPath !== JARVIS_CODEX_BUNDLE_PATH) {
+      if (!ALLOWED_JARVIS_CODEX_BUNDLE_PATHS.has(targetPath)) {
         return { ok: false, status: 404, data: null };
       }
       if (typeof body?.content !== "string") {
@@ -429,14 +447,15 @@ test("profiles schema rejects wrong Anthropic fallback drift against model-polic
 test("profiles schema rejects profile version that does not equal model-policy version", () => {
   const desired = loadDesired(DESIRED_DIR);
   const profilesDoc = structuredClone(desired.profiles);
-  assert.equal(profilesDoc.profiles["openai-first"].version, "2026-08-01.1");
+  const policyVersion = loadShadowModelPolicy().version;
+  assert.equal(profilesDoc.profiles["openai-first"].version, policyVersion);
   profilesDoc.profiles["openai-first"].version = "2026-07-30.1";
   const result = validateProviderProfilesDocument({ desired, profilesDoc });
   assert.equal(result.ok, false);
   assert.ok(
     result.errors.some(
       (item) => item.includes("openai-first")
-        && item.includes("version must equal model-policy version 2026-08-01.1"),
+        && item.includes(`version must equal model-policy version ${policyVersion}`),
     ),
     JSON.stringify(result.errors, null, 2),
   );
@@ -546,7 +565,7 @@ test("generator is deterministic and committed AGENTS-CODEX parity stays exact",
     cockpitAgentsMd: JARVIS_COCKPIT_CONTENT,
   });
   assert.equal(first.content, second.content);
-  assert.equal(first.content, COMMITTED_JARVIS_CODEX_BUNDLE_CONTENT);
+  assert.equal(first.content, COMMITTED_JARVIS_CODEX_FULL_BUNDLE_CONTENT);
   assert.ok(first.content.includes("BOOT ORKIESTRATORA"));
   assert.ok(first.content.includes("TASK ROUTER"));
   assert.ok(first.content.includes("Hard Rules"));
@@ -590,6 +609,65 @@ test("generator is deterministic and committed AGENTS-CODEX parity stays exact",
   assert.ok(first.content.includes("GET /api/issues/{issueId}/documents/{key}/annotations"));
   assert.ok(first.content.includes("GET /api/issues/{issueId}/comments"));
   assert.ok(first.content.includes("osobnej tabeli approvals"));
+});
+
+test("compact generator prioritizes scoped Paperclip task context over Boot Manifest", () => {
+  const { content } = generateCodexJarvisCompactInstructions({
+    headlessBossClaude: HEADLESS_BOSS_FIXTURE_CONTENT,
+    cockpitAgentsMd: JARVIS_COCKPIT_CONTENT,
+  });
+
+  assert.match(content, /heartbeat, odzyskiwanie lub komentarz/);
+  assert.match(content, /autorytatywnego kontekstu Paperclipa: zadania i kontekstu przodków/);
+  assert.match(content, /nie\*\* ładuj przed działaniem pełnego Boot Manifestu/);
+  assert.match(content, /rag_search`, `vault_search` lub pojedynczy `vault_read`/);
+  assert.match(content, /Tylko nieskierowana świeża sesja.*wybrać portfolio lub inbox.*wymaga jednorazowego odczytu pełnego Boot Manifestu/s);
+});
+
+test("compact generator is deterministic, self-contained, and under the length budget", () => {
+  const first = generateCodexJarvisCompactInstructions({
+    headlessBossClaude: HEADLESS_BOSS_FIXTURE_CONTENT,
+    cockpitAgentsMd: JARVIS_COCKPIT_CONTENT,
+  });
+  const second = generateCodexJarvisCompactInstructions({
+    headlessBossClaude: HEADLESS_BOSS_FIXTURE_CONTENT,
+    cockpitAgentsMd: JARVIS_COCKPIT_CONTENT,
+  });
+  const both = generateCodexJarvisArtifacts({
+    headlessBossClaude: HEADLESS_BOSS_FIXTURE_CONTENT,
+    cockpitAgentsMd: JARVIS_COCKPIT_CONTENT,
+  });
+  assert.equal(first.content, second.content);
+  assert.equal(first.content, COMMITTED_JARVIS_CODEX_BUNDLE_CONTENT);
+  assert.equal(both.compact.content, first.content);
+  assert.equal(both.full.content, COMMITTED_JARVIS_CODEX_FULL_BUNDLE_CONTENT);
+  assert.equal(first.sourceSha256, both.full.sourceSha256);
+  assert.equal(first.cockpitSha256, both.full.cockpitSha256);
+  assert.ok(first.content.length <= JARVIS_CODEX_COMPACT_MAX_CHARS);
+  assert.ok(first.content.includes("Samowystarczalny"));
+  assert.ok(first.content.includes("Jarvis — orkiestrator"));
+  assert.ok(first.content.includes("vault_read"));
+  assert.ok(first.content.includes("01 - Jarvis/Jarvis — Boot Manifest.md"));
+  assert.ok(first.content.includes("`paperclip`"));
+  assert.ok(first.content.includes("PAPERCLIP_API_URL"));
+  assert.ok(first.content.includes("PAPERCLIP_API_KEY"));
+  assert.ok(first.content.includes("X-Paperclip-Run-Id"));
+  assert.ok(first.content.includes("twardy blok konfiguracji"));
+  assert.ok(first.content.includes("Zero automatycznych ponowień"));
+  assert.ok(first.content.includes("NIGDY nie czytaj sekretów"));
+  assert.ok(first.content.includes("kartę decyzyjną"));
+  assert.ok(first.content.includes("nieodwracalne"));
+  assert.ok(first.content.includes("kierownikom pionów"));
+  assert.ok(first.content.includes("blockedBy"));
+  assert.ok(first.content.includes("Minimalny kontekst"));
+  assert.ok(first.content.includes("openai-first"));
+  assert.ok(first.content.includes("anthropic-first"));
+  assert.equal(first.content.includes("CLAUDE.md"), false);
+  assert.equal(first.content.includes("/home/"), false);
+  assert.equal(first.content.includes("/Users/"), false);
+  assert.equal(first.content.includes("${JARVIS_VAULT_ROOT}"), false);
+  assert.equal(first.content.includes("## Headless Core"), false);
+  assert.equal(first.content.includes("## Cockpit Overlay"), false);
 });
 
 test("generator fails closed when legacy direct vault path or write claims remain", () => {
@@ -874,6 +952,455 @@ test("openai plan preserves only managed bundle + paperclipSkillSync fields", ()
   assert.equal(step.patch.adapterConfig.env, undefined);
 });
 
+const SAMPLE_SECRET_ID = "11111111-1111-4111-8111-111111111111";
+const SAMPLE_SECRET_ID_B = "22222222-2222-4222-8222-222222222222";
+
+test("openai plan preserves top-level API-only access secret_ref binding", () => {
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const target = snapshot.agents.find((agent) => agent.slug === "badacz");
+  const accessBinding = {
+    type: "secret_ref",
+    secretId: SAMPLE_SECRET_ID,
+    version: "latest",
+    projectionClass: "class_3_static_lease",
+    projectionAllowlistKey: "stripe-api",
+  };
+  target.adapterConfig = {
+    model: "claude-sonnet-5",
+    instructionsFilePath: "/srv/managed/AGENTS.md",
+    paperclipSkillSync: { desiredSkills: ["paperclipai/paperclip/paperclip"] },
+    "access.STRIPE": accessBinding,
+    cwd: "/drop-me",
+  };
+  const plan = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+    profileName: "openai-first",
+  });
+  assert.equal(plan.ok, true, JSON.stringify(plan.blockers, null, 2));
+  const step = plan.planned.find((item) => item.slug === "badacz");
+  assert.ok(step);
+  assert.deepEqual(step.patch.adapterConfig["access.STRIPE"], accessBinding);
+  assert.equal(step.patch.adapterConfig.cwd, undefined);
+});
+
+test("anthropic plan preserves env secret_ref and drops unrelated plain env", () => {
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const target = snapshot.agents.find((agent) => agent.slug === "badacz");
+  const envSecret = {
+    type: "secret_ref",
+    secretId: SAMPLE_SECRET_ID,
+    version: 2,
+  };
+  target.adapterConfig = {
+    model: "gpt-5.6-sol",
+    instructionsFilePath: "/srv/managed/AGENTS.md",
+    paperclipSkillSync: { desiredSkills: ["paperclipai/paperclip/paperclip"] },
+    env: {
+      OPENAI_API_KEY: envSecret,
+      PLAIN_TOKEN: { type: "plain", value: "sk-should-drop" },
+      LEGACY_STRING: "sk-also-drop",
+      UNKNOWN_OBJ: { foo: "bar" },
+    },
+  };
+  const plan = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+    profileName: "anthropic-first",
+    runtimeEnv: ANTHROPIC_RUNTIME_ENV,
+  });
+  assert.equal(plan.ok, true, JSON.stringify(plan.blockers, null, 2));
+  const step = plan.planned.find((item) => item.slug === "badacz");
+  assert.ok(step);
+  assert.deepEqual(step.patch.adapterConfig.env, {
+    OPENAI_API_KEY: envSecret,
+    CLAUDE_CONFIG_DIR: {
+      type: "plain",
+      value: ANTHROPIC_RUNTIME_ENV.JARVIS_CLAUDE_WORKER_CONFIG_DIR,
+    },
+  });
+  assert.equal(step.patch.adapterConfig.env.PLAIN_TOKEN, undefined);
+  assert.equal(step.patch.adapterConfig.env.LEGACY_STRING, undefined);
+  assert.equal(step.patch.adapterConfig.env.UNKNOWN_OBJ, undefined);
+});
+
+test("openai plan preserves env user_secret_ref bindings", () => {
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const target = snapshot.agents.find((agent) => agent.slug === "badacz");
+  const userRef = {
+    type: "user_secret_ref",
+    key: "github_api_token",
+    version: "latest",
+    required: false,
+    allowMissingOverride: true,
+  };
+  target.adapterConfig = {
+    model: "claude-sonnet-5",
+    instructionsFilePath: "/srv/managed/AGENTS.md",
+    paperclipSkillSync: { desiredSkills: ["paperclipai/paperclip/paperclip"] },
+    env: { GITHUB_TOKEN: userRef },
+  };
+  const plan = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+    profileName: "openai-first",
+  });
+  assert.equal(plan.ok, true, JSON.stringify(plan.blockers, null, 2));
+  const step = plan.planned.find((item) => item.slug === "badacz");
+  assert.ok(step);
+  assert.deepEqual(step.patch.adapterConfig.env, { GITHUB_TOKEN: userRef });
+});
+
+test("malformed secret_ref and user_secret_ref fail closed instead of copying", () => {
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const target = snapshot.agents.find((agent) => agent.slug === "badacz");
+  target.adapterConfig = {
+    model: "claude-sonnet-5",
+    instructionsFilePath: "/srv/managed/AGENTS.md",
+    paperclipSkillSync: { desiredSkills: ["paperclipai/paperclip/paperclip"] },
+    "access.BAD": {
+      type: "secret_ref",
+      secretId: "not-a-uuid",
+      value: "plaintext-must-not-copy",
+    },
+  };
+  const badTopLevel = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+    profileName: "openai-first",
+  });
+  assert.equal(badTopLevel.ok, false);
+  assert.ok(
+    badTopLevel.blockers.some((item) => String(item).includes("malformed secret_ref")),
+    JSON.stringify(badTopLevel.blockers),
+  );
+  assert.equal(
+    JSON.stringify(badTopLevel).includes("plaintext-must-not-copy"),
+    false,
+  );
+
+  target.adapterConfig = {
+    model: "claude-sonnet-5",
+    instructionsFilePath: "/srv/managed/AGENTS.md",
+    paperclipSkillSync: { desiredSkills: ["paperclipai/paperclip/paperclip"] },
+    env: {
+      BAD_USER: {
+        type: "user_secret_ref",
+        key: "bad key with spaces",
+        required: "yes",
+      },
+    },
+  };
+  const badEnv = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+    profileName: "openai-first",
+  });
+  assert.equal(badEnv.ok, false);
+  assert.ok(
+    badEnv.blockers.some((item) => String(item).includes("malformed user_secret_ref")),
+    JSON.stringify(badEnv.blockers),
+  );
+});
+
+test("secret bindings survive openai -> anthropic -> openai planning and still match profile", () => {
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const target = snapshot.agents.find((agent) => agent.slug === "badacz");
+  const accessBinding = {
+    type: "secret_ref",
+    secretId: SAMPLE_SECRET_ID,
+    version: "latest",
+  };
+  const envBinding = {
+    type: "secret_ref",
+    secretId: SAMPLE_SECRET_ID_B,
+    version: 1,
+  };
+  target.adapterConfig = {
+    ...(target.adapterConfig ?? {}),
+    instructionsFilePath: "/srv/managed/AGENTS.md",
+    paperclipSkillSync: { desiredSkills: ["paperclipai/paperclip/paperclip"] },
+    "access.STRIPE": accessBinding,
+    env: { PROVIDER_TOKEN: envBinding },
+  };
+
+  const openAiPlan = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+    profileName: "openai-first",
+  });
+  assert.equal(openAiPlan.ok, true, JSON.stringify(openAiPlan.blockers, null, 2));
+  applyPlanToSnapshot(snapshot, openAiPlan);
+  const afterOpenAi = snapshot.agents.find((agent) => agent.slug === "badacz");
+  assert.deepEqual(afterOpenAi.adapterConfig["access.STRIPE"], accessBinding);
+  assert.deepEqual(afterOpenAi.adapterConfig.env.PROVIDER_TOKEN, envBinding);
+
+  const anthropicPlan = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+    profileName: "anthropic-first",
+    runtimeEnv: ANTHROPIC_RUNTIME_ENV,
+  });
+  assert.equal(anthropicPlan.ok, true, JSON.stringify(anthropicPlan.blockers, null, 2));
+  applyPlanToSnapshot(snapshot, anthropicPlan);
+  const afterAnthropic = snapshot.agents.find((agent) => agent.slug === "badacz");
+  assert.deepEqual(afterAnthropic.adapterConfig["access.STRIPE"], accessBinding);
+  assert.deepEqual(afterAnthropic.adapterConfig.env.PROVIDER_TOKEN, envBinding);
+  assert.deepEqual(afterAnthropic.adapterConfig.env.CLAUDE_CONFIG_DIR, {
+    type: "plain",
+    value: ANTHROPIC_RUNTIME_ENV.JARVIS_CLAUDE_WORKER_CONFIG_DIR,
+  });
+
+  const profilesDoc = loadDesired(DESIRED_DIR).profiles;
+  const detectedAnthropic = detectProviderProfileState({
+    profilesDoc,
+    liveSnapshot: snapshot,
+  });
+  assert.equal(detectedAnthropic.ok, true, JSON.stringify(detectedAnthropic.issues, null, 2));
+  assert.equal(detectedAnthropic.profileName, "anthropic-first");
+
+  const backToOpenAi = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+    profileName: "openai-first",
+  });
+  assert.equal(backToOpenAi.ok, true, JSON.stringify(backToOpenAi.blockers, null, 2));
+  applyPlanToSnapshot(snapshot, backToOpenAi);
+  const afterRoundTrip = snapshot.agents.find((agent) => agent.slug === "badacz");
+  assert.deepEqual(afterRoundTrip.adapterConfig["access.STRIPE"], accessBinding);
+  assert.deepEqual(afterRoundTrip.adapterConfig.env.PROVIDER_TOKEN, envBinding);
+  assert.equal(afterRoundTrip.adapterConfig.env.CLAUDE_CONFIG_DIR, undefined);
+
+  const detectedOpenAi = detectProviderProfileState({
+    profilesDoc,
+    liveSnapshot: snapshot,
+  });
+  assert.equal(detectedOpenAi.ok, true, JSON.stringify(detectedOpenAi.issues, null, 2));
+  assert.equal(detectedOpenAi.profileName, "openai-first");
+});
+
+test("profile-switch reports redact secret IDs and values from secret_ref bindings", async () => {
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const target = snapshot.agents.find((agent) => agent.slug === "badacz");
+  target.adapterConfig = {
+    ...(target.adapterConfig ?? {}),
+    instructionsFilePath: "/srv/managed/AGENTS.md",
+    paperclipSkillSync: { desiredSkills: ["paperclipai/paperclip/paperclip"] },
+    "access.STRIPE": {
+      type: "secret_ref",
+      secretId: SAMPLE_SECRET_ID,
+      version: "latest",
+    },
+    env: {
+      OPENAI_API_KEY: {
+        type: "secret_ref",
+        secretId: SAMPLE_SECRET_ID_B,
+      },
+    },
+  };
+  const plan = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+    profileName: "openai-first",
+  });
+  assert.equal(plan.ok, true, JSON.stringify(plan.blockers, null, 2));
+  const step = plan.planned.find((item) => item.slug === "badacz");
+  assert.ok(step);
+  assert.equal(step.patch.adapterConfig["access.STRIPE"].secretId, SAMPLE_SECRET_ID);
+
+  const { redactSecrets } = await import("../lib/load.mjs");
+  const redactedPlan = redactSecrets({
+    planned: plan.planned.map((item) => ({
+      slug: item.slug,
+      adapterConfig: item.patch.adapterConfig,
+    })),
+  });
+  const serialized = JSON.stringify(redactedPlan);
+  assert.equal(serialized.includes(SAMPLE_SECRET_ID), false);
+  assert.equal(serialized.includes(SAMPLE_SECRET_ID_B), false);
+  assert.equal(serialized.includes("sk-"), false);
+
+  const report = await previewProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+    profileName: "openai-first",
+  });
+  const reportSerialized = JSON.stringify(report);
+  assert.equal(reportSerialized.includes(SAMPLE_SECRET_ID), false);
+  assert.equal(reportSerialized.includes(SAMPLE_SECRET_ID_B), false);
+});
+
+test("redacted snapshot detect/preview preserves marker and stays profile-matched without emitting raw IDs", async () => {
+  const { redactSecrets, SECRET_REDACTION_MARKER } = await import("../lib/load.mjs");
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const openAiPlan = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+    profileName: "openai-first",
+  });
+  assert.equal(openAiPlan.ok, true, JSON.stringify(openAiPlan.blockers, null, 2));
+  applyPlanToSnapshot(snapshot, openAiPlan);
+
+  const target = snapshot.agents.find((agent) => agent.slug === "badacz");
+  target.adapterConfig = {
+    ...(target.adapterConfig ?? {}),
+    "access.STRIPE": {
+      type: "secret_ref",
+      secretId: SAMPLE_SECRET_ID,
+      version: "latest",
+    },
+    env: {
+      ...(target.adapterConfig.env ?? {}),
+      PROVIDER_TOKEN: {
+        type: "secret_ref",
+        secretId: SAMPLE_SECRET_ID_B,
+        version: 1,
+      },
+    },
+  };
+
+  const profilesDoc = loadDesired(DESIRED_DIR).profiles;
+  const liveDetected = detectProviderProfileState({
+    profilesDoc,
+    liveSnapshot: snapshot,
+  });
+  assert.equal(liveDetected.ok, true, JSON.stringify(liveDetected.issues, null, 2));
+  assert.equal(liveDetected.profileName, "openai-first");
+
+  const redacted = redactSecrets(structuredClone(snapshot));
+  assert.equal(
+    redacted.agents.find((agent) => agent.slug === "badacz").adapterConfig["access.STRIPE"].secretId,
+    SECRET_REDACTION_MARKER,
+  );
+  assert.equal(
+    JSON.stringify(redacted).includes(SAMPLE_SECRET_ID),
+    false,
+  );
+  assert.equal(
+    JSON.stringify(redacted).includes(SAMPLE_SECRET_ID_B),
+    false,
+  );
+
+  const withoutFlag = detectProviderProfileState({
+    profilesDoc,
+    liveSnapshot: redacted,
+    allowRedactedSecretRefs: false,
+  });
+  assert.equal(withoutFlag.ok, false);
+
+  const withFlag = detectProviderProfileState({
+    profilesDoc,
+    liveSnapshot: redacted,
+    allowRedactedSecretRefs: true,
+  });
+  assert.equal(withFlag.ok, true, JSON.stringify(withFlag.issues, null, 2));
+  assert.equal(withFlag.profileName, "openai-first");
+
+  const preview = await previewProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: redacted,
+    profileName: "openai-first",
+  });
+  assert.equal(preview.ok, true, JSON.stringify(preview.failed, null, 2));
+  const previewSerialized = JSON.stringify(preview);
+  assert.equal(previewSerialized.includes(SAMPLE_SECRET_ID), false);
+  assert.equal(previewSerialized.includes(SAMPLE_SECRET_ID_B), false);
+  assert.equal(previewSerialized.includes("sk-"), false);
+});
+
+test("mutating plan and apply fail closed on redacted secretId before writes", async () => {
+  const { redactSecrets, SECRET_REDACTION_MARKER } = await import("../lib/load.mjs");
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const target = snapshot.agents.find((agent) => agent.slug === "badacz");
+  target.adapterConfig = {
+    ...(target.adapterConfig ?? {}),
+    instructionsFilePath: "/srv/managed/AGENTS.md",
+    paperclipSkillSync: { desiredSkills: ["paperclipai/paperclip/paperclip"] },
+    "access.STRIPE": {
+      type: "secret_ref",
+      secretId: SAMPLE_SECRET_ID,
+      version: "latest",
+    },
+  };
+  const redacted = redactSecrets(structuredClone(snapshot));
+  assert.equal(
+    redacted.agents.find((agent) => agent.slug === "badacz").adapterConfig["access.STRIPE"].secretId,
+    SECRET_REDACTION_MARKER,
+  );
+
+  const plan = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: redacted,
+    profileName: "openai-first",
+  });
+  assert.equal(plan.ok, false);
+  assert.ok(
+    plan.blockers.some((item) => String(item).includes("secretId must be a uuid")),
+    JSON.stringify(plan.blockers),
+  );
+  assert.equal(JSON.stringify(plan).includes(SAMPLE_SECRET_ID), false);
+
+  const api = createApiMock(redacted);
+  const backup = makeBackupGate();
+  const stateBackupFile = path.join(
+    mkdtempSync(path.join(os.tmpdir(), "jarvis-state-redacted-")),
+    "state.json",
+  );
+  const report = await applyProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    companyId: "company-jarvis",
+    profileName: "openai-first",
+    confirmProfile: "openai-first",
+    backupGate: backup,
+    stateBackupFile,
+    api,
+    liveSnapshot: redacted,
+    runtimeEnv: OPENAI_RUNTIME_ENV,
+  });
+  assert.equal(report.ok, false);
+  assert.ok(
+    report.failed.some((item) => item.step === "plan" && String(item.error).includes("secretId must be a uuid")),
+    JSON.stringify(report.failed, null, 2),
+  );
+  assert.equal(api.patchCalls.length, 0);
+  assert.equal(api.putCalls.length, 0);
+  assert.equal(report.writesSucceeded, 0);
+});
+
+test("allowRedactedSecretRefs still rejects malformed non-marker secretId", () => {
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const target = snapshot.agents.find((agent) => agent.slug === "badacz");
+  target.adapterConfig = {
+    model: "claude-sonnet-5",
+    instructionsFilePath: "/srv/managed/AGENTS.md",
+    paperclipSkillSync: { desiredSkills: ["paperclipai/paperclip/paperclip"] },
+    "access.BAD": {
+      type: "secret_ref",
+      secretId: "not-a-uuid-or-marker",
+    },
+  };
+  const plan = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snapshot,
+    profileName: "openai-first",
+    allowRedactedSecretRefs: true,
+  });
+  assert.equal(plan.ok, false);
+  assert.ok(
+    plan.blockers.some((item) => String(item).includes("malformed secret_ref")),
+    JSON.stringify(plan.blockers),
+  );
+});
+
 test("anthropic plan sets full safe adapter config and drops stale codex fields", () => {
   const snapshot = structuredClone(liveAligned);
   setSwitchablePaused(snapshot);
@@ -1129,6 +1656,47 @@ test("openai apply updates stale bundle before first agent patch and verifies GE
         && String(entry.url).includes("/instructions-bundle/file"),
     ),
   );
+});
+
+test("openai apply migrates from legacy full AGENTS-CODEX.md to compact entrypoint", async () => {
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const legacyInstructions = "legacy full AGENTS-CODEX private content\n";
+  const api = createApiMock(snapshot, {
+    instructionsBundleState: {
+      "*": {
+        [JARVIS_CODEX_BUNDLE_PATH]: null,
+        [JARVIS_CODEX_FULL_BUNDLE_PATH]: legacyInstructions,
+      },
+    },
+  });
+  const stateBackupFile = path.join(
+    mkdtempSync(path.join(os.tmpdir(), "jarvis-state-migrate-")),
+    "pre.json",
+  );
+  const report = await applyProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    companyId: "company-jarvis",
+    profileName: "openai-first",
+    confirmProfile: "openai-first",
+    backupGate: makeBackupGate(),
+    stateBackupFile,
+    api,
+    liveSnapshot: snapshot,
+    runtimeEnv: OPENAI_RUNTIME_ENV,
+  });
+  assert.equal(report.ok, true, JSON.stringify(report.failed, null, 2));
+  const savedBackup = JSON.parse(readFileSync(stateBackupFile, "utf8"));
+  assert.equal(savedBackup.jarvisInstructions.path, JARVIS_CODEX_FULL_BUNDLE_PATH);
+  assert.equal(savedBackup.jarvisInstructions.content, legacyInstructions);
+  assert.equal(api.putCalls.length, 1);
+  assert.equal(api.putCalls[0].body.path, JARVIS_CODEX_BUNDLE_PATH);
+  assert.equal(api.putCalls[0].body.content, COMMITTED_JARVIS_CODEX_BUNDLE_CONTENT);
+  assert.equal(
+    api.peekBySlug("jarvis").adapterConfig.instructionsEntryFile,
+    JARVIS_CODEX_BUNDLE_PATH,
+  );
+  assert.equal(api.peekBundleBySlug("jarvis"), COMMITTED_JARVIS_CODEX_BUNDLE_CONTENT);
 });
 
 test("openai backup and rollback preserve exact prior Jarvis instructions without reporting them", async () => {
@@ -1557,15 +2125,17 @@ test("apply backup keeps exact secret_ref for rollback while report remains reda
   applyPlanToSnapshot(snapshot, anthropicPlan);
   const badacz = snapshot.agents.find((agent) => agent.slug === "badacz");
   const czytacz = snapshot.agents.find((agent) => agent.slug === "czytacz-transkryptow");
-  const secretRefValue = "secret://companies/company-jarvis/openai-api-key";
+  const secretId = SAMPLE_SECRET_ID;
+  const secretBinding = {
+    type: "secret_ref",
+    secretId,
+    version: "latest",
+  };
   badacz.adapterType = "codex_local";
   badacz.adapterConfig = {
     model: "gpt-5.6-sol",
     env: {
-      OPENAI_API_KEY: {
-        type: "secret_ref",
-        secretRef: secretRefValue,
-      },
+      OPENAI_API_KEY: secretBinding,
     },
   };
   badacz.runtimeConfig = { heartbeat: { enabled: false, wakeOnDemand: true, maxConcurrentRuns: 1 } };
@@ -1599,9 +2169,9 @@ test("apply backup keeps exact secret_ref for rollback while report remains reda
 
   const savedBackup = JSON.parse(readFileSync(stateBackupFile, "utf8"));
   const savedBadacz = savedBackup.agents.find((row) => row.slug === "badacz");
-  assert.equal(
-    savedBadacz.state.adapterConfig.env.OPENAI_API_KEY.secretRef,
-    secretRefValue,
+  assert.deepEqual(
+    savedBadacz.state.adapterConfig.env.OPENAI_API_KEY,
+    secretBinding,
   );
 
   const rollbackCall = api.patchCalls.find(
@@ -1610,8 +2180,14 @@ test("apply backup keeps exact secret_ref for rollback while report remains reda
   assert.ok(rollbackCall);
   assert.deepEqual(rollbackCall.body.adapterConfig, savedBadacz.state.adapterConfig);
 
+  const forwardBadacz = api.patchCalls.find(
+    (call) => call.slug === "badacz" && call.body.adapterType === "claude_local",
+  );
+  assert.ok(forwardBadacz);
+  assert.deepEqual(forwardBadacz.body.adapterConfig.env.OPENAI_API_KEY, secretBinding);
+
   const serializedReport = JSON.stringify(report);
-  assert.equal(serializedReport.includes(secretRefValue), false);
+  assert.equal(serializedReport.includes(secretId), false);
 });
 
 test("apply verify uses skills GET when agent GET omits desiredSkills", async () => {
@@ -1737,4 +2313,388 @@ test("apply fails closed when skills GET is missing desiredSkills array", async 
   );
   assert.ok(report.rolledBack.some((item) => item.slug === "badacz"));
   assert.deepEqual(api.peekBySlug("badacz"), baselineBadacz);
+});
+
+function snapshotWithEmptyInstructionRepair(slug) {
+  const snapshot = structuredClone(liveAligned);
+  setSwitchablePaused(snapshot);
+  const agent = snapshot.agents.find((row) => row.slug === slug);
+  assert.ok(agent, `fixture must include ${slug}`);
+  agent.instructions = "";
+  const bi = (snapshot.builtIns ?? []).find((row) => row.agentId === agent.id);
+  if (bi) bi.instructions = "";
+  snapshot.completeness = {
+    ...(snapshot.completeness ?? {}),
+    emptyInstructionRepairsNeeded: [
+      `${slug}: AGENTS.md missing/empty after trim (repairable via apply empty-bundle seed)`,
+    ],
+    emptyInstructionRepairSlugs: [slug],
+  };
+  return { snapshot, agent };
+}
+
+function liveSnapshotForRepairScope({
+  slug,
+  instructions = "",
+  repairSlugs = [slug],
+  metadata = undefined,
+  omitSlug = false,
+}) {
+  const agent = {
+    id: `agent-${slug ?? "missing-slug"}`,
+    name: slug ?? "Missing Slug Agent",
+    instructions,
+  };
+  if (!omitSlug) agent.slug = slug;
+  if (metadata !== undefined) agent.metadata = metadata;
+  return {
+    agents: [agent],
+    completeness: {
+      emptyInstructionRepairSlugs: repairSlugs,
+    },
+  };
+}
+
+test("empty-instruction repair scope tolerates non-switchable portable with package seed", () => {
+  const scope = assertProfileSwitchEmptyInstructionRepairScope({
+    liveSnapshot: liveSnapshotForRepairScope({ slug: "mi-sie-kodu-codex-szybki" }),
+    switchableSlugs: SWITCHABLE,
+    packageDir: PACKAGE_DIR,
+  });
+  assert.equal(scope.ok, true, JSON.stringify(scope.errors, null, 2));
+});
+
+test("empty-instruction repair scope fails for switchable slug", () => {
+  const scope = assertProfileSwitchEmptyInstructionRepairScope({
+    liveSnapshot: liveSnapshotForRepairScope({ slug: "badacz" }),
+    switchableSlugs: SWITCHABLE,
+    packageDir: PACKAGE_DIR,
+  });
+  assert.equal(scope.ok, false);
+  assert.ok(scope.errors.some((msg) => msg.includes("switchable/affected") && msg.includes("badacz")));
+});
+
+test("empty-instruction repair scope fails when package AGENTS.md is empty", () => {
+  const tmpPkg = mkdtempSync(path.join(os.tmpdir(), "jarvis-empty-pkg-"));
+  const agentDir = path.join(tmpPkg, "agents", "mi-sie-kodu-codex-szybki");
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(path.join(agentDir, "AGENTS.md"), "   \n");
+  const scope = assertProfileSwitchEmptyInstructionRepairScope({
+    liveSnapshot: liveSnapshotForRepairScope({ slug: "mi-sie-kodu-codex-szybki" }),
+    switchableSlugs: SWITCHABLE,
+    packageDir: tmpPkg,
+  });
+  assert.equal(scope.ok, false);
+  assert.ok(scope.errors.some((msg) => msg.includes("canonical package") && msg.includes("mi-sie-kodu-codex-szybki")));
+});
+
+test("empty-instruction repair scope fails when structured slug list omits a live empty agent", () => {
+  const scope = assertProfileSwitchEmptyInstructionRepairScope({
+    liveSnapshot: liveSnapshotForRepairScope({
+      slug: "mi-sie-kodu-codex-szybki",
+      repairSlugs: [],
+    }),
+    switchableSlugs: SWITCHABLE,
+    packageDir: PACKAGE_DIR,
+  });
+  assert.equal(scope.ok, false);
+  assert.ok(
+    scope.errors.some(
+      (msg) => msg.includes("mi-sie-kodu-codex-szybki")
+        && msg.includes("missing from")
+        && msg.includes("emptyInstructionRepairSlugs"),
+    ),
+    JSON.stringify(scope.errors, null, 2),
+  );
+});
+
+test("empty-instruction repair scope fails when structured slug list is tampered", () => {
+  const omittedLive = assertProfileSwitchEmptyInstructionRepairScope({
+    liveSnapshot: liveSnapshotForRepairScope({
+      slug: "mi-sie-kodu-codex-szybki",
+      repairSlugs: ["mi-sie-kodu-codex"],
+    }),
+    switchableSlugs: SWITCHABLE,
+    packageDir: PACKAGE_DIR,
+  });
+  assert.equal(omittedLive.ok, false);
+  assert.ok(
+    omittedLive.errors.some(
+      (msg) => msg.includes("mi-sie-kodu-codex-szybki") && msg.includes("missing from"),
+    ),
+    JSON.stringify(omittedLive.errors, null, 2),
+  );
+  assert.ok(
+    omittedLive.errors.some(
+      (msg) => msg.includes("mi-sie-kodu-codex")
+        && msg.includes("no agent with null/empty/whitespace instructions"),
+    ),
+    JSON.stringify(omittedLive.errors, null, 2),
+  );
+
+  const phantomSlug = assertProfileSwitchEmptyInstructionRepairScope({
+    liveSnapshot: liveSnapshotForRepairScope({
+      slug: "mi-sie-kodu-codex-szybki",
+      instructions: "non-empty live bundle",
+      repairSlugs: ["mi-sie-kodu-codex-szybki"],
+    }),
+    switchableSlugs: SWITCHABLE,
+    packageDir: PACKAGE_DIR,
+  });
+  assert.equal(phantomSlug.ok, false);
+  assert.ok(
+    phantomSlug.errors.some(
+      (msg) => msg.includes("mi-sie-kodu-codex-szybki")
+        && msg.includes("no agent with null/empty/whitespace instructions"),
+    ),
+    JSON.stringify(phantomSlug.errors, null, 2),
+  );
+});
+
+test("empty-instruction repair scope fails for empty agent without slug", () => {
+  const scope = assertProfileSwitchEmptyInstructionRepairScope({
+    liveSnapshot: liveSnapshotForRepairScope({
+      slug: null,
+      omitSlug: true,
+      repairSlugs: [],
+    }),
+    switchableSlugs: SWITCHABLE,
+    packageDir: PACKAGE_DIR,
+  });
+  assert.equal(scope.ok, false);
+  assert.ok(
+    scope.errors.some(
+      (msg) => msg.includes("requires a non-empty slug")
+        && msg.includes("emptyInstructionRepairSlugs"),
+    ),
+    JSON.stringify(scope.errors, null, 2),
+  );
+});
+
+test("empty-instruction repair scope fails for built-in empty agent", () => {
+  const scope = assertProfileSwitchEmptyInstructionRepairScope({
+    liveSnapshot: liveSnapshotForRepairScope({
+      slug: "summarizer",
+      metadata: { paperclipBuiltInAgent: { key: "summarizer" } },
+    }),
+    switchableSlugs: SWITCHABLE,
+    packageDir: PACKAGE_DIR,
+  });
+  assert.equal(scope.ok, false);
+  assert.ok(
+    scope.errors.some((msg) => msg.includes("built-in") && msg.includes("summarizer")),
+    JSON.stringify(scope.errors, null, 2),
+  );
+});
+
+test("non-switchable HTTP 404 plus flag lets profile-switch planning and apply proceed with zero instruction PUTs", async () => {
+  const companyId = "company-jarvis";
+
+  // Align switchable agents to openai-first, then simulate a fresh capture that
+  // normalized non-switchable mi-sie-kodu-codex-szybki AGENTS.md HTTP 404 under
+  // the explicit repair flag (structured repair slugs + empty live instructions).
+  const captured = structuredClone(liveAligned);
+  setSwitchablePaused(captured);
+  const openAiPlan = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: captured,
+    profileName: "openai-first",
+    runtimeEnv: OPENAI_RUNTIME_ENV,
+  });
+  assert.equal(openAiPlan.ok, true, JSON.stringify(openAiPlan.blockers, null, 2));
+  applyPlanToSnapshot(captured, openAiPlan);
+  for (const step of openAiPlan.allAffected ?? []) {
+    const bi = (captured.builtIns ?? []).find((row) => row.agentId === step.agentId);
+    if (!bi) continue;
+    bi.model = step.to.adapterConfig?.model ?? null;
+    bi.adapterConfig = structuredClone(step.to.adapterConfig);
+  }
+
+  const szybki = captured.agents.find((row) => row.slug === "mi-sie-kodu-codex-szybki");
+  assert.ok(szybki);
+  szybki.instructions = "";
+  captured.completeness = {
+    ...(captured.completeness ?? {}),
+    emptyInstructionRepairsNeeded: [
+      "mi-sie-kodu-codex-szybki: AGENTS.md missing/empty after trim (repairable via apply empty-bundle seed)",
+    ],
+    emptyInstructionRepairSlugs: ["mi-sie-kodu-codex-szybki"],
+  };
+
+  // Completeness gate with the repair flag accepts the empty non-switchable bundle.
+  const gated = await snapshotFleet({
+    fixture: captured,
+    internalCapture: true,
+    allowEmptyInstructionsRepair: true,
+  });
+  assert.deepEqual(gated.completeness.emptyInstructionRepairSlugs, ["mi-sie-kodu-codex-szybki"]);
+
+  const plan = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: gated,
+    profileName: "openai-first",
+    runtimeEnv: OPENAI_RUNTIME_ENV,
+  });
+  assert.equal(plan.ok, true, JSON.stringify(plan.blockers, null, 2));
+  assert.equal(plan.planned.length, 0);
+
+  let snapshotFnOpts = null;
+  const snapshotFn = async (opts) => {
+    snapshotFnOpts = opts;
+    return gated;
+  };
+  const api = createApiMock(gated);
+  const backup = makeBackupGate();
+  const stateBackupFile = path.join(mkdtempSync(path.join(os.tmpdir(), "jarvis-state-")), "pre.json");
+  const report = await applyProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    packageDir: PACKAGE_DIR,
+    companyId,
+    profileName: "openai-first",
+    confirmProfile: "openai-first",
+    backupGate: backup,
+    stateBackupFile,
+    api,
+    liveSnapshot: null,
+    snapshotFn,
+    runtimeEnv: OPENAI_RUNTIME_ENV,
+    allowEmptyInstructionsRepair: true,
+  });
+  assert.equal(report.ok, true, JSON.stringify(report.failed, null, 2));
+  assert.deepEqual(snapshotFnOpts, {
+    companyId,
+    internalCapture: true,
+    allowEmptyInstructionsRepair: true,
+  });
+  assert.equal(api.putCalls.length, 0, JSON.stringify(api.putCalls, null, 2));
+  assert.equal(api.patchCalls.length, 0);
+  assert.ok(!report.failed.some((item) => item.step === "empty-instruction-repair-scope"));
+});
+
+test("switchable empty AGENTS.md with flag fails before any writes", async () => {
+  const { snapshot } = snapshotWithEmptyInstructionRepair("badacz");
+  const openAiPlan = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: (() => {
+      const aligned = structuredClone(liveAligned);
+      setSwitchablePaused(aligned);
+      return aligned;
+    })(),
+    profileName: "openai-first",
+    runtimeEnv: OPENAI_RUNTIME_ENV,
+  });
+  assert.equal(openAiPlan.ok, true);
+  applyPlanToSnapshot(snapshot, openAiPlan);
+  // Re-apply empty after align (applyPlanToSnapshot does not touch instructions).
+  const badacz = snapshot.agents.find((agent) => agent.slug === "badacz");
+  badacz.instructions = "";
+  snapshot.completeness.emptyInstructionRepairSlugs = ["badacz"];
+
+  const api = createApiMock(snapshot);
+  const backup = makeBackupGate();
+  const stateBackupFile = path.join(mkdtempSync(path.join(os.tmpdir(), "jarvis-state-")), "pre.json");
+  const report = await applyProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    companyId: "company-jarvis",
+    profileName: "openai-first",
+    confirmProfile: "openai-first",
+    backupGate: backup,
+    stateBackupFile,
+    api,
+    liveSnapshot: snapshot,
+    runtimeEnv: OPENAI_RUNTIME_ENV,
+    allowEmptyInstructionsRepair: true,
+  });
+  assert.equal(report.ok, false);
+  assert.ok(
+    report.failed.some(
+      (item) => item.step === "empty-instruction-repair-scope"
+        && String(item.error).includes("badacz")
+        && String(item.error).includes("switchable/affected"),
+    ),
+    JSON.stringify(report.failed, null, 2),
+  );
+  assert.equal(api.putCalls.length, 0);
+  assert.equal(api.patchCalls.length, 0);
+  assert.equal(report.writesSucceeded, 0);
+});
+
+test("non-switchable empty with missing canonical package AGENTS.md fails before writes", async () => {
+  const { snapshot } = snapshotWithEmptyInstructionRepair("mi-sie-kodu-codex-szybki");
+  const openAiPlan = planProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: (() => {
+      const aligned = structuredClone(liveAligned);
+      setSwitchablePaused(aligned);
+      return aligned;
+    })(),
+    profileName: "openai-first",
+    runtimeEnv: OPENAI_RUNTIME_ENV,
+  });
+  assert.equal(openAiPlan.ok, true);
+  applyPlanToSnapshot(snapshot, openAiPlan);
+
+  const tmpPkg = mkdtempSync(path.join(os.tmpdir(), "jarvis-missing-pkg-"));
+  const agentDir = path.join(tmpPkg, "agents", "mi-sie-kodu-codex-szybki");
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(path.join(agentDir, "AGENTS.md"), "");
+
+  const api = createApiMock(snapshot);
+  const backup = makeBackupGate();
+  const stateBackupFile = path.join(mkdtempSync(path.join(os.tmpdir(), "jarvis-state-")), "pre.json");
+  const report = await applyProviderProfileSwitch({
+    desiredDir: DESIRED_DIR,
+    packageDir: tmpPkg,
+    companyId: "company-jarvis",
+    profileName: "openai-first",
+    confirmProfile: "openai-first",
+    backupGate: backup,
+    stateBackupFile,
+    api,
+    liveSnapshot: snapshot,
+    runtimeEnv: OPENAI_RUNTIME_ENV,
+    allowEmptyInstructionsRepair: true,
+  });
+  assert.equal(report.ok, false);
+  assert.ok(
+    report.failed.some(
+      (item) => item.step === "empty-instruction-repair-scope"
+        && String(item.error).includes("canonical package")
+        && String(item.error).includes("mi-sie-kodu-codex-szybki"),
+    ),
+    JSON.stringify(report.failed, null, 2),
+  );
+  assert.equal(api.putCalls.length, 0);
+  assert.equal(api.patchCalls.length, 0);
+});
+
+test("profile-switch apply without flag fails closed on AGENTS.md HTTP 404 capture", async () => {
+  const snapshotFn = async (opts) => {
+    assert.equal(opts.allowEmptyInstructionsRepair, false);
+    throw new Error(
+      "instructions GET failed for mi-sie-kodu-codex-szybki (id=agent-mi-sie-kodu-codex-szybki): HTTP 404",
+    );
+  };
+  const api = createApiMock(structuredClone(liveAligned));
+  const backup = makeBackupGate();
+  const stateBackupFile = path.join(mkdtempSync(path.join(os.tmpdir(), "jarvis-state-")), "pre.json");
+  await assert.rejects(
+    () =>
+      applyProviderProfileSwitch({
+        desiredDir: DESIRED_DIR,
+        companyId: "company-jarvis",
+        profileName: "openai-first",
+        confirmProfile: "openai-first",
+        backupGate: backup,
+        stateBackupFile,
+        api,
+        liveSnapshot: null,
+        snapshotFn,
+        runtimeEnv: OPENAI_RUNTIME_ENV,
+        allowEmptyInstructionsRepair: false,
+      }),
+    /instructions GET failed for mi-sie-kodu-codex-szybki .*HTTP 404/i,
+  );
+  assert.equal(api.putCalls.length, 0);
+  assert.equal(api.patchCalls.length, 0);
 });

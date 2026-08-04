@@ -99,6 +99,7 @@ describe("blockedInbox", () => {
       "blocked_chain_stalled",
       "blocked_by_unassigned_issue",
       "blocked_by_assigned_backlog_issue",
+      "blocked_by_assigned_issue_without_action_path",
       "blocked_by_cancelled_issue",
       "blocked_by_uninvokable_assignee",
       "in_review_without_action_path",
@@ -112,6 +113,12 @@ describe("blockedInbox", () => {
       expect(blockedVariantLabel(variant)).toBeTruthy();
       expect(blockedReasonLabel(reason)).toBeTruthy();
     }
+    expect(blockedReasonVariant("blocked_by_assigned_issue_without_action_path")).toBe(
+      "needs_attention",
+    );
+    expect(blockedReasonLabel("blocked_by_assigned_issue_without_action_path")).toBe(
+      "Blocker without action path",
+    );
   });
 
   it("ranks severity critical first and low last", () => {

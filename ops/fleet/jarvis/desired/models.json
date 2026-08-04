@@ -34,6 +34,11 @@
       "model": "gpt-5.6-sol",
       "adapterType": "codex_local",
       "status": "paused"
+    },
+    "mi-sie-kodu-codex-szybki": {
+      "model": "codex-mini-latest",
+      "adapterType": "codex_local",
+      "status": "paused"
     }
   },
   "defaultClaudeLocalModel": "claude-sonnet-5",

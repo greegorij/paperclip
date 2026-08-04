@@ -8,7 +8,7 @@
 
 | Content | Count |
 |---------|-------|
-| Agents | 27 |
+| Agents | 28 |
 | Skills | 37 |
 
 ### Agents
@@ -27,6 +27,7 @@
 | Kurator CRM | general | szef-komercyjny |
 | Kurator Vaultu | general | jarvis |
 | Mięsień Kodu Codex | Engineer | senior-programista |
+| Mięsień Kodu Codex Szybki | Engineer | senior-programista |
 | Mięsień Kodu Cursor | Engineer | senior-programista |
 | Mięsień Kodu GLM | Engineer | senior-programista |
 | Mięsień Recenzji GLM | qa | recenzent |

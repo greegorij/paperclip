@@ -41,6 +41,16 @@ Common options:
   --company-id <id>   Company id for live snapshot
   --api-url <url>     Override PAPERCLIP_API_URL
   --out <file>        Snapshot output path
+  --allow-empty-instruction-repair
+                      Snapshot: may complete with empty portable AGENTS.md
+                      (records repair-needed messages + emptyInstructionRepairSlugs).
+                      Built-in empty and any HTTP 500 still abort.
+                      profile-switch --apply: pass the same flag into live capture only.
+                      Does not repair or write instructions. After capture, fails closed
+                      if any empty-instruction slug is switchable/affected; non-switchable
+                      portable empties are tolerated only when package AGENTS.md is
+                      non-empty so normal fleet apply can repair afterward.
+                      Without this flag, behavior is unchanged (empty/404 aborts).
 
 Apply options:
   --apply                          Actually mutate (default: dry-run)
@@ -111,6 +121,7 @@ async function main() {
       companyId: args["company-id"],
       outPath: args.out ? path.resolve(args.out) : null,
       fixture,
+      allowEmptyInstructionsRepair: Boolean(args["allow-empty-instruction-repair"]),
     });
     console.log(
       JSON.stringify(
@@ -121,6 +132,10 @@ async function main() {
           skillLibrary: snap.skillLibrary?.length ?? null,
           completeness: snap.completeness ?? null,
           warnings: snap.warnings ?? [],
+          emptyInstructionRepairsNeeded:
+            snap.completeness?.emptyInstructionRepairsNeeded ?? [],
+          emptyInstructionRepairSlugs:
+            snap.completeness?.emptyInstructionRepairSlugs ?? [],
           out: args.out ?? null,
         },
         null,
@@ -223,6 +238,7 @@ async function main() {
     if (args.apply === true) {
       const result = await applyProviderProfileSwitch({
         desiredDir,
+        packageDir,
         companyId: args["company-id"] ?? null,
         profileName,
         confirmProfile: args["confirm-profile"] ?? null,
@@ -231,6 +247,7 @@ async function main() {
           backupSha256: args["backup-sha256"] ?? null,
         },
         stateBackupFile: args["state-backup-file"] ?? null,
+        allowEmptyInstructionsRepair: Boolean(args["allow-empty-instruction-repair"]),
       });
       console.log(JSON.stringify(result, null, 2));
       process.exit(result.ok ? 0 : 2);

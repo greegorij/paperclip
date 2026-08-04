@@ -44,6 +44,7 @@ const HIGH_RESPONSIBILITY_SLUGS = Object.freeze([
   "in-ynier-wdro-e",
   "konfigurator-systemu",
   "mi-sie-kodu-codex",
+  "mi-sie-kodu-codex-szybki",
   "mi-sie-kodu-cursor",
   "senior-programista",
   "specjalista-deck-w",

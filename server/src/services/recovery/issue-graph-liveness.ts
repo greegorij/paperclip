@@ -6,6 +6,7 @@ export type IssueLivenessSeverity = "warning" | "critical";
 export type IssueLivenessState =
   | "blocked_by_unassigned_issue"
   | "blocked_by_assigned_backlog_issue"
+  | "blocked_by_assigned_issue_without_action_path"
   | "blocked_by_uninvokable_assignee"
   | "blocked_by_cancelled_issue"
   | "invalid_review_participant"
@@ -553,6 +554,23 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
         recommendedOwnerCandidates: ownerCandidates,
         recommendedAction:
           `Review ${issueLabel(blocker)} and assign it to an active owner or replace the blocker with an actionable issue.`,
+        blockerIssueId: blocker.id,
+      });
+    }
+
+    // Assigned todo/in_progress without a real execution mechanism is not a live
+    // path — status+assignee alone will not wake anyone.
+    if (blocker.status === "todo" || blocker.status === "in_progress") {
+      return finding({
+        issue: source,
+        state: "blocked_by_assigned_issue_without_action_path",
+        reason: `${issueLabel(source)} is blocked by assigned ${blocker.status} issue ${issueLabel(blocker)} with no wake, active run, human owner, interaction, approval, monitor, or recovery issue owning the next action.`,
+        dependencyPath,
+        recoveryIssue: blocker,
+        recommendedOwnerCandidateAgentIds: ownerCandidates.map((candidate) => candidate.agentId),
+        recommendedOwnerCandidates: ownerCandidates,
+        recommendedAction:
+          `Wake or continue ${issueLabel(blocker)} with a real run/wake/retry/monitor path, or replace it with an actionable unblock issue.`,
         blockerIssueId: blocker.id,
       });
     }

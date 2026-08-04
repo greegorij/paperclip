@@ -1018,6 +1018,66 @@ export async function ensureAdapterExecutionTargetDirectory(
   }
 }
 
+/**
+ * Create an owner-only XDG runtime directory on the execution target that will
+ * consume it. Remote targets must never receive a Paperclip-host path here —
+ * `runtimeDir` is resolved inside the target filesystem (POSIX absolute).
+ *
+ * Uses the same SSH/sandbox shell seam as other remote directory checks, then
+ * `chmod 700` so agent-browser accepts the directory as a private runtime.
+ */
+export async function ensureAdapterExecutionTargetXdgRuntimeDir(
+  runId: string,
+  target: AdapterExecutionTarget | null | undefined,
+  runtimeDir: string,
+  options: Omit<AdapterExecutionTargetShellOptions, "cwd"> & { cwd?: string } = { env: {} },
+): Promise<void> {
+  if (!target || target.kind === "local") {
+    const { ensureAbsoluteDirectory } = await import("./server-utils.js");
+    await ensureAbsoluteDirectory(runtimeDir, { createIfMissing: true });
+    await fs.chmod(runtimeDir, 0o700);
+    return;
+  }
+
+  if (!runtimeDir.startsWith("/")) {
+    throw new Error(
+      `XDG runtime directory must be an absolute POSIX path on the remote target: "${runtimeDir}"`,
+    );
+  }
+
+  const shellOptions: AdapterExecutionTargetShellOptions = {
+    cwd: options.cwd?.trim() || target.remoteCwd,
+    env: options.env ?? {},
+    timeoutSec: options.timeoutSec ?? 15,
+    graceSec: options.graceSec ?? 5,
+    onLog: options.onLog,
+  };
+
+  await ensureAdapterExecutionTargetDirectory(runId, target, runtimeDir, {
+    ...shellOptions,
+    createIfMissing: true,
+  });
+
+  const quoted = shellQuote(runtimeDir);
+  // Explicit chmod: mkdir mode is masked by umask; agent-browser expects owner-only runtime.
+  const result = await runAdapterExecutionTargetShellCommand(
+    runId,
+    target,
+    `chmod 700 ${quoted} && [ -d ${quoted} ]`,
+    shellOptions,
+  );
+
+  if (result.timedOut) {
+    throw new Error(`Timed out securing XDG runtime directory on remote target: "${runtimeDir}"`);
+  }
+  if ((result.exitCode ?? 1) !== 0) {
+    const detail = (result.stderr || result.stdout || "").trim();
+    throw new Error(
+      `Could not secure XDG runtime directory "${runtimeDir}" on remote target${detail ? `: ${detail}` : "."}`,
+    );
+  }
+}
+
 export function adapterExecutionTargetSessionIdentity(
   target: AdapterExecutionTarget | null | undefined,
 ): Record<string, unknown> | null {

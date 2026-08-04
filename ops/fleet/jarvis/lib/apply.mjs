@@ -1,4 +1,4 @@
-import { loadDesired, skillShortName, redactSecrets } from "./load.mjs";
+import { loadDesired, loadPackage, skillShortName, redactSecrets } from "./load.mjs";
 import { assertBackupGate } from "./backup-gate.mjs";
 import { diffFleet } from "./diff.mjs";
 import { validateFleet } from "./validate.mjs";
@@ -7,6 +7,7 @@ import { preflightSkillKeyResolutions } from "./skill-keys.mjs";
 import {
   verifyAgentModel,
   verifyAgentSkills,
+  verifyAgentInstructionsContent,
   verifyRoutine,
 } from "./write-verify.mjs";
 
@@ -36,13 +37,15 @@ export function validateApplyChanges(changes) {
     };
   }
   const forbiddenInstructionChanges = changes.filter(
-    (c) => c?.kind === "agent-instructions" || c?.kind === "summarizer-instructions-patch",
+    (c) =>
+      c?.kind === "agent-instructions"
+      || c?.kind === "summarizer-instructions-patch",
   );
   if (forbiddenInstructionChanges.length > 0) {
     return {
       ok: false,
       error:
-        "instruction changes are forbidden: live instructions are outside automated reconciliation",
+        "instruction changes are forbidden: live instructions are outside automated reconciliation (empty-bundle repair uses agent-instructions-empty-repair only)",
       items: forbiddenInstructionChanges,
     };
   }
@@ -85,6 +88,7 @@ export async function applyFleet({
   }
 
   const desired = loadDesired(desiredDir);
+  const pkg = loadPackage(packageDir);
 
   const validation = validateFleet({
     packageDir,
@@ -218,6 +222,56 @@ export async function applyFleet({
           );
         }
         report.completed.push({ ...step, result: "applied", verified: { status: "paused" } });
+        continue;
+      }
+
+      if (change.kind === "agent-instructions-empty-repair") {
+        const live = liveBySlug.get(change.target);
+        if (!live?.id) throw new Error(`missing live agent for empty-instruction repair ${change.target}`);
+        const liveInstructions = typeof live.instructions === "string" ? live.instructions : "";
+        if (liveInstructions.trim().length > 0) {
+          report.skipped.push({
+            ...step,
+            reason: "live instruction bundle is non-empty — refusing overwrite",
+          });
+          continue;
+        }
+        const packageInstructions = pkg.agentBySlug?.[change.target]?.instructions ?? null;
+        if (typeof packageInstructions !== "string" || packageInstructions.trim().length === 0) {
+          throw new Error(
+            `empty-instruction repair requires non-empty package AGENTS.md for ${change.target}`,
+          );
+        }
+        const body = {
+          path: "AGENTS.md",
+          content: packageInstructions,
+        };
+        const res = await client.put(
+          `/api/agents/${live.id}/instructions-bundle/file`,
+          body,
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        markWriteOk();
+        const verified = await verifyAgentInstructionsContent(client, {
+          agentId: live.id,
+          expectedContent: packageInstructions,
+        });
+        if (!verified.ok) throw new Error(verified.error);
+        live.instructions = packageInstructions;
+        report.completed.push({
+          ...step,
+          result: "applied",
+          requestBody: {
+            path: body.path,
+            contentLength: packageInstructions.length,
+            contentSha256: verified.contentSha256,
+          },
+          verified: {
+            ok: true,
+            contentLength: verified.contentLength,
+            contentSha256: verified.contentSha256,
+          },
+        });
         continue;
       }
 

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "agents": {
+    "konfigurator-systemu": {
+      "filesystemExtraPaths": [
+        "/home/ccuser/.local/agent-tools",
+        "/home/ccuser/.agent-browser/browsers"
+      ],
+      "networkAllowlistAdditions": [
+        "workos.grzegorzgolas.com",
+        "frappe.grzegorzgolas.com"
+      ]
+    }
+  }
+}

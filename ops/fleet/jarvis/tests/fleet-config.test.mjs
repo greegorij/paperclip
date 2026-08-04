@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
-import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, readdirSync, existsSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  existsSync,
+  cpSync,
+} from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 
 import { PACKAGE_DIR, DESIRED_DIR, FIXTURES_DIR, FLEET_ROOT } from "../lib/paths.mjs";
-import { loadDesired, loadPackage } from "../lib/load.mjs";
+import { loadDesired, loadPackage, redactSecrets, SECRET_REDACTION_MARKER } from "../lib/load.mjs";
 import { validateFleet } from "../lib/validate.mjs";
 import { validateSkillRuntime } from "../lib/skill-state.mjs";
 import { checkAllContradictions } from "../lib/contradictions.mjs";
@@ -83,6 +91,7 @@ function applyManagedOpenAiRoleFit(snapshot) {
       workspaceAccess: "ro",
       networkAllowlist: OPENAI_SAFE_ALLOWLIST,
       maxDailyRuns: 3,
+      maxConcurrentRuns: 1,
     },
     "mi-sie-kodu-codex": {
       model: "gpt-5.6-sol",
@@ -90,13 +99,25 @@ function applyManagedOpenAiRoleFit(snapshot) {
       workspaceAccess: "rw",
       networkAllowlist: OPENAI_SAFE_ALLOWLIST_WITH_GITHUB,
       maxDailyRuns: 1,
+      maxConcurrentRuns: 1,
+    },
+    "mi-sie-kodu-codex-szybki": {
+      model: "codex-mini-latest",
+      effort: "low",
+      workspaceAccess: "rw",
+      networkAllowlist: OPENAI_SAFE_ALLOWLIST_WITH_GITHUB,
+      maxDailyRuns: 8,
+      maxConcurrentRuns: 2,
+      fastMode: true,
+      timeoutSec: 900,
+      outputInactivityTimeoutMs: 360000,
     },
   };
   for (const [slug, spec] of Object.entries(specs)) {
     const agent = bySlug.get(slug);
     assert.ok(agent, `fixture must include ${slug}`);
     agent.status = "paused";
-    agent.maxConcurrentRuns = 1;
+    agent.maxConcurrentRuns = spec.maxConcurrentRuns ?? 1;
     agent.adapterType = "codex_local";
     agent.model = spec.model;
     agent.heartbeat = {
@@ -109,7 +130,7 @@ function applyManagedOpenAiRoleFit(snapshot) {
       engine: "cli",
       model: spec.model,
       modelReasoningEffort: spec.effort,
-      fastMode: false,
+      fastMode: spec.fastMode ?? false,
       search: false,
       dangerouslyBypassApprovalsAndSandbox: false,
       filesystemScope: "workspace",
@@ -117,6 +138,10 @@ function applyManagedOpenAiRoleFit(snapshot) {
       networkScope: "allowlist",
       networkAllowlist: [...spec.networkAllowlist],
       extraArgs: [...REQUIRED_POLICY_EXTRA_ARGS],
+      ...(spec.timeoutSec != null ? { timeoutSec: spec.timeoutSec } : {}),
+      ...(spec.outputInactivityTimeoutMs != null
+        ? { outputInactivityTimeoutMs: spec.outputInactivityTimeoutMs }
+        : {}),
     };
   }
   return snapshot;
@@ -231,6 +256,7 @@ function jsonResponse(status, data) {
 function createLiveSnapshotFetchMock({
   companyId = "company-jarvis",
   detailFailureById = new Map(),
+  instructionsFailureById = new Map(),
 } = {}) {
   const desiredSkillStateForAdapter = (adapterType) => {
     if (adapterType === "opencode_local" || adapterType === "cursor") return "installed";
@@ -273,7 +299,7 @@ function createLiveSnapshotFetchMock({
       maxConcurrentRuns: 1,
     },
   };
-  const heartbeatRoleSlugs = ["zwiadowca-kodu", "mi-sie-kodu-codex"];
+  const heartbeatRoleSlugs = ["zwiadowca-kodu", "mi-sie-kodu-codex", "mi-sie-kodu-codex-szybki"];
   for (const slug of heartbeatRoleSlugs) {
     const sourceAgent = source.agents.find((agent) => agent.slug === slug);
     assert.ok(sourceAgent, `fixture must include ${slug}`);
@@ -310,7 +336,10 @@ function createLiveSnapshotFetchMock({
     const instructionsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/instructions-bundle\/file$/);
     if (instructionsMatch) {
       if (searchParams.get("path") !== "AGENTS.md") return jsonResponse(404, { error: "path not found" });
-      const agent = detailsById.get(instructionsMatch[1]);
+      const agentId = instructionsMatch[1];
+      const failedStatus = instructionsFailureById.get(agentId);
+      if (failedStatus) return jsonResponse(failedStatus, { error: "instructions failed" });
+      const agent = detailsById.get(agentId);
       return jsonResponse(200, { content: agent.instructions });
     }
 
@@ -346,11 +375,12 @@ function createLiveSnapshotFetchMock({
   };
 }
 
-test("package contains 27 portable agents and excludes built-ins", () => {
+test("package contains 28 portable agents and excludes built-ins", () => {
   const pkg = loadPackage(PACKAGE_DIR);
-  assert.equal(pkg.agents.length, 27);
+  assert.equal(pkg.agents.length, 28);
   assert.equal(pkg.agentBySlug.summarizer, undefined);
   assert.equal(pkg.agentBySlug["reflection-coach"], undefined);
+  assert.ok(pkg.agentBySlug["mi-sie-kodu-codex-szybki"]?.instructions?.trim().length > 0);
 });
 
 test("package does not vendor skills/local or skills/company", () => {
@@ -365,6 +395,11 @@ test("desired uses JSON SSOT only — no YAML mirrors", () => {
 
 test("versioned fleet tree has no /home/, /Users/, ~/, or token-like values", () => {
   const roots = [DESIRED_DIR, PACKAGE_DIR, path.join(FLEET_ROOT, "lib"), path.join(FLEET_ROOT, "bin")];
+  // Explicit operator-host grants for Konfigurator browser capability (sandbox RO mounts + protocol).
+  const hostPathAllowlist = new Set([
+    path.join(DESIRED_DIR, "runtime-capabilities.json"),
+    path.join(PACKAGE_DIR, "agents", "konfigurator-systemu", "AGENTS.md"),
+  ]);
   const offenders = [];
   function walk(dir) {
     if (!existsSync(dir)) return;
@@ -373,7 +408,9 @@ test("versioned fleet tree has no /home/, /Users/, ~/, or token-like values", ()
       if (name.isDirectory()) walk(p);
       else if (/\.(json|md|ya?ml|mjs|txt)$/.test(name.name)) {
         const text = readFileSync(p, "utf8");
-        if (/\/home\/|\/Users\/|~\//.test(text)) offenders.push(`${p}: host path`);
+        if (/\/home\/|\/Users\/|~\//.test(text) && !hostPathAllowlist.has(p)) {
+          offenders.push(`${p}: host path`);
+        }
         if (/sk-[A-Za-z0-9]{10,}|pcp_[A-Za-z0-9]+|ghp_[A-Za-z0-9]+/.test(text)) {
           offenders.push(`${p}: token-like`);
         }
@@ -402,10 +439,10 @@ test("export warnings are anonymized categories without host paths", () => {
 test("validate package+desired passes without live snapshot", () => {
   const result = validateFleet({ packageDir: PACKAGE_DIR, desiredDir: DESIRED_DIR });
   assert.equal(result.ok, true, JSON.stringify(result.errors, null, 2));
-  assert.equal(result.portableAgentCount, 27);
+  assert.equal(result.portableAgentCount, 28);
 });
 
-test("validate live fixture covers 29 agents", () => {
+test("validate live fixture covers 30 agents", () => {
   const result = validateFleet({
     packageDir: PACKAGE_DIR,
     desiredDir: DESIRED_DIR,
@@ -556,12 +593,139 @@ test("target models and Codex manageStatus paused are encoded", () => {
   assert.equal(bySlug["mi-sie-kodu-codex"].expectedRuntimePolicy.heartbeat.enabled, false);
   assert.equal(bySlug["mi-sie-kodu-codex"].expectedRuntimePolicy.heartbeat.wakeOnDemand, true);
   assert.equal(bySlug["mi-sie-kodu-codex"].expectedRuntimePolicy.heartbeat.maxDailyRuns, 1);
+
+  assert.equal(bySlug["mi-sie-kodu-codex-szybki"].model, "codex-mini-latest");
+  assert.equal(bySlug["mi-sie-kodu-codex-szybki"].adapterType, "codex_local");
+  assert.equal(bySlug["mi-sie-kodu-codex-szybki"].status, "paused");
+  assert.equal(bySlug["mi-sie-kodu-codex-szybki"].manageStatus, true);
+  assert.equal(bySlug["mi-sie-kodu-codex-szybki"].expectedRuntimePolicy.status, "paused");
+  assert.equal(bySlug["mi-sie-kodu-codex-szybki"].expectedRuntimePolicy.maxConcurrentRuns, 2);
+  assert.equal(bySlug["mi-sie-kodu-codex-szybki"].expectedRuntimePolicy.adapterType, "codex_local");
+  assert.equal(bySlug["mi-sie-kodu-codex-szybki"].expectedRuntimePolicy.model, "codex-mini-latest");
+  assert.equal(
+    bySlug["mi-sie-kodu-codex-szybki"].expectedRuntimePolicy.adapterConfig.modelReasoningEffort,
+    "low",
+  );
+  assert.equal(bySlug["mi-sie-kodu-codex-szybki"].expectedRuntimePolicy.adapterConfig.fastMode, true);
+  assert.equal(
+    bySlug["mi-sie-kodu-codex-szybki"].expectedRuntimePolicy.adapterConfig.filesystemWorkspaceAccess,
+    "rw",
+  );
+  assert.equal(
+    bySlug["mi-sie-kodu-codex-szybki"].expectedRuntimePolicy.adapterConfig.timeoutSec,
+    900,
+  );
+  assert.equal(
+    bySlug["mi-sie-kodu-codex-szybki"].expectedRuntimePolicy.adapterConfig.outputInactivityTimeoutMs,
+    360000,
+  );
+  assert.deepEqual(
+    bySlug["mi-sie-kodu-codex-szybki"].expectedRuntimePolicy.adapterConfig.networkAllowlist,
+    OPENAI_SAFE_ALLOWLIST_WITH_GITHUB,
+  );
+  assert.equal(bySlug["mi-sie-kodu-codex-szybki"].expectedRuntimePolicy.heartbeat.maxDailyRuns, 8);
   assert.ok(
     desired.agents.agents.filter(
       (a) =>
-        !["mi-sie-kodu-codex", "recenzent", "zwiadowca-kodu"].includes(a.slug) && a.manageStatus,
+        ![
+          "mi-sie-kodu-codex",
+          "mi-sie-kodu-codex-szybki",
+          "recenzent",
+          "zwiadowca-kodu",
+        ].includes(a.slug) && a.manageStatus,
     ).length === 0,
   );
+});
+
+function withMutatedDesiredAgents(mutateAgentsDoc, run) {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "jarvis-desired-policy-"));
+  cpSync(DESIRED_DIR, tmp, { recursive: true });
+  const agentsPath = path.join(tmp, "agents.json");
+  const doc = JSON.parse(readFileSync(agentsPath, "utf8"));
+  mutateAgentsDoc(doc);
+  writeFileSync(agentsPath, `${JSON.stringify(doc, null, 2)}\n`);
+  return run(tmp);
+}
+
+function findDesiredAgent(doc, slug) {
+  const agent = doc.agents.find((row) => row.slug === slug);
+  assert.ok(agent, `desired agents.json must include ${slug}`);
+  return agent;
+}
+
+test("validate rejects pre-existing managed role with maxConcurrentRuns 2", () => {
+  withMutatedDesiredAgents((doc) => {
+    findDesiredAgent(doc, "mi-sie-kodu-codex").expectedRuntimePolicy.maxConcurrentRuns = 2;
+  }, (desiredDir) => {
+    const result = validateFleet({ packageDir: PACKAGE_DIR, desiredDir });
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.errors.some(
+        (error) =>
+          error.code === "runtime-policy-max-concurrent"
+          && error.message.includes("mi-sie-kodu-codex")
+          && error.message.includes("must equal 1"),
+      ),
+      JSON.stringify(result.errors, null, 2),
+    );
+  });
+});
+
+test("validate rejects pre-existing managed role with timeout adapter keys", () => {
+  withMutatedDesiredAgents((doc) => {
+    const policy = findDesiredAgent(doc, "zwiadowca-kodu").expectedRuntimePolicy;
+    policy.adapterConfig.timeoutSec = 900;
+    policy.adapterConfig.outputInactivityTimeoutMs = 360000;
+  }, (desiredDir) => {
+    const result = validateFleet({ packageDir: PACKAGE_DIR, desiredDir });
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.errors.some(
+        (error) =>
+          error.code === "runtime-policy-adapter-config-structure"
+          && error.message.includes("zwiadowca-kodu"),
+      ),
+      JSON.stringify(result.errors, null, 2),
+    );
+  });
+});
+
+test("validate rejects fast Codex role with maxConcurrentRuns 1", () => {
+  withMutatedDesiredAgents((doc) => {
+    findDesiredAgent(doc, "mi-sie-kodu-codex-szybki").expectedRuntimePolicy.maxConcurrentRuns = 1;
+  }, (desiredDir) => {
+    const result = validateFleet({ packageDir: PACKAGE_DIR, desiredDir });
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.errors.some(
+        (error) =>
+          error.code === "runtime-policy-max-concurrent"
+          && error.message.includes("mi-sie-kodu-codex-szybki")
+          && error.message.includes("must equal 2"),
+      ),
+      JSON.stringify(result.errors, null, 2),
+    );
+  });
+});
+
+test("validate rejects fast Codex role missing timeout adapter keys", () => {
+  withMutatedDesiredAgents((doc) => {
+    const adapterConfig = findDesiredAgent(doc, "mi-sie-kodu-codex-szybki").expectedRuntimePolicy
+      .adapterConfig;
+    delete adapterConfig.timeoutSec;
+    delete adapterConfig.outputInactivityTimeoutMs;
+  }, (desiredDir) => {
+    const result = validateFleet({ packageDir: PACKAGE_DIR, desiredDir });
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.errors.some(
+        (error) =>
+          error.code === "runtime-policy-adapter-config-structure"
+          && error.message.includes("mi-sie-kodu-codex-szybki"),
+      ),
+      JSON.stringify(result.errors, null, 2),
+    );
+  });
 });
 
 async function assertValidateAndApplyRejectsPolicyDrift({ slug, mutate, errorCode }) {
@@ -980,7 +1144,9 @@ test("apply dry-run is offline — no API client / env required", async () => {
       !report.planned.some(
         (c) =>
           c.kind === "agent-pause" &&
-          ["recenzent", "zwiadowca-kodu", "mi-sie-kodu-codex"].includes(c.target),
+          ["recenzent", "zwiadowca-kodu", "mi-sie-kodu-codex", "mi-sie-kodu-codex-szybki"].includes(
+            c.target,
+          ),
       ),
     );
   } finally {
@@ -992,8 +1158,17 @@ test("apply dry-run is offline — no API client / env required", async () => {
 });
 
 test("apply does not change status of unmanaged agents even if paused in fixture", async () => {
+  const managedPaused = new Set([
+    "mi-sie-kodu-codex",
+    "mi-sie-kodu-codex-szybki",
+    "recenzent",
+    "zwiadowca-kodu",
+  ]);
   const pausedOthers = liveAligned.agents.filter(
-    (a) => a.status === "paused" && a.slug !== "mi-sie-kodu-codex" && !a.slug?.includes("summarizer"),
+    (a) =>
+      a.status === "paused"
+      && !managedPaused.has(a.slug)
+      && !a.slug?.includes("summarizer"),
   );
   assert.ok(pausedOthers.length > 0, "fixture should include paused unmanaged agents");
   const diff = diffFleet({
@@ -1001,7 +1176,7 @@ test("apply does not change status of unmanaged agents even if paused in fixture
     desiredDir: DESIRED_DIR,
     liveSnapshot: liveAligned,
   });
-  assert.ok(!diff.changes.some((c) => c.kind === "agent-pause" && c.target !== "mi-sie-kodu-codex"));
+  assert.ok(!diff.changes.some((c) => c.kind === "agent-pause" && !managedPaused.has(c.target)));
   assert.ok(!diff.changes.some((c) => c.kind === "agent-resume"));
 });
 
@@ -1029,6 +1204,215 @@ test("preflight rejects crafted instruction change kinds", () => {
   assert.equal(result.items.length, 2);
   assert.equal(result.items[0].target, "mi-sie-web");
   assert.equal(result.items[1].target, "summarizer");
+});
+
+test("preflight allows empty-bundle instruction repair kind", () => {
+  const result = validateApplyChanges([
+    {
+      kind: "agent-instructions-empty-repair",
+      target: "mi-sie-kodu-codex-szybki",
+      detail: "empty live",
+    },
+  ]);
+  assert.equal(result.ok, true);
+});
+
+test("diff plans empty-bundle repair and never overwrites non-empty live instructions", () => {
+  const emptySnap = structuredClone(liveAligned);
+  const szybki = emptySnap.agents.find((a) => a.slug === "mi-sie-kodu-codex-szybki");
+  assert.ok(szybki);
+  szybki.instructions = "   ";
+  const emptyDiff = diffFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: emptySnap,
+  });
+  const repair = emptyDiff.changes.find(
+    (c) => c.kind === "agent-instructions-empty-repair" && c.target === "mi-sie-kodu-codex-szybki",
+  );
+  assert.ok(repair, JSON.stringify(emptyDiff.changes, null, 2));
+  assert.equal(repair.api?.method, "PUT");
+  assert.match(repair.api?.path ?? "", /instructions-bundle\/file$/);
+
+  const nonEmptyDiff = diffFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: liveAligned,
+  });
+  assert.ok(
+    !nonEmptyDiff.changes.some((c) => c.kind === "agent-instructions-empty-repair"),
+    JSON.stringify(nonEmptyDiff.changes, null, 2),
+  );
+});
+
+test("apply seeds empty managed bundle from package and refuses overwrite of non-empty", async () => {
+  const pkg = loadPackage(PACKAGE_DIR);
+  const packageText = pkg.agentBySlug["mi-sie-kodu-codex-szybki"].instructions;
+  assert.ok(packageText.trim().length > 0);
+
+  const emptySnap = structuredClone(liveAligned);
+  const szybki = emptySnap.agents.find((a) => a.slug === "mi-sie-kodu-codex-szybki");
+  szybki.instructions = "";
+  const detailsById = new Map(emptySnap.agents.map((a) => [a.id, structuredClone(a)]));
+  let putCount = 0;
+  const api = {
+    dryRun: false,
+    async get(pathname) {
+      const match = pathname.match(/^\/api\/agents\/([^/]+)\/instructions-bundle\/file/);
+      if (match) {
+        const agent = detailsById.get(match[1]);
+        return { ok: true, status: 200, data: { content: agent?.instructions ?? "" } };
+      }
+      const agentMatch = pathname.match(/^\/api\/agents\/([^/]+)$/);
+      if (agentMatch) {
+        return { ok: true, status: 200, data: detailsById.get(agentMatch[1]) };
+      }
+      return { ok: false, status: 404, data: null };
+    },
+    async put(pathname, body) {
+      putCount += 1;
+      const match = pathname.match(/^\/api\/agents\/([^/]+)\/instructions-bundle\/file$/);
+      assert.ok(match);
+      const agent = detailsById.get(match[1]);
+      assert.equal(body.path, "AGENTS.md");
+      assert.equal(body.content, packageText);
+      agent.instructions = body.content;
+      return { ok: true, status: 200, data: { path: body.path, size: body.content.length } };
+    },
+    async patch() {
+      return { ok: false, status: 500, data: null };
+    },
+    async post() {
+      return { ok: false, status: 500, data: null };
+    },
+  };
+
+  const gate = (() => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "fleet-bak-"));
+    const file = path.join(dir, "db.bak");
+    writeFileSync(file, "backup-bytes");
+    const sha = createHash("sha256").update("backup-bytes").digest("hex");
+    return { backupFile: file, backupSha256: sha };
+  })();
+
+  const report = await applyFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: emptySnap,
+    apply: true,
+    backupGate: gate,
+    api,
+  });
+  assert.equal(report.ok, true, JSON.stringify(report, null, 2));
+  assert.equal(putCount, 1);
+  const completed = report.completed.find(
+    (c) => c.kind === "agent-instructions-empty-repair" && c.target === "mi-sie-kodu-codex-szybki",
+  );
+  assert.ok(completed);
+  const expectedSha = createHash("sha256").update(packageText, "utf8").digest("hex");
+  assert.equal(completed.verified?.contentSha256, expectedSha);
+  assert.equal(completed.verified?.contentLength, packageText.length);
+  assert.equal(completed.requestBody?.contentSha256, expectedSha);
+  assert.equal(detailsById.get(szybki.id).instructions, packageText);
+  const serialized = JSON.stringify(report);
+  assert.equal(serialized.includes(packageText), false, "apply report must not include instruction body");
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(completed.verified ?? {}, "content"),
+    false,
+  );
+
+  // Non-empty live must not be overwritten even if a repair change is forced somehow.
+  const nonEmptySnap = structuredClone(liveAligned);
+  const liveText = nonEmptySnap.agents.find((a) => a.slug === "mi-sie-kodu-codex-szybki").instructions;
+  assert.ok(liveText.trim().length > 0);
+  const dry = await applyFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: nonEmptySnap,
+    apply: false,
+  });
+  assert.ok(!dry.planned.some((c) => c.kind === "agent-instructions-empty-repair"));
+});
+
+test("apply fails closed when empty-bundle verify returns wrong-but-nonempty content", async () => {
+  const pkg = loadPackage(PACKAGE_DIR);
+  const packageText = pkg.agentBySlug["mi-sie-kodu-codex-szybki"].instructions;
+  assert.ok(packageText.trim().length > 0);
+  const wrongNonEmpty = "unrelated-nonempty-agents-md-body-not-from-package";
+  assert.notEqual(wrongNonEmpty, packageText);
+
+  const emptySnap = structuredClone(liveAligned);
+  const szybki = emptySnap.agents.find((a) => a.slug === "mi-sie-kodu-codex-szybki");
+  szybki.instructions = "";
+  const detailsById = new Map(emptySnap.agents.map((a) => [a.id, structuredClone(a)]));
+  let putCount = 0;
+  let poisonVerify = false;
+  const api = {
+    dryRun: false,
+    async get(pathname) {
+      const match = pathname.match(/^\/api\/agents\/([^/]+)\/instructions-bundle\/file/);
+      if (match) {
+        if (poisonVerify) {
+          return { ok: true, status: 200, data: { content: wrongNonEmpty } };
+        }
+        const agent = detailsById.get(match[1]);
+        return { ok: true, status: 200, data: { content: agent?.instructions ?? "" } };
+      }
+      const agentMatch = pathname.match(/^\/api\/agents\/([^/]+)$/);
+      if (agentMatch) {
+        return { ok: true, status: 200, data: detailsById.get(agentMatch[1]) };
+      }
+      return { ok: false, status: 404, data: null };
+    },
+    async put(pathname, body) {
+      putCount += 1;
+      const match = pathname.match(/^\/api\/agents\/([^/]+)\/instructions-bundle\/file$/);
+      assert.ok(match);
+      assert.equal(body.path, "AGENTS.md");
+      assert.equal(body.content, packageText);
+      detailsById.get(match[1]).instructions = body.content;
+      poisonVerify = true;
+      return { ok: true, status: 200, data: { path: body.path, size: body.content.length } };
+    },
+    async patch() {
+      return { ok: false, status: 500, data: null };
+    },
+    async post() {
+      return { ok: false, status: 500, data: null };
+    },
+  };
+
+  const gate = (() => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "fleet-bak-"));
+    const file = path.join(dir, "db.bak");
+    writeFileSync(file, "backup-bytes");
+    const sha = createHash("sha256").update("backup-bytes").digest("hex");
+    return { backupFile: file, backupSha256: sha };
+  })();
+
+  const report = await applyFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: emptySnap,
+    apply: true,
+    backupGate: gate,
+    api,
+  });
+  assert.equal(report.ok, false, JSON.stringify(report, null, 2));
+  assert.equal(putCount, 1);
+  assert.equal(report.writesSucceeded, 1);
+  assert.equal(report.partial, true);
+  assert.equal(report.completed.length, 0);
+  const failed = report.failed.find(
+    (f) => f.kind === "agent-instructions-empty-repair" && f.target === "mi-sie-kodu-codex-szybki",
+  );
+  assert.ok(failed, JSON.stringify(report.failed, null, 2));
+  assert.match(failed.error, /instructions verify content mismatch/);
+  assert.match(failed.error, /expected=[0-9a-f]{12}/);
+  assert.match(failed.error, /got=[0-9a-f]{12}/);
+  const serialized = JSON.stringify(report);
+  assert.equal(serialized.includes(packageText), false, "failed report must not include package instruction body");
+  assert.equal(serialized.includes(wrongNonEmpty), false, "failed report must not include wrong live instruction body");
 });
 
 test("missing skillLibrary is a validate error", () => {
@@ -1657,6 +2041,118 @@ test("snapshotFleet live path fails closed on agent detail GET error", async () 
   );
 });
 
+test("snapshotFleet AGENTS.md 404 with repair flag yields empty-bundle repair plan only", async () => {
+  const companyId = "company-jarvis";
+  const szybki = liveAligned.agents.find((agent) => agent.slug === "mi-sie-kodu-codex-szybki");
+  assert.ok(szybki, "fixture should include mi-sie-kodu-codex-szybki");
+
+  const snap = await snapshotFleet({
+    companyId,
+    apiUrl: "http://mock.paperclip.local",
+    apiKey: "token",
+    allowEmptyInstructionsRepair: true,
+    fetchImpl: createLiveSnapshotFetchMock({
+      companyId,
+      instructionsFailureById: new Map([[szybki.id, 404]]),
+    }),
+  });
+
+  const live = snap.agents.find((agent) => agent.slug === "mi-sie-kodu-codex-szybki");
+  assert.ok(live);
+  assert.equal(live.instructions, "");
+  assert.ok(
+    Array.isArray(snap.completeness?.emptyInstructionRepairsNeeded)
+      && snap.completeness.emptyInstructionRepairsNeeded.some((msg) =>
+        String(msg).includes("mi-sie-kodu-codex-szybki"),
+      ),
+    JSON.stringify(snap.completeness, null, 2),
+  );
+  assert.deepEqual(
+    snap.completeness.emptyInstructionRepairSlugs,
+    ["mi-sie-kodu-codex-szybki"],
+    JSON.stringify(snap.completeness, null, 2),
+  );
+
+  const diff = diffFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: snap,
+  });
+  assert.deepEqual(
+    diff.changes.map((c) => c.kind),
+    ["agent-instructions-empty-repair"],
+    JSON.stringify(diff.changes, null, 2),
+  );
+  assert.equal(diff.changes[0].target, "mi-sie-kodu-codex-szybki");
+});
+
+test("snapshotFleet AGENTS.md 404 without repair flag fails closed", async () => {
+  const companyId = "company-jarvis";
+  const szybki = liveAligned.agents.find((agent) => agent.slug === "mi-sie-kodu-codex-szybki");
+  assert.ok(szybki, "fixture should include mi-sie-kodu-codex-szybki");
+
+  await assert.rejects(
+    () =>
+      snapshotFleet({
+        companyId,
+        apiUrl: "http://mock.paperclip.local",
+        apiKey: "token",
+        allowEmptyInstructionsRepair: false,
+        fetchImpl: createLiveSnapshotFetchMock({
+          companyId,
+          instructionsFailureById: new Map([[szybki.id, 404]]),
+        }),
+      }),
+    /instructions GET failed for mi-sie-kodu-codex-szybki .*HTTP 404/i,
+  );
+});
+
+test("snapshotFleet AGENTS.md HTTP 500 always fails even with repair flag", async () => {
+  const companyId = "company-jarvis";
+  const szybki = liveAligned.agents.find((agent) => agent.slug === "mi-sie-kodu-codex-szybki");
+  assert.ok(szybki, "fixture should include mi-sie-kodu-codex-szybki");
+
+  await assert.rejects(
+    () =>
+      snapshotFleet({
+        companyId,
+        apiUrl: "http://mock.paperclip.local",
+        apiKey: "token",
+        allowEmptyInstructionsRepair: true,
+        fetchImpl: createLiveSnapshotFetchMock({
+          companyId,
+          instructionsFailureById: new Map([[szybki.id, 500]]),
+        }),
+      }),
+    /instructions GET failed for mi-sie-kodu-codex-szybki .*HTTP 500/i,
+  );
+});
+
+test("snapshotFleet built-in AGENTS.md 404 is not repairable", async () => {
+  const companyId = "company-jarvis";
+  const summarizer = liveAligned.agents.find((agent) => agent.id === "agent-summarizer");
+  assert.ok(summarizer, "fixture should include summarizer");
+  assert.ok(
+    summarizer.metadata?.paperclipBuiltInAgent?.key === "summarizer",
+    "summarizer must be a built-in",
+  );
+
+  await assert.rejects(
+    () =>
+      snapshotFleet({
+        companyId,
+        apiUrl: "http://mock.paperclip.local",
+        apiKey: "token",
+        allowEmptyInstructionsRepair: true,
+        fetchImpl: createLiveSnapshotFetchMock({
+          companyId,
+          instructionsFailureById: new Map([[summarizer.id, 404]]),
+        }),
+      }),
+    /instructions GET failed for .*HTTP 404/i,
+  );
+});
+
 test("snapshotFleet fixture path enforces completeness", async () => {
   const bad = structuredClone(liveAligned);
   delete bad.completeness;
@@ -1938,6 +2434,72 @@ test("verify passes on aligned fixture", () => {
   assert.equal(result.ok, true, JSON.stringify(result, null, 2));
 });
 
+test("diff/verify stay profile-consistent on redacted secret_ref snapshots", () => {
+  const SAMPLE_SECRET_ID = "11111111-1111-4111-8111-111111111111";
+  const snapshot = structuredClone(liveAligned);
+  const target = snapshot.agents.find((agent) => agent.slug === "badacz");
+  assert.ok(target, "fixture must include badacz");
+  target.adapterConfig = {
+    ...(target.adapterConfig ?? {}),
+    "access.STRIPE": {
+      type: "secret_ref",
+      secretId: SAMPLE_SECRET_ID,
+      version: "latest",
+    },
+    env: {
+      ...(target.adapterConfig?.env ?? {}),
+      PROVIDER_TOKEN: {
+        type: "secret_ref",
+        secretId: SAMPLE_SECRET_ID,
+        version: 1,
+      },
+    },
+  };
+  const redacted = redactSecrets(snapshot);
+  assert.equal(
+    redacted.agents.find((agent) => agent.slug === "badacz").adapterConfig["access.STRIPE"].secretId,
+    SECRET_REDACTION_MARKER,
+  );
+  assert.equal(JSON.stringify(redacted).includes(SAMPLE_SECRET_ID), false);
+
+  const diff = diffFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: redacted,
+  });
+  assert.equal(
+    diff.changes.some((change) => change.kind === "provider-profile-inconsistent"),
+    false,
+    JSON.stringify(diff.changes, null, 2),
+  );
+  assert.equal(diff.changeCount, 0, JSON.stringify(diff.changes, null, 2));
+
+  const validation = validateFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: redacted,
+    includeBuiltInInstructions: { summarizer: summarizerNew },
+  });
+  assert.equal(validation.ok, true, JSON.stringify(validation.errors, null, 2));
+  assert.equal(
+    validation.errors.some((error) => error.code === "provider-profile-inconsistent"),
+    false,
+    JSON.stringify(validation.errors, null, 2),
+  );
+  assert.ok(
+    validation.okItems.some((item) => item.code === "provider-profile-consistent"),
+    JSON.stringify(validation.okItems, null, 2),
+  );
+
+  const verified = verifyFleet({
+    packageDir: PACKAGE_DIR,
+    desiredDir: DESIRED_DIR,
+    liveSnapshot: redacted,
+    includeBuiltInInstructions: { summarizer: summarizerNew },
+  });
+  assert.equal(verified.ok, true, JSON.stringify(verified, null, 2));
+});
+
 test("summarizer cheap claim is detected via built-in overlay of old text", () => {
   const result = validateFleet({
     packageDir: PACKAGE_DIR,
@@ -1963,8 +2525,8 @@ test("stale nextRunAt on paused routine is not a validate error", () => {
 test("stock Summarizer template file remains the Haiku primary-model wording", () => {
   const stock = readFileSync(
     path.join(
-      process.cwd(),
-      "server/src/built-ins/agents/summarizer/AGENTS.md",
+      FLEET_ROOT,
+      "../../../server/src/built-ins/agents/summarizer/AGENTS.md",
     ),
     "utf8",
   );

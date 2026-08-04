@@ -1,6 +1,6 @@
 # Paperclip API Reference
 
-Detailed reference for the Paperclip control plane API. For the core heartbeat procedure and critical rules, see the main `SKILL.md`.
+Detailed reference for the Paperclip control plane API. For the core heartbeat procedure and critical rules, see the main `SKILL.md`. Load this file only when you need endpoint tables, schemas, or worked examples beyond the hot path.
 
 ---
 
@@ -1190,6 +1190,14 @@ Terminal states: `done`, `cancelled`
 - Use formal approvals for governed actions such as hires, budget overrides, or CEO strategy gates.
 - Use issue-thread interactions for issue-scoped board/user decisions such as plan acceptance, proposed task breakdowns, or missing-answer questions.
 - Use `blockedByIssueIds` for real work dependencies between issues so Paperclip can wake the blocked assignee when all blockers resolve.
+- Entering `blocked` via `PATCH /api/issues/{id}` requires unresolved blockers, a pending interaction/approval, or `unblockDescriptor`: `{ "owner": { "agentId": "<uuid>" } | { "userId": "<id>" } | "board", "action": "<concrete unblock action>" }`.
+- Agent-authored `unblockDescriptor` may name only the current agent (`{ "agentId": "$PAPERCLIP_AGENT_ID" }`). Naming another agent, a user, or `"board"` returns 403 (`Agents may only name themselves as an unblock owner`) — do not retry with another forbidden owner.
+- When another agent owns the next action, create one follow-up issue assigned to them and enter `blocked` with `blockedByIssueIds: ["<follow-up-id>"]`. Do not put that agent in `unblockDescriptor.owner`.
+- If depth/permissions prevent creating that follow-up, create exactly one `suggest_tasks` or `ask_user_questions` interaction that names the proposed assignee and concrete next action, set `continuationPolicy: "wake_assignee"`, and leave the source `in_review` while the interaction is pending.
+- Permission-only failures may use `suggest_tasks` without an explicit parent (acceptance defaults to children of the source). Depth failures must not: accepted tasks resolve as `task.parentId ?? payload.defaultParentId ?? sourceIssue.id`, so omit-parent would recreate the same max-depth failure on board acceptance. For depth, set `defaultParentId` and/or each task `parentId` to the nearest permitted ancestor with capacity (commonly the source parent → sibling), and link the blocked source in the task description. If no safe permitted parent can be established, use `ask_user_questions` instead of `suggest_tasks`.
+- Only if that interaction create also fails, leave `blocked` with `unblockDescriptor.owner` set to yourself and an `action` that is an exact board routing/action request. Never keep `in_progress` without a live continuation.
+- Example (depth interaction escalate): `POST /api/issues/{issueId}/interactions` with `{ "kind": "suggest_tasks", "continuationPolicy": "wake_assignee", "payload": { "version": 1, "defaultParentId": "<nearest-permitted-ancestor-id>", "tasks": [{ "clientKey": "follow-up-1", "title": "<concrete next action>", "assigneeAgentId": "<proposed-assignee-agent-id>", "parentId": "<nearest-permitted-ancestor-id>", "description": "Follow-up for blocked source [<prefix>-<n>](/<prefix>/issues/<prefix>-<n>)." }] } }`, then `{ "status": "in_review" }`.
+- Example (self-owned final fallback): `{ "status": "blocked", "unblockDescriptor": { "owner": { "agentId": "$PAPERCLIP_AGENT_ID" }, "action": "Board: create and assign a follow-up to agent <id> for <concrete next action>" } }`.
 
 ---
 

@@ -15,11 +15,31 @@ function builtInKey(agent) {
   return agent?.metadata?.paperclipBuiltInAgent?.key ?? null;
 }
 
-function finalizeSnapshot(snap, { outPath = null, internalCapture = false } = {}) {
-  const gate = assertSnapshotCompleteness(snap);
+function finalizeSnapshot(snap, {
+  outPath = null,
+  internalCapture = false,
+  allowEmptyInstructionsRepair = false,
+} = {}) {
+  const gate = assertSnapshotCompleteness(snap, { allowEmptyInstructionsRepair });
   if (!gate.ok) {
     const detail = gate.errors.map((e) => e.message ?? e.code).join("; ");
     throw new Error(`snapshot completeness failed: ${detail}`);
+  }
+  if (Array.isArray(gate.warnings) && gate.warnings.length > 0) {
+    const emptyWarnings = gate.warnings.filter((w) => w.code === "agent-instructions-empty");
+    if (emptyWarnings.length > 0) {
+      snap.completeness = {
+        ...(snap.completeness ?? {}),
+        emptyInstructionRepairsNeeded: emptyWarnings.map((w) => w.message),
+        emptyInstructionRepairSlugs: [
+          ...new Set(
+            emptyWarnings
+              .map((w) => (typeof w.slug === "string" ? w.slug : null))
+              .filter(Boolean),
+          ),
+        ].sort(),
+      };
+    }
   }
   if (internalCapture && outPath) {
     throw new Error("internalCapture forbids writing unredacted snapshot to outPath");
@@ -35,6 +55,9 @@ function finalizeSnapshot(snap, { outPath = null, internalCapture = false } = {}
  * Snapshot live company state for offline diff/validate/verify.
  * Reads only; never mutates. Redacts secrets by default.
  * Fail-closed: missing instructions/skills/library or wrong agent counts abort.
+ * Exception: with allowEmptyInstructionsRepair, portable AGENTS.md GET 404 (or
+ * empty content) is normalized to "" and recorded as a repair-needed warning;
+ * built-ins and any other non-2xx still abort.
  * Fixture path runs the same completeness gate as live capture.
  */
 export async function snapshotFleet({
@@ -45,13 +68,14 @@ export async function snapshotFleet({
   fetchImpl = globalThis.fetch,
   fixture = null,
   internalCapture = false,
+  allowEmptyInstructionsRepair = false,
   expectedLiveAgentCount = FLEET_INVARIANTS.expectedLiveAgentCount,
   expectedPortableCount = FLEET_INVARIANTS.portableAgentCount,
   expectedBuiltInCount = FLEET_INVARIANTS.managedBuiltInCount,
 } = {}) {
   if (fixture) {
     const snap = normalizeLiveSnapshot(fixture, { redact: !internalCapture });
-    return finalizeSnapshot(snap, { outPath, internalCapture });
+    return finalizeSnapshot(snap, { outPath, internalCapture, allowEmptyInstructionsRepair });
   }
 
   const client = createApiClient({
@@ -127,21 +151,40 @@ export async function snapshotFleet({
     }
     // Full detail record is the source of runtime policy fields.
     const agent = { ...listAgent, ...detail.data };
+    const isBuiltIn = Boolean(builtInKey(agent));
 
     const bundle = await client.get(
       `/api/agents/${agent.id}/instructions-bundle/file?path=${encodeURIComponent("AGENTS.md")}`,
     );
+    let instructions = null;
     if (!bundle.ok) {
-      throw new Error(
-        `instructions GET failed for ${label} (id=${agent.id}): HTTP ${bundle.status}`,
-      );
+      // Fail-closed: only portable AGENTS.md 404 may be normalized when repair is enabled.
+      // Built-ins, other statuses, and 404 without the flag always abort.
+      if (
+        bundle.status === 404
+        && allowEmptyInstructionsRepair
+        && !isBuiltIn
+      ) {
+        instructions = "";
+      } else {
+        throw new Error(
+          `instructions GET failed for ${label} (id=${agent.id}): HTTP ${bundle.status}`,
+        );
+      }
+    } else {
+      instructions =
+        typeof bundle.data === "string"
+          ? bundle.data
+          : (bundle.data?.content ?? bundle.data?.file?.content ?? null);
     }
-    const instructions =
-      typeof bundle.data === "string"
-        ? bundle.data
-        : (bundle.data?.content ?? bundle.data?.file?.content ?? null);
-    if (typeof instructions !== "string" || instructions.trim() === "") {
+    if (typeof instructions !== "string") {
       throw new Error(`instructions missing/empty for ${label} (id=${agent.id})`);
+    }
+    if (instructions.trim() === "") {
+      // Empty live content reaches completeness only for portable + repair flag.
+      if (!(allowEmptyInstructionsRepair && !isBuiltIn)) {
+        throw new Error(`instructions missing/empty for ${label} (id=${agent.id})`);
+      }
     }
 
     const skills = await client.get(`/api/agents/${agent.id}/skills`);
@@ -236,5 +279,5 @@ export async function snapshotFleet({
     warnings,
   }, { redact: !internalCapture });
 
-  return finalizeSnapshot(snap, { outPath, internalCapture });
+  return finalizeSnapshot(snap, { outPath, internalCapture, allowEmptyInstructionsRepair });
 }

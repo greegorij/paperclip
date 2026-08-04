@@ -13,6 +13,7 @@ import {
   adapterExecutionTargetToRemoteSpec,
   adapterExecutionTargetUsesPaperclipBridge,
   ensureAdapterExecutionTargetCommandResolvable,
+  ensureAdapterExecutionTargetXdgRuntimeDir,
   formatAdapterExecutionTimeoutErrorMessage,
   formatAdapterExecutionTimeoutStartLogLine,
   resolveAdapterExecutionTargetTimeout,
@@ -1481,5 +1482,169 @@ describe("sandbox adapter execution targets", () => {
       await bridge?.stop();
       await new Promise<void>((resolve) => apiServer.close(() => resolve()));
     }
+  });
+});
+
+describe("sandbox XDG browser runtime seam", () => {
+  const cleanupDirs: string[] = [];
+
+  afterEach(async () => {
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (!dir) continue;
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  function createLocalSandboxRunner() {
+    let counter = 0;
+    return {
+      execute: async (input: {
+        command: string;
+        args?: string[];
+        cwd?: string;
+        env?: Record<string, string>;
+        stdin?: string;
+        timeoutMs?: number;
+        onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+        onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
+      }) => {
+        counter += 1;
+        const command = input.command === "bash" ? "/bin/bash" : input.command;
+        return runChildProcess(`sandbox-xdg-run-${counter}`, command, input.args ?? [], {
+          cwd: input.cwd ?? process.cwd(),
+          env: input.env ?? {},
+          stdin: input.stdin,
+          timeoutSec: Math.max(1, Math.ceil((input.timeoutMs ?? 30_000) / 1000)),
+          graceSec: 5,
+          onLog: input.onLog ?? (async () => {}),
+          onSpawn: input.onSpawn
+            ? async (meta) => input.onSpawn?.({ pid: meta.pid, startedAt: meta.startedAt })
+            : undefined,
+        });
+      },
+    };
+  }
+
+  it("materializes XDG_RUNTIME_DIR on the sandbox target so a process can stat it", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-sandbox-xdg-runtime-"));
+    cleanupDirs.push(rootDir);
+    const remoteCwd = path.join(rootDir, "workspace");
+    await mkdir(remoteCwd, { recursive: true });
+
+    const runtimeDir = path.posix.join(remoteCwd, ".paperclip-runtime", "xdg-runtime", "run-xdg-1");
+    const session = "paperclip-run-xdg-1";
+    const target: AdapterSandboxExecutionTarget = {
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "e2b",
+      environmentId: "env-xdg",
+      leaseId: "lease-xdg",
+      remoteCwd,
+      runner: createLocalSandboxRunner(),
+    };
+
+    await ensureAdapterExecutionTargetXdgRuntimeDir("run-xdg-1", target, runtimeDir, {
+      env: {},
+      timeoutSec: 15,
+    });
+
+    const env = {
+      XDG_RUNTIME_DIR: runtimeDir,
+      AGENT_BROWSER_SESSION: session,
+    };
+
+    // Non-login shell so host profiles cannot rewrite XDG_RUNTIME_DIR.
+    const first = await runAdapterExecutionTargetProcess(
+      "run-xdg-1",
+      target,
+      "/bin/bash",
+      [
+        "-c",
+        [
+          'stat "$XDG_RUNTIME_DIR" >/dev/null',
+          'printf "xdg=%s\\n" "$XDG_RUNTIME_DIR"',
+          'printf "session=%s\\n" "$AGENT_BROWSER_SESSION"',
+          // GNU first: Linux `stat -f` is --file-system and pollutes `a || b` stdout.
+          'printf "mode=%s\\n" "$(stat -c %a "$XDG_RUNTIME_DIR" 2>/dev/null || stat -f %Lp "$XDG_RUNTIME_DIR")"',
+        ].join("; "),
+      ],
+      {
+        cwd: remoteCwd,
+        env,
+        timeoutSec: 15,
+        graceSec: 5,
+        onLog: async () => {},
+      },
+    );
+    expect(first.exitCode).toBe(0);
+    expect(first.stdout).toContain(`xdg=${runtimeDir}`);
+    expect(first.stdout).toContain(`session=${session}`);
+    expect(first.stdout).toMatch(/mode=700\b/);
+
+    const second = await runAdapterExecutionTargetProcess(
+      "run-xdg-1",
+      target,
+      "/bin/bash",
+      [
+        "-c",
+        'printf "xdg=%s\\nsession=%s\\n" "$XDG_RUNTIME_DIR" "$AGENT_BROWSER_SESSION"',
+      ],
+      {
+        cwd: remoteCwd,
+        env,
+        timeoutSec: 15,
+        graceSec: 5,
+        onLog: async () => {},
+      },
+    );
+    expect(second.exitCode).toBe(0);
+    expect(second.stdout).toContain(`xdg=${runtimeDir}`);
+    expect(second.stdout).toContain(`session=${session}`);
+  });
+
+  it("fails before adapter dispatch when remote XDG runtime cannot be materialized", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-sandbox-xdg-denied-"));
+    cleanupDirs.push(rootDir);
+    const remoteCwd = path.join(rootDir, "workspace");
+    await mkdir(remoteCwd, { recursive: true });
+
+    const runtimeDir = path.posix.join(remoteCwd, ".paperclip-runtime", "xdg-runtime", "run-xdg-deny");
+    const target: AdapterSandboxExecutionTarget = {
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "e2b",
+      environmentId: "env-xdg-deny",
+      leaseId: "lease-xdg-deny",
+      remoteCwd,
+      runner: {
+        execute: async () => ({
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          stdout: "",
+          stderr: "mkdir: permission denied",
+          pid: null,
+          startedAt: new Date().toISOString(),
+        }),
+      },
+    };
+
+    await expect(
+      ensureAdapterExecutionTargetXdgRuntimeDir("run-xdg-deny", target, runtimeDir, {
+        // A host path in env must not become a substitute when materialization fails.
+        env: { XDG_RUNTIME_DIR: "/host/tmp/paperclip-run-leak/xdg-runtime" },
+        timeoutSec: 15,
+      }),
+    ).rejects.toThrow(/Could not create working directory|permission denied/i);
+
+    // Materialization failed: the target-local runtime dir must not exist either.
+    await expect(rm(runtimeDir, { recursive: true, force: true })).resolves.toBeUndefined();
+    const parentDir = path.dirname(runtimeDir);
+    const listing = await readdir(parentDir).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [] as string[];
+      throw error;
+    });
+    expect(listing).not.toContain("run-xdg-deny");
   });
 });

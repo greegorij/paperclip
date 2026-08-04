@@ -262,6 +262,28 @@ function makeAgent(id: string, overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** Empty selects so entering-blocked validation does not see fake pending interaction/approval rows. */
+function createEmptyBlockedValidationDb() {
+  const emptyRows: unknown[] = [];
+  const whereResult = {
+    orderBy: vi.fn(async () => emptyRows),
+    limit: vi.fn(() => ({
+      then: async (resolve: (limitedRows: unknown[]) => unknown) => resolve(emptyRows),
+    })),
+    then: async (resolve: (selectedRows: unknown[]) => unknown) => resolve(emptyRows),
+  };
+  const query: Record<string, unknown> = {
+    innerJoin: vi.fn(() => query),
+    where: vi.fn(() => whereResult),
+  };
+  return {
+    transaction: async (callback: (tx: Record<string, never>) => Promise<unknown>) => callback({}),
+    select: vi.fn(() => ({
+      from: vi.fn(() => query),
+    })),
+  };
+}
+
 function createRunContextDb(
   contextSnapshot: Record<string, unknown> = {},
   runAgentOrRows: string | Record<string, unknown>[] = ownerAgentId,
@@ -1575,6 +1597,78 @@ describe("agent issue mutation checkout ownership", () => {
     );
   });
 
+  it("reuses an existing unblockDescriptor when re-entering blocked without resending it", async () => {
+    const existingDescriptor = { owner: "board", action: "Approve the production exception" };
+    mockIssueService.getById.mockResolvedValue(
+      makeIssue({ status: "in_progress", unblockDescriptor: existingDescriptor }),
+    );
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...makeIssue({ status: "in_progress", unblockDescriptor: existingDescriptor }),
+      ...patch,
+    }));
+
+    const res = await request(await createApp(boardActor(), createEmptyBlockedValidationDb()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "blocked" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      issueId,
+      expect.objectContaining({ status: "blocked" }),
+    );
+    expect(mockIssueService.update.mock.calls[0]?.[1]).not.toHaveProperty("unblockDescriptor");
+  });
+
+  it("lets an agent re-enter blocked on a persisted board-owned descriptor without resending it", async () => {
+    const existingDescriptor = { owner: "board", action: "Approve the production exception" };
+    mockIssueService.getById.mockResolvedValue(
+      makeIssue({ status: "in_progress", unblockDescriptor: existingDescriptor }),
+    );
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...makeIssue({ status: "in_progress", unblockDescriptor: existingDescriptor }),
+      ...patch,
+    }));
+
+    const res = await request(await createApp(ownerActor(), createEmptyBlockedValidationDb()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "blocked" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      issueId,
+      expect.objectContaining({ status: "blocked" }),
+    );
+  });
+
+  it("rejects entering blocked when unblockDescriptor is explicitly null and no other basis exists", async () => {
+    mockIssueService.getById.mockResolvedValue(
+      makeIssue({
+        status: "in_progress",
+        unblockDescriptor: { owner: "board", action: "Approve the production exception" },
+      }),
+    );
+
+    const res = await request(await createApp(boardActor(), createEmptyBlockedValidationDb()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "blocked", unblockDescriptor: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body.error).toContain("Entering blocked requires");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects entering blocked when neither patch nor existing issue has an unblockDescriptor", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", unblockDescriptor: null }));
+
+    const res = await request(await createApp(boardActor(), createEmptyBlockedValidationDb()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "blocked" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body.error).toContain("Entering blocked requires");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
   it("rejects peer-agent status updates that would clear a recovery action they do not own", async () => {
     mockIssueService.getById.mockResolvedValue(
       makeIssue({ status: "blocked", assigneeAgentId: null, assigneeUserId: "board-user" }),
@@ -1664,11 +1758,16 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       ownerAgentId,
       expect.objectContaining({
-        reason: "issue_recovery_action_restored",
+        source: "assignment",
+        reason: "issue_assigned",
         payload: expect.objectContaining({
           issueId,
           recoveryActionId,
           mutation: "recovery_action_resolution",
+        }),
+        contextSnapshot: expect.objectContaining({
+          issueId,
+          source: "issue.recovery_action_resolution",
         }),
       }),
     );
@@ -2000,6 +2099,35 @@ describe("agent issue mutation checkout ownership", () => {
       expect(mockIssueService.update).not.toHaveBeenCalledWith(
         watchdogReportIssueId,
         expect.anything(),
+      );
+    });
+
+    it("wakes the assignee exactly once when a watchdog restores blocked work to todo", async () => {
+      denyBaseBoundary();
+      const updatedAt = new Date("2026-08-02T15:00:00.000Z");
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId }));
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId }),
+        ...patch,
+        updatedAt,
+      }));
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app).patch(`/api/issues/${issueId}`).send({ status: "todo" });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+        ownerAgentId,
+        expect.objectContaining({
+          reason: "issue_status_changed",
+          idempotencyKey: `issue_status_changed:${issueId}:blocked->todo:${updatedAt.getTime()}`,
+          payload: expect.objectContaining({
+            issueId,
+            fromStatus: "blocked",
+            toStatus: "todo",
+          }),
+        }),
       );
     });
 

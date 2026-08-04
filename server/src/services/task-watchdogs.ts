@@ -20,6 +20,10 @@ import { conflict, notFound } from "../errors.js";
 import { parseObject } from "../adapters/utils.js";
 import { logActivity } from "./activity-log.js";
 import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
+import {
+  getHeartbeatDailyCapBlock,
+  parseHeartbeatDailyCapPolicy,
+} from "./heartbeat-daily-caps.js";
 import { issueService } from "./issues.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import { TASK_WATCHDOG_ORIGIN_KIND } from "./task-watchdog-scope.js";
@@ -30,6 +34,18 @@ const TASK_WATCHDOG_LIVE_RUN_STATUSES = ["queued", "running", "scheduled_retry"]
 const TASK_WATCHDOG_WAKE_REQUEST_STATUSES = ["queued", "deferred_issue_execution"] as const;
 const TASK_WATCHDOG_TERMINAL_ISSUE_STATUSES = ["done", "cancelled"] as const;
 const TASK_WATCHDOG_TERMINAL_RUN_STATUSES = ["succeeded", "interrupted", "failed", "cancelled", "timed_out"] as const;
+const TASK_WATCHDOG_COMPLETED_RUN_STATUSES = ["succeeded"] as const;
+// Fixed adapter overrides for generated/reopened task-watchdog review issues.
+// Use the universal cheap model profile (provider-agnostic) and only bound the
+// run with timeout/grace so the review finishes from wake context + stopped
+// snapshot without long exploratory sessions.
+const TASK_WATCHDOG_ASSIGNEE_ADAPTER_OVERRIDES = {
+  modelProfile: "cheap",
+  adapterConfig: {
+    timeoutSec: 300,
+    graceSec: 15,
+  },
+} as const;
 // Grace window after an issue is created/assigned during which its first
 // assignment run/wake may have been enqueued but is not yet visible to a
 // watchdog evaluation (the eval can race the issue's own assignment run).
@@ -1219,13 +1235,152 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     return Boolean(run || issueRun || wake);
   }
 
+  async function hasCompletedPathForIssue(companyId: string, issueId: string) {
+    const [run, issueRun] = await Promise.all([
+      db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(and(
+          eq(heartbeatRuns.companyId, companyId),
+          inArray(heartbeatRuns.status, [...TASK_WATCHDOG_COMPLETED_RUN_STATUSES]),
+          sql`(${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}
+            OR ${heartbeatRuns.contextSnapshot}->>'taskId' = ${issueId})`,
+        ))
+        .limit(1)
+        .then((rows) => rows[0] ?? null),
+      db
+        .select({ id: heartbeatRuns.id })
+        .from(issues)
+        .innerJoin(heartbeatRuns, eq(issues.executionRunId, heartbeatRuns.id))
+        .where(and(
+          eq(issues.companyId, companyId),
+          eq(issues.id, issueId),
+          inArray(heartbeatRuns.status, [...TASK_WATCHDOG_COMPLETED_RUN_STATUSES]),
+        ))
+        .limit(1)
+        .then((rows) => rows[0] ?? null),
+    ]);
+    return Boolean(run || issueRun);
+  }
+
+  async function watchdogIssueHasUnresolvedIssueBlockers(companyId: string, issueId: string) {
+    const blocker = await db
+      .select({ id: issueRelations.id })
+      .from(issueRelations)
+      .innerJoin(issues, eq(issueRelations.issueId, issues.id))
+      .where(and(
+        eq(issueRelations.companyId, companyId),
+        eq(issueRelations.type, "blocks"),
+        eq(issueRelations.relatedIssueId, issueId),
+        // Match dependency readiness: only `done` clears an issue blocker.
+        sql`${issues.status} <> 'done'`,
+      ))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    return Boolean(blocker);
+  }
+
+  async function isWatchdogAgentEligibleForWakeRecovery(companyId: string, agentId: string) {
+    const agent = await db
+      .select({
+        id: agents.id,
+        companyId: agents.companyId,
+        name: agents.name,
+        reportsTo: agents.reportsTo,
+        status: agents.status,
+        runtimeConfig: agents.runtimeConfig,
+      })
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .then((rows) => rows[0] ?? null);
+    if (!agent || agent.companyId !== companyId) return false;
+    // Organizational invokability (paused/terminated/org-chain) — same gate as
+    // heartbeat wake admission for status/reporting health.
+    if (!(await evaluateAgentInvokabilityFromDb(db, agent)).invokable) return false;
+    // Heartbeat also skips wakes under per-agent UTC-day run/cost caps. Treat
+    // those as non-recoverable here so we do not reopen + enqueue a wake that
+    // would be skipped immediately on every scheduler pass.
+    const dailyCapBlock = await getHeartbeatDailyCapBlock(
+      agent,
+      parseHeartbeatDailyCapPolicy(agent.runtimeConfig),
+      {},
+      db,
+    );
+    return dailyCapBlock === null;
+  }
+
+  // A generated watchdog can sit in `blocked` after its wake was skipped
+  // (budget pause, heartbeat.daily_run_limit, etc.) even though it has no real
+  // issue blocker and no live path. That is not a completed review disposition
+  // — recover it only when the assigned agent can actually be woken again
+  // (org-invokable AND under the same daily run/cost caps as heartbeat).
+  // While those gates remain closed, leave the row alone (no retry loop).
+  async function watchdogIssueNeedsStaleBlockedRecovery(
+    watchdogIssue: IssueRow,
+    watchdogAgentId: string,
+  ) {
+    if (watchdogIssue.originKind !== TASK_WATCHDOG_ORIGIN_KIND) return false;
+    if (watchdogIssue.status !== "blocked") return false;
+    if (await watchdogIssueHasUnresolvedIssueBlockers(watchdogIssue.companyId, watchdogIssue.id)) {
+      return false;
+    }
+    if (await hasLivePathForIssue(watchdogIssue.companyId, watchdogIssue.id)) {
+      return false;
+    }
+    if (await hasCompletedPathForIssue(watchdogIssue.companyId, watchdogIssue.id)) {
+      return false;
+    }
+    return isWatchdogAgentEligibleForWakeRecovery(watchdogIssue.companyId, watchdogAgentId);
+  }
+
+  // lastReviewedFingerprint may have been stamped while the generated issue was
+  // blocked after a skipped wake. That makes classifyTaskWatchdogSubtree exit as
+  // already_reviewed forever. Clear it only for the recoverable case above,
+  // before classifier evaluation, so a later invokable reconcile can resume.
+  async function clearStaleReviewedFingerprintIfRecoverable(
+    watchdog: IssueWatchdogRow,
+  ): Promise<IssueWatchdogRow> {
+    if (!watchdog.lastReviewedFingerprint || !watchdog.watchdogIssueId) return watchdog;
+    const watchdogIssue = await db
+      .select()
+      .from(issues)
+      .where(and(
+        eq(issues.companyId, watchdog.companyId),
+        eq(issues.id, watchdog.watchdogIssueId),
+        visibleIssueCondition(),
+      ))
+      .then((rows) => rows[0] ?? null);
+    if (!watchdogIssue) return watchdog;
+    if (!(await watchdogIssueNeedsStaleBlockedRecovery(watchdogIssue, watchdog.watchdogAgentId))) {
+      return watchdog;
+    }
+    const [updated] = await db
+      .update(issueWatchdogs)
+      .set({
+        lastReviewedFingerprint: null,
+        lastReviewedStopSnapshot: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(issueWatchdogs.id, watchdog.id))
+      .returning();
+    return updated ?? {
+      ...watchdog,
+      lastReviewedFingerprint: null,
+      lastReviewedStopSnapshot: null,
+    };
+  }
+
   async function sameFingerprintWatchdogReviewIsStillOpen(
     watchdogIssue: IssueRow | null,
     stopFingerprint: string,
+    watchdogAgentId: string,
   ) {
     if (!watchdogIssue) return false;
     if (watchdogIssue.originFingerprint !== stopFingerprint) return false;
     if (isTerminalIssueStatus(watchdogIssue.status) || watchdogIssue.status === "backlog") return false;
+    if (await watchdogIssueNeedsStaleBlockedRecovery(watchdogIssue, watchdogAgentId)) {
+      return false;
+    }
     if (watchdogIssue.status === "in_review") {
       const hasPendingReviewPath = await watchdogIssueHasPendingReviewPath(watchdogIssue.companyId, watchdogIssue.id);
       return isWatchdogReviewDisposition(watchdogIssue, hasPendingReviewPath);
@@ -1233,7 +1388,10 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     return true;
   }
 
-  async function watchdogIssueNeedsFreshWake(watchdogIssue: IssueRow) {
+  async function watchdogIssueNeedsFreshWake(watchdogIssue: IssueRow, watchdogAgentId: string) {
+    if (await watchdogIssueNeedsStaleBlockedRecovery(watchdogIssue, watchdogAgentId)) {
+      return true;
+    }
     if (watchdogIssue.status !== "in_review") return false;
     const hasPendingReviewPath = await watchdogIssueHasPendingReviewPath(watchdogIssue.companyId, watchdogIssue.id);
     return !isWatchdogReviewDisposition(watchdogIssue, hasPendingReviewPath);
@@ -1274,6 +1432,16 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       .where(and(eq(issues.companyId, watchdog.companyId), eq(issues.id, watchdog.watchdogIssueId)))
       .then((rows) => rows[0] ?? null);
     if (!watchdogIssue) return watchdog;
+    // Blocked-without-blocker is a recoverable stalled wake, not a reviewed
+    // disposition. Never stamp lastReviewedFingerprint for it, or recovery
+    // after the agent becomes invokable would be suppressed as already_reviewed.
+    if (
+      watchdogIssue.status === "blocked" &&
+      watchdogIssue.originKind === TASK_WATCHDOG_ORIGIN_KIND &&
+      !(await watchdogIssueHasUnresolvedIssueBlockers(watchdog.companyId, watchdogIssue.id))
+    ) {
+      return watchdog;
+    }
     const hasPendingReviewPath = watchdogIssue.status === "in_review"
       ? await watchdogIssueHasPendingReviewPath(watchdog.companyId, watchdogIssue.id)
       : false;
@@ -1342,11 +1510,12 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     if (fallback) {
       const shouldReopen = isTerminalIssueStatus(fallback.status) ||
         fallback.status === "backlog" ||
-        await watchdogIssueNeedsFreshWake(fallback);
+        await watchdogIssueNeedsFreshWake(fallback, input.watchdog.watchdogAgentId);
       const watchdogIssue = shouldReopen
         ? await issuesSvc.update(fallback.id, {
           status: "todo",
           assigneeAgentId: input.watchdog.watchdogAgentId,
+          assigneeAdapterOverrides: { ...TASK_WATCHDOG_ASSIGNEE_ADAPTER_OVERRIDES },
           parentId: input.sourceIssue.id,
           projectId: input.sourceIssue.projectId,
           goalId: input.sourceIssue.goalId,
@@ -1392,7 +1561,8 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           `Watched issue: ${input.sourceIssue.identifier ?? input.sourceIssue.id}`,
           `Stopped fingerprint: ${input.classification.stopFingerprint}`,
           "",
-          "The watchdog agent should verify the stopped subtree and either confirm the disposition or restore a valid live path.",
+          "Produce one evidence-based disposition for the stopped subtree: confirm the current disposition or restore a valid live path.",
+          "Do not perform broad API or documentation exploration when the heartbeat wake context and stopped snapshot already answer the question.",
         ].join("\n"),
         status: "todo",
         priority: input.sourceIssue.priority,
@@ -1400,6 +1570,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         projectId: input.sourceIssue.projectId,
         goalId: input.sourceIssue.goalId,
         assigneeAgentId: input.watchdog.watchdogAgentId,
+        assigneeAdapterOverrides: { ...TASK_WATCHDOG_ASSIGNEE_ADAPTER_OVERRIDES },
         originKind: TASK_WATCHDOG_ORIGIN_KIND,
         originId: input.sourceIssue.id,
         originFingerprint: input.classification.stopFingerprint,
@@ -1436,7 +1607,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
   }
 
   async function evaluateWatchdog(row: IssueWatchdogRow, opts: { runId?: string | null } = {}) {
-    const watchdog = await markTerminalWatchdogIssueReviewed(row, opts);
+    let watchdog = await markTerminalWatchdogIssueReviewed(row, opts);
     const sourceIssue = await db
       .select()
       .from(issues)
@@ -1445,6 +1616,10 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     if (!sourceIssue || sourceIssue.originKind === TASK_WATCHDOG_ORIGIN_KIND) {
       return { state: "skipped" as const, reason: "watched_issue_not_applicable" };
     }
+
+    // Drop a stale reviewed stamp before classification so recovery is not
+    // permanently suppressed as already_reviewed after a skipped wake.
+    watchdog = await clearStaleReviewedFingerprintIfRecoverable(watchdog);
 
     const input = await collectClassifierInput(watchdog.companyId, watchdog);
     const classification = classifyTaskWatchdogSubtree(input);
@@ -1479,7 +1654,11 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         ))
         .then((rows) => rows[0] ?? null)
       : null;
-    if (await sameFingerprintWatchdogReviewIsStillOpen(existingWatchdogIssue, classification.stopFingerprint)) {
+    if (await sameFingerprintWatchdogReviewIsStillOpen(
+      existingWatchdogIssue,
+      classification.stopFingerprint,
+      watchdog.watchdogAgentId,
+    )) {
       if (
         watchdog.watchdogIssueId !== existingWatchdogIssue!.id ||
         watchdog.lastObservedFingerprint !== classification.stopFingerprint ||

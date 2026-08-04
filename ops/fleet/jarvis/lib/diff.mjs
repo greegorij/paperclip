@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
-import { loadDesired } from "./load.mjs";
+import { loadDesired, loadPackage } from "./load.mjs";
 import { detectProviderProfileState } from "./profile-switch.mjs";
+import { loadValidatedRuntimeCapabilities } from "./runtime-capabilities.mjs";
 
 function sameStringArray(a, b) {
   const left = [...(a ?? [])].map(String).sort();
@@ -10,6 +11,11 @@ function sameStringArray(a, b) {
 
 function builtInKey(agent) {
   return agent?.metadata?.paperclipBuiltInAgent?.key ?? null;
+}
+
+function liveInstructionsEmpty(live) {
+  const value = live?.instructions;
+  return value == null || String(value).trim() === "";
 }
 
 /**
@@ -69,14 +75,32 @@ export function matchRoutineStrict(routineDesired, liveRoutines = []) {
  */
 export function diffFleet({ packageDir, desiredDir, liveSnapshot }) {
   // Keep call signature stable for existing callers.
-  void packageDir;
   const desired = loadDesired(desiredDir);
+  const pkg = packageDir ? loadPackage(packageDir) : null;
   const changes = [];
   const switchableSlugs = new Set((desired.profiles?.switchableAgents ?? []).map(String));
+  const knownSlugs = [
+    ...(desired.agents?.agents ?? []).map((agent) => agent.slug),
+    "summarizer",
+    "reflection-coach",
+  ];
+  const runtimeCapabilities = loadValidatedRuntimeCapabilities(desiredDir, { knownSlugs });
+  if (!runtimeCapabilities.ok) {
+    changes.push({
+      kind: "runtime-capabilities-invalid",
+      target: "runtime-capabilities",
+      blocking: true,
+      detail: runtimeCapabilities.errors.join("; "),
+      issues: runtimeCapabilities.errors,
+    });
+  }
   const providerState = desired.profiles
     ? detectProviderProfileState({
       profilesDoc: desired.profiles,
       liveSnapshot,
+      runtimeCapabilitiesBySlug: runtimeCapabilities.ok ? runtimeCapabilities.bySlug : null,
+      // Standard (redacted) snapshots keep secretId as [redacted]; allow only for offline detect.
+      allowRedactedSecretRefs: true,
     })
     : null;
   if (providerState && !providerState.ok) {
@@ -137,8 +161,29 @@ export function diffFleet({ packageDir, desiredDir, liveSnapshot }) {
     }
 
     // Portable package AGENTS.md files are export/import artifacts only.
-    // Live reconciliation must never plan full instruction replacement.
-    // Contradiction validation is handled separately for package and live instructions.
+    // Live reconciliation must never plan full instruction replacement for non-empty live bundles.
+    // Empty live bundles may be repaired from package when package content is non-empty.
+    const packageInstructions = pkg?.agentBySlug?.[agent.slug]?.instructions ?? null;
+    if (
+      liveInstructionsEmpty(live)
+      && typeof packageInstructions === "string"
+      && packageInstructions.trim().length > 0
+    ) {
+      changes.push({
+        kind: "agent-instructions-empty-repair",
+        target: agent.slug,
+        agentId: live.id,
+        from: live.instructions ?? "",
+        detail:
+          "live managed instruction bundle is empty; preview/apply may seed AGENTS.md from package only",
+        contentLength: packageInstructions.length,
+        api: {
+          method: "PUT",
+          path: `/api/agents/${live.id}/instructions-bundle/file`,
+          bodyKeys: ["path", "content"],
+        },
+      });
+    }
 
     // Full skillKeys vs full live desiredSkills for ALL portable agents (not short-name / overrides-only).
     if (Array.isArray(agent.skillKeys) && Array.isArray(live.desiredSkills)) {
