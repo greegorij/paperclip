@@ -928,10 +928,9 @@ describe("local process sandbox", () => {
 
     it("matches production Codex two-level chain without package.json (mounts bin, not release root)", async () => {
       // Production Codex installs under ~/.codex/packages/standalone have no
-      // package.json in the release tree — nearestPackageRoot falls back to
-      // dirname(realpath), i.e. .../releases/<version>/bin, not the release root.
-      // Keep the install tree inside home (as on a real server) so
-      // expectNarrowExecutableMounts can actually see a home-wide mount.
+      // package.json in the release tree. Place a package.json ABOVE the
+      // install (in the fixture home) so an uncapped nearestPackageRoot walk
+      // would return home as a mount — the negative assertion can then fail.
       const root = await makeFixtureRoot("paperclip-exec-plan-codex-prod-");
       const homeDir = path.join(root, "home");
       const workspace = path.join(root, "workspace");
@@ -947,18 +946,30 @@ describe("local process sandbox", () => {
       await fs.mkdir(workspace, { recursive: true });
       await fs.mkdir(localBin, { recursive: true });
       await fs.mkdir(releaseBin, { recursive: true });
+      // Ignition: package.json above the install tree, at the fixture home.
+      await fs.writeFile(path.join(homeDir, "package.json"), "{\"name\":\"fixture-home\"}\n");
       await fs.writeFile(realBin, "#!/bin/sh\n");
       await fs.symlink(`releases/${version}`, currentLink);
       await fs.symlink(path.join(currentLink, "bin", "codex"), command);
 
-      const plan = await executableSandboxPlan(command);
+      // Align os.homedir() with the fixture home so the package-root ceiling applies.
+      const previousHome = process.env.HOME;
+      process.env.HOME = homeDir;
+      let plan: Awaited<ReturnType<typeof executableSandboxPlan>>;
+      try {
+        plan = await executableSandboxPlan(command);
+      } finally {
+        if (previousHome === undefined) delete process.env.HOME;
+        else process.env.HOME = previousHome;
+      }
 
+      // Ceiling must keep home out of mounts; fallback is dirname(realpath)=releaseBin.
+      expectNarrowExecutableMounts(plan.mounts, homeDir);
       expect(plan.mounts).toContain(releaseBin);
       expect(plan.mounts).not.toContain(releaseRoot);
       expect(plan.mounts).toContain(localBin);
       expect(plan.mounts).not.toContain(standalone);
       expect(plan.mounts).not.toContain(path.join(standalone, "releases"));
-      expectNarrowExecutableMounts(plan.mounts, homeDir);
 
       expect(plan.symlinks).toEqual(expect.arrayContaining([
         { linkPath: command, target: path.join(currentLink, "bin", "codex") },
