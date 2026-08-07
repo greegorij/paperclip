@@ -29,6 +29,8 @@ export interface ProviderQuotaResult {
    * Carries why the primary source was skipped, so a silent downgrade stays visible.
    */
   degraded?: string | null;
+  /** ISO timestamp when this reading was originally fetched from the provider */
+  fetchedAt?: string | null;
   windows: QuotaWindow[];
 }
 

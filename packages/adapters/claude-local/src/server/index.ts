@@ -21,12 +21,16 @@ export {
   readClaudeAuthStatus,
   readClaudeToken,
   fetchClaudeQuota,
-  fetchClaudeCliQuota,
-  captureClaudeCliUsageText,
   parseClaudeCliUsageText,
   toPercent,
   fetchWithTimeout,
   claudeConfigDir,
+  createQuotaWindowCache,
+  resetClaudeQuotaCacheForTests,
+  isProviderRateLimitError,
+  QUOTA_SUCCESS_TTL_MS,
+  QUOTA_ERROR_TTL_MS,
+  QUOTA_429_BACKOFF_MS,
 } from "./quota.js";
 import type { AdapterSessionCodec } from "@paperclipai/adapter-utils";
 import { sessionCodec as acpxSessionCodec } from "@paperclipai/adapter-utils/acpx-engine/session-codec";

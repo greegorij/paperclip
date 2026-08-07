@@ -1,4 +1,4 @@
-import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,13 +7,19 @@ import type { ProviderQuotaResult, QuotaWindow } from "@paperclipai/adapter-util
 
 const execFileAsync = promisify(execFile);
 
-/** Hard cap on captured probe stdout+stderr so a noisy CLI cannot OOM the host. */
-const CLAUDE_USAGE_CAPTURE_MAX_BYTES = 8 * 1024 * 1024;
-/** Grace between SIGTERM and SIGKILL when tearing down a usage probe tree. */
-const CLAUDE_USAGE_PROBE_KILL_GRACE_MS = 1_000;
-
 const CLAUDE_USAGE_SOURCE_OAUTH = "anthropic-oauth";
-const CLAUDE_USAGE_SOURCE_CLI = "claude-cli";
+
+/** Successful quota readings stay fresh for one minute. */
+export const QUOTA_SUCCESS_TTL_MS = 60_000;
+/** Transient failures are cached briefly so bursts do not stampede the provider. */
+export const QUOTA_ERROR_TTL_MS = 15_000;
+/** Backoff after consecutive 429s: 60s → 120s → 300s (ceiling). */
+export const QUOTA_429_BACKOFF_MS = [60_000, 120_000, 300_000] as const;
+
+export function isProviderRateLimitError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b429\b/.test(message) || /rate[\s_-]?limit/i.test(message);
+}
 
 export function claudeConfigDir(): string {
   const fromEnv = process.env.CLAUDE_CONFIG_DIR;
@@ -24,16 +30,6 @@ export function claudeConfigDir(): string {
 function hasNonEmptyProcessEnv(key: string): boolean {
   const value = process.env[key];
   return typeof value === "string" && value.trim().length > 0;
-}
-
-function createClaudeQuotaEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value !== "string") continue;
-    if (key.startsWith("ANTHROPIC_")) continue;
-    env[key] = value;
-  }
-  return env;
 }
 
 function stripBackspaces(text: string): string {
@@ -279,32 +275,6 @@ export async function fetchClaudeQuota(token: string): Promise<QuotaWindow[]> {
   return windows;
 }
 
-function usageOutputLooksRelevant(text: string): boolean {
-  const normalized = normalizeForLabelSearch(text);
-  return normalized.includes("currentsession")
-    || normalized.includes("currentweek")
-    || normalized.includes("loadingusage")
-    || normalized.includes("failedtoloadusagedata")
-    || normalized.includes("tokenexpired")
-    || normalized.includes("authenticationerror")
-    || normalized.includes("ratelimited");
-}
-
-function usageOutputLooksComplete(text: string): boolean {
-  const normalized = normalizeForLabelSearch(text);
-  if (
-    normalized.includes("failedtoloadusagedata")
-    || normalized.includes("tokenexpired")
-    || normalized.includes("authenticationerror")
-    || normalized.includes("ratelimited")
-  ) {
-    return true;
-  }
-  return normalized.includes("currentsession")
-    && (normalized.includes("currentweek") || normalized.includes("extrausage"))
-    && /[0-9]{1,3}(?:\.[0-9]+)?%/i.test(text);
-}
-
 function extractUsageError(text: string): string | null {
   const lower = text.toLowerCase();
   const compact = lower.replace(/\s+/g, "");
@@ -429,277 +399,171 @@ export function parseClaudeCliUsageText(text: string): QuotaWindow[] {
   return windows;
 }
 
-function quoteForShell(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+interface QuotaCacheEntry {
+  result: ProviderQuotaResult;
+  expiresAt: number;
 }
 
-function buildClaudeCliShellProbeCommand(): string {
-  const feed = "(sleep 2; printf '/usage\\r'; sleep 6; printf '\\033'; sleep 1; printf '\\003')";
-  const claudeCommand = "claude --tools \"\"";
-  if (process.platform === "darwin") {
-    return `${feed} | script -q /dev/null ${claudeCommand}`;
-  }
-  return `${feed} | script -q -e -f -c ${quoteForShell(claudeCommand)} /dev/null`;
+interface ProviderQuotaCacheState {
+  entry: QuotaCacheEntry | null;
+  inFlight: Promise<ProviderQuotaResult> | null;
+  lastGood: ProviderQuotaResult | null;
+  consecutive429s: number;
+  backoffUntil: number;
 }
 
-function listPosixPidPpidPairs(): Array<{ pid: number; ppid: number }> {
-  try {
-    const stdout = execFileSync("ps", ["-A", "-o", "pid=,ppid="], {
-      encoding: "utf8",
-      timeout: 3_000,
-      maxBuffer: 1024 * 1024,
-    });
-    const pairs: Array<{ pid: number; ppid: number }> = [];
-    for (const line of stdout.split("\n")) {
-      const match = line.trim().match(/^(\d+)\s+(\d+)\s*$/);
-      if (!match) continue;
-      pairs.push({ pid: Number(match[1]), ppid: Number(match[2]) });
-    }
-    return pairs;
-  } catch {
-    return [];
-  }
-}
-
-function collectDescendantPids(rootPid: number): number[] {
-  const childrenByParent = new Map<number, number[]>();
-  for (const row of listPosixPidPpidPairs()) {
-    const siblings = childrenByParent.get(row.ppid);
-    if (siblings) siblings.push(row.pid);
-    else childrenByParent.set(row.ppid, [row.pid]);
-  }
-  const descendants: number[] = [];
-  const stack = [rootPid];
-  while (stack.length > 0) {
-    const pid = stack.pop()!;
-    for (const childPid of childrenByParent.get(pid) ?? []) {
-      descendants.push(childPid);
-      stack.push(childPid);
-    }
-  }
-  return descendants;
-}
-
-function signalPid(pid: number, signal: NodeJS.Signals): void {
-  try {
-    process.kill(pid, signal);
-  } catch {
-    // Already exited or not signalable.
-  }
-}
+export type QuotaWindowCache = {
+  read: (
+    provider: string,
+    fetchFn: () => Promise<ProviderQuotaResult>,
+  ) => Promise<ProviderQuotaResult>;
+  reset: () => void;
+};
 
 /**
- * Tear down a usage-probe process tree.
- * POSIX: prefer the detached process group, then signal any PPID-descendants
- * that may have left the group (e.g. `script` / `claude` after setsid).
- * `rememberedPids` accumulates every PID seen across snapshots so a child that
- * survives SIGTERM, leaves the session, and gets reparented is still targeted
- * by the later SIGKILL pass. The SIGTERM→SIGKILL grace stays short/bounded to
- * limit PID-reuse risk for those remembered IDs.
- * Windows: signal only the direct child (safe fallback; no process groups).
+ * In-process per-provider quota cache with single-flight and 429 backoff.
+ * Successful reads TTL 60s; failed reads TTL 15s; 429 backoff 60→120→300s.
  */
-function signalProbeProcessTree(
-  child: ChildProcess,
-  signal: NodeJS.Signals,
-  useProcessGroup: boolean,
-  rememberedPids?: Set<number>,
-): void {
-  const rootPid = child.pid;
-  if (rootPid == null || rootPid <= 0) return;
+export function createQuotaWindowCache(options?: { now?: () => number }): QuotaWindowCache {
+  const now = options?.now ?? (() => Date.now());
+  const states = new Map<string, ProviderQuotaCacheState>();
 
-  if (useProcessGroup) {
-    const descendants = collectDescendantPids(rootPid);
-    if (rememberedPids) {
-      for (const pid of descendants) {
-        rememberedPids.add(pid);
-      }
+  function stateFor(provider: string): ProviderQuotaCacheState {
+    let state = states.get(provider);
+    if (!state) {
+      state = {
+        entry: null,
+        inFlight: null,
+        lastGood: null,
+        consecutive429s: 0,
+        backoffUntil: 0,
+      };
+      states.set(provider, state);
     }
-    try {
-      process.kill(-rootPid, signal);
-    } catch {
-      // Group may already be gone; fall through to direct signals.
-    }
-    const targets = rememberedPids && rememberedPids.size > 0
-      ? rememberedPids
-      : descendants;
-    for (const pid of targets) {
-      if (pid === rootPid) continue;
-      signalPid(pid, signal);
-    }
+    return state;
   }
 
-  if (child.exitCode === null && child.signalCode === null) {
-    try {
-      child.kill(signal);
-    } catch {
-      signalPid(rootPid, signal);
-    }
+  function stamp(result: ProviderQuotaResult, fetchedAt: string): ProviderQuotaResult {
+    return { ...result, fetchedAt };
   }
-}
 
-function resolveProbeOutputOrThrow(input: {
-  stdout: string;
-  stderr: string;
-  timedOut: boolean;
-  overflowed: boolean;
-  spawnError: Error | null;
-  exitCode: number | null;
-  signal: NodeJS.Signals | null;
-}): string {
-  const output = `${input.stdout}${input.stderr}`;
-  const cleaned = cleanTerminalText(output);
-  if (usageOutputLooksComplete(cleaned)) return output;
-  if (usageOutputLooksRelevant(cleaned)) {
-    throw new Error("Claude CLI usage probe ended before rendering usage.");
-  }
-  if (input.overflowed) {
-    throw new Error(
-      `Claude CLI usage probe exceeded the ${CLAUDE_USAGE_CAPTURE_MAX_BYTES}-byte output limit.`,
-    );
-  }
-  if (input.timedOut) {
-    throw new Error("Claude CLI usage probe timed out.");
-  }
-  if (input.spawnError) {
-    throw input.spawnError;
-  }
-  throw new Error(
-    `Claude CLI usage probe exited without usable output (code=${input.exitCode ?? "null"} signal=${input.signal ?? "null"}).`,
-  );
-}
-
-export async function captureClaudeCliUsageText(timeoutMs = 12_000): Promise<string> {
-  const command = buildClaudeCliShellProbeCommand();
-  const useProcessGroup = process.platform !== "win32";
-
-  return await new Promise<string>((resolve, reject) => {
-    let settled = false;
-    let timedOut = false;
-    let overflowed = false;
-    let spawnError: Error | null = null;
-    let stdout = "";
-    let stderr = "";
-    let capturedBytes = 0;
-    let timeoutTimer: NodeJS.Timeout | null = null;
-    let killTimer: NodeJS.Timeout | null = null;
-    let killFailsafeTimer: NodeJS.Timeout | null = null;
-    let terminationStarted = false;
-    // PIDs observed at each tree snapshot (SIGTERM + SIGKILL). Survives
-    // reparenting between the two passes; kept only for the short kill grace.
-    const rememberedDescendantPids = new Set<number>();
-
-    const child = spawn("sh", ["-c", command], {
-      env: createClaudeQuotaEnv(),
-      // Own process group on POSIX so timeout can signal the whole probe tree.
-      detached: useProcessGroup,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
-
-    const clearTimers = () => {
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (killTimer) clearTimeout(killTimer);
-      if (killFailsafeTimer) clearTimeout(killFailsafeTimer);
-      timeoutTimer = null;
-      killTimer = null;
-      killFailsafeTimer = null;
+  function serveStaleLastGood(state: ProviderQuotaCacheState): ProviderQuotaResult {
+    const lastGood = state.lastGood!;
+    return {
+      ...lastGood,
+      ok: true,
+      windows: lastGood.windows,
+      degraded:
+        `stale: serving last known good read after provider rate limit (429)`,
     };
+  }
 
-    const finish = (fn: () => void) => {
-      if (settled) return;
-      settled = true;
-      // Root may exit during the SIGTERM grace (pipeline drained) while a
-      // detached, SIGTERM-ignoring descendant was reparented. Clear timers only
-      // after a final SIGKILL pass over every PID remembered from snapshots.
-      if (terminationStarted && useProcessGroup && rememberedDescendantPids.size > 0) {
-        signalProbeProcessTree(child, "SIGKILL", useProcessGroup, rememberedDescendantPids);
-      }
-      clearTimers();
-      rememberedDescendantPids.clear();
+  function rateLimitErrorResult(provider: string, error: unknown, fetchedAt: string): ProviderQuotaResult {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      provider,
+      ok: false,
+      error: message,
+      windows: [],
+      fetchedAt,
+    };
+  }
+
+  function note429(state: ProviderQuotaCacheState): void {
+    state.consecutive429s += 1;
+    const index = Math.min(state.consecutive429s - 1, QUOTA_429_BACKOFF_MS.length - 1);
+    state.backoffUntil = now() + QUOTA_429_BACKOFF_MS[index]!;
+  }
+
+  async function read(
+    provider: string,
+    fetchFn: () => Promise<ProviderQuotaResult>,
+  ): Promise<ProviderQuotaResult> {
+    const state = stateFor(provider);
+    const t = now();
+
+    if (state.entry && state.entry.expiresAt > t) {
+      return state.entry.result;
+    }
+
+    if (t < state.backoffUntil) {
+      if (state.lastGood) return serveStaleLastGood(state);
+      return {
+        provider,
+        ok: false,
+        error: "provider rate limited (429); no prior good quota reading available",
+        windows: [],
+        fetchedAt: new Date(t).toISOString(),
+      };
+    }
+
+    if (state.inFlight) return state.inFlight;
+
+    let flight!: Promise<ProviderQuotaResult>;
+    flight = (async (): Promise<ProviderQuotaResult> => {
       try {
-        fn();
-      } catch (error) {
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
-    };
+        const result = await fetchFn();
+        const fetchedAt = new Date(now()).toISOString();
+        const stamped = stamp(result, fetchedAt);
 
-    const settleFromCollectedOutput = () => {
-      finish(() => {
-        resolve(
-          resolveProbeOutputOrThrow({
-            stdout,
-            stderr,
-            timedOut,
-            overflowed,
-            spawnError,
-            exitCode: child.exitCode,
-            signal: child.signalCode,
-          }),
-        );
-      });
-    };
-
-    const terminateProbeTree = () => {
-      if (terminationStarted) return;
-      terminationStarted = true;
-      signalProbeProcessTree(child, "SIGTERM", useProcessGroup, rememberedDescendantPids);
-      // Bounded grace: long enough for polite exit, short enough that remembered
-      // PIDs are unlikely to be reused by an unrelated process before SIGKILL.
-      killTimer = setTimeout(() => {
-        signalProbeProcessTree(child, "SIGKILL", useProcessGroup, rememberedDescendantPids);
-        // Direct child should emit `close` after SIGKILL; fail-safe if the handle stalls.
-        // Re-check settled: SIGKILL may synchronously deliver `close` before we schedule.
-        if (settled) return;
-        killFailsafeTimer = setTimeout(() => settleFromCollectedOutput(), CLAUDE_USAGE_PROBE_KILL_GRACE_MS);
-      }, CLAUDE_USAGE_PROBE_KILL_GRACE_MS);
-    };
-
-    const appendChunk = (stream: "stdout" | "stderr", chunk: Buffer | string) => {
-      if (settled || overflowed) return;
-      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      const nextBytes = Buffer.byteLength(text, "utf8");
-      if (capturedBytes + nextBytes > CLAUDE_USAGE_CAPTURE_MAX_BYTES) {
-        const remaining = Math.max(0, CLAUDE_USAGE_CAPTURE_MAX_BYTES - capturedBytes);
-        if (remaining > 0) {
-          const partial = Buffer.from(text, "utf8").subarray(0, remaining).toString("utf8");
-          if (stream === "stdout") stdout += partial;
-          else stderr += partial;
-          capturedBytes += Buffer.byteLength(partial, "utf8");
+        if (result.ok) {
+          state.lastGood = stamped;
+          state.consecutive429s = 0;
+          state.backoffUntil = 0;
+          state.entry = { result: stamped, expiresAt: now() + QUOTA_SUCCESS_TTL_MS };
+          return stamped;
         }
-        overflowed = true;
-        terminateProbeTree();
-        return;
+
+        if (isProviderRateLimitError(result.error)) {
+          note429(state);
+          if (state.lastGood) return serveStaleLastGood(state);
+          state.entry = { result: stamped, expiresAt: now() + QUOTA_ERROR_TTL_MS };
+          return stamped;
+        }
+
+        state.entry = { result: stamped, expiresAt: now() + QUOTA_ERROR_TTL_MS };
+        return stamped;
+      } catch (error) {
+        const fetchedAt = new Date(now()).toISOString();
+        if (isProviderRateLimitError(error)) {
+          note429(state);
+          if (state.lastGood) return serveStaleLastGood(state);
+          const errResult = rateLimitErrorResult(provider, error, fetchedAt);
+          state.entry = { result: errResult, expiresAt: now() + QUOTA_ERROR_TTL_MS };
+          return errResult;
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        const errResult: ProviderQuotaResult = {
+          provider,
+          ok: false,
+          error: message,
+          windows: [],
+          fetchedAt,
+        };
+        state.entry = { result: errResult, expiresAt: now() + QUOTA_ERROR_TTL_MS };
+        return errResult;
+      } finally {
+        if (state.inFlight === flight) state.inFlight = null;
       }
-      capturedBytes += nextBytes;
-      if (stream === "stdout") stdout += text;
-      else stderr += text;
-    };
+    })();
 
-    child.stdout?.on("data", (chunk: Buffer | string) => appendChunk("stdout", chunk));
-    child.stderr?.on("data", (chunk: Buffer | string) => appendChunk("stderr", chunk));
+    state.inFlight = flight;
+    return flight;
+  }
 
-    child.once("error", (error) => {
-      spawnError = error instanceof Error ? error : new Error(String(error));
-      // `error` without a later `close` still needs settlement.
-      settleFromCollectedOutput();
-    });
-
-    child.once("close", () => {
-      settleFromCollectedOutput();
-    });
-
-    if (timeoutMs > 0) {
-      timeoutTimer = setTimeout(() => {
-        timedOut = true;
-        terminateProbeTree();
-      }, timeoutMs);
-    }
-  });
+  return {
+    read,
+    reset() {
+      states.clear();
+    },
+  };
 }
 
-export async function fetchClaudeCliQuota(): Promise<QuotaWindow[]> {
-  const rawText = await captureClaudeCliUsageText();
-  return parseClaudeCliUsageText(rawText);
+const sharedQuotaWindowCache = createQuotaWindowCache();
+
+export function resetClaudeQuotaCacheForTests(): void {
+  sharedQuotaWindowCache.reset();
 }
 
 function formatProviderError(source: string, error: unknown): string {
@@ -707,35 +571,43 @@ function formatProviderError(source: string, error: unknown): string {
   return `${source}: ${message}`;
 }
 
-export async function getQuotaWindows(): Promise<ProviderQuotaResult> {
-  if (
-    process.env.CLAUDE_CODE_USE_BEDROCK === "1" ||
-    process.env.CLAUDE_CODE_USE_BEDROCK === "true" ||
-    hasNonEmptyProcessEnv("ANTHROPIC_BEDROCK_BASE_URL")
-  ) {
-    return { provider: "anthropic", source: "bedrock", ok: true, windows: [] };
-  }
-
+async function fetchAnthropicQuotaUncached(): Promise<ProviderQuotaResult> {
   const authStatus = await readClaudeAuthStatus();
   const authDescription = describeClaudeSubscriptionAuth(authStatus);
   const token = await readClaudeToken();
-
-  const errors: string[] = [];
 
   if (token) {
     try {
       const windows = await fetchClaudeQuota(token);
       return { provider: "anthropic", source: CLAUDE_USAGE_SOURCE_OAUTH, ok: true, windows };
     } catch (error) {
-      errors.push(formatProviderError("Anthropic OAuth usage", error));
-    }
-  }
+      // Re-throw rate limits so the cache can serve last-good + backoff.
+      if (isProviderRateLimitError(error)) throw error;
 
-  try {
-    const windows = await fetchClaudeCliQuota();
-    return { provider: "anthropic", source: CLAUDE_USAGE_SOURCE_CLI, ok: true, windows };
-  } catch (error) {
-    errors.push(formatProviderError("Claude CLI /usage", error));
+      const errorMessage = formatProviderError("Anthropic OAuth usage", error);
+      if (authDescription) {
+        return {
+          provider: "anthropic",
+          ok: false,
+          error: `${authDescription}, but quota polling failed (${errorMessage})`,
+          windows: [],
+        };
+      }
+      if (hasNonEmptyProcessEnv("ANTHROPIC_API_KEY")) {
+        return {
+          provider: "anthropic",
+          ok: false,
+          error: errorMessage,
+          windows: [],
+        };
+      }
+      return {
+        provider: "anthropic",
+        ok: false,
+        error: errorMessage,
+        windows: [],
+      };
+    }
   }
 
   if (hasNonEmptyProcessEnv("ANTHROPIC_API_KEY") && !authDescription) {
@@ -743,8 +615,7 @@ export async function getQuotaWindows(): Promise<ProviderQuotaResult> {
       provider: "anthropic",
       ok: false,
       error:
-        errors[0]
-        ?? "ANTHROPIC_API_KEY is set and no local Claude subscription session is available for quota polling",
+        "ANTHROPIC_API_KEY is set and no local Claude subscription session is available for quota polling",
       windows: [],
     };
   }
@@ -753,10 +624,7 @@ export async function getQuotaWindows(): Promise<ProviderQuotaResult> {
     return {
       provider: "anthropic",
       ok: false,
-      error:
-        errors.length > 0
-          ? `${authDescription}, but quota polling failed (${errors.join("; ")})`
-          : `${authDescription}, but Paperclip could not load subscription quota data`,
+      error: `${authDescription}, but Paperclip could not load subscription quota data`,
       windows: [],
     };
   }
@@ -764,7 +632,25 @@ export async function getQuotaWindows(): Promise<ProviderQuotaResult> {
   return {
     provider: "anthropic",
     ok: false,
-    error: errors[0] ?? "no local claude auth token",
+    error: "no local claude auth token",
     windows: [],
   };
+}
+
+export async function getQuotaWindows(): Promise<ProviderQuotaResult> {
+  if (
+    process.env.CLAUDE_CODE_USE_BEDROCK === "1" ||
+    process.env.CLAUDE_CODE_USE_BEDROCK === "true" ||
+    hasNonEmptyProcessEnv("ANTHROPIC_BEDROCK_BASE_URL")
+  ) {
+    return {
+      provider: "anthropic",
+      source: "bedrock",
+      ok: true,
+      windows: [],
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+
+  return sharedQuotaWindowCache.read("anthropic", fetchAnthropicQuotaUncached);
 }
