@@ -116,12 +116,103 @@ async function nearestPackageRoot(candidate: string): Promise<string> {
   return path.dirname(candidate);
 }
 
-async function executableReadPaths(command: string): Promise<string[]> {
-  const paths = new Set<string>();
-  paths.add(path.dirname(command));
-  const realCommand = await fs.realpath(command).catch(() => command);
-  paths.add(await nearestPackageRoot(realCommand));
-  return Array.from(paths);
+const EXECUTABLE_SYMLINK_MAX_STEPS = 40;
+
+export interface ExecutableSandboxPlan {
+  mounts: string[];
+  symlinks: Array<{ linkPath: string; target: string }>;
+}
+
+/**
+ * First symlink along `candidate` (including intermediate directory links).
+ * Uses lexical prefixes only — never realpath — so near-root directory
+ * symlinks remain visible to the walk.
+ */
+async function firstSymlinkInPath(candidate: string): Promise<string | null> {
+  const absolute = path.resolve(candidate);
+  if (absolute === path.parse(absolute).root) return null;
+  const parts = absolute.split(path.sep);
+  let prefix = "";
+  for (let index = 1; index < parts.length; index += 1) {
+    prefix += `${path.sep}${parts[index]}`;
+    try {
+      const stat = await fs.lstat(prefix);
+      if (stat.isSymbolicLink()) return prefix;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Build sandbox mounts and in-sandbox symlink recreations for an executable.
+ *
+ * Mounts only the command directory and the package root of the fully resolved
+ * path. Symlink chain hops (literal readlink targets, including relative ones)
+ * are returned for recreation via `addSymlink` — parent stop directories are
+ * not mounted.
+ *
+ * Never throws: on read errors, cycles, or step limits, returns what was
+ * collected so far.
+ */
+export async function executableSandboxPlan(command: string): Promise<ExecutableSandboxPlan> {
+  const mounts = new Set<string>();
+  const symlinks: Array<{ linkPath: string; target: string }> = [];
+  const visited = new Set<string>();
+
+  mounts.add(path.dirname(command));
+
+  // Resolve lexically only (no realpath) so directory symlinks stay visible.
+  let current = path.resolve(command);
+  for (let step = 0; step < EXECUTABLE_SYMLINK_MAX_STEPS; step += 1) {
+    let linkPath: string | null;
+    try {
+      linkPath = await firstSymlinkInPath(current);
+    } catch {
+      break;
+    }
+    if (!linkPath || visited.has(linkPath)) break;
+    visited.add(linkPath);
+
+    let target: string;
+    try {
+      target = await fs.readlink(linkPath);
+    } catch {
+      break;
+    }
+    // Keep the target exactly as readlink returned it (relative targets stay relative).
+    symlinks.push({ linkPath, target });
+
+    const resolvedTarget = path.isAbsolute(target)
+      ? target
+      : path.resolve(path.dirname(linkPath), target);
+    const suffix = current.length > linkPath.length ? current.slice(linkPath.length) : "";
+    current = path.normalize(`${resolvedTarget}${suffix}`);
+  }
+
+  try {
+    const realCommand = await fs.realpath(command).catch(() => command);
+    mounts.add(await nearestPackageRoot(realCommand));
+  } catch {
+    // Keep mounts collected so far.
+  }
+
+  return { mounts: Array.from(mounts), symlinks };
+}
+
+async function applyExecutableSandboxPlan(
+  command: string,
+  mount: (source: string, access: LocalProcessSandboxAccess) => Promise<void>,
+  addSymlink: (linkPath: string, target: string) => void,
+): Promise<void> {
+  const plan = await executableSandboxPlan(command);
+  // Mounts first, then symlinks. Bubblewrap applies args in order: announcing a
+  // --symlink and later --dir/--bind through it fails with "No such file or
+  // directory". Mounts that already materialize a path as a directory (or cover
+  // an ancestor) make recreating that hop unnecessary — and harmful.
+  for (const mountPath of plan.mounts) await mount(mountPath, "ro");
+  for (const entry of plan.symlinks) addSymlink(entry.linkPath, entry.target);
 }
 
 function parseNetworkAllowlistEntry(entry: string, index: number): NetworkAllowlistRule {
@@ -502,9 +593,24 @@ export async function buildLocalProcessSandboxSpawnTarget(input: {
     const created = new Set<string>(["/", "/proc", "/dev", "/tmp"]);
     const represented = new Set<string>(["/", "/proc", "/dev", "/tmp"]);
     const mounted = new Set<string>();
+    const hasMountedAncestor = (candidate: string): boolean => {
+      let current = path.dirname(candidate);
+      while (current !== path.dirname(current)) {
+        if (mounted.has(current)) return true;
+        current = path.dirname(current);
+      }
+      return false;
+    };
     const addSymlink = (linkPath: string, target: string) => {
       const normalized = normalizeAbsolutePath(linkPath, "Sandbox path");
-      if (represented.has(normalized)) return;
+      // Skip when the path is already a sandbox directory/mount/symlink, or when
+      // a mounted ancestor already covers it (prefix check — exact match is not
+      // enough). Recreating a hop that mounts already turned into a directory
+      // breaks bubblewrap startup; recreating inside a foreign bind only works
+      // while the literal target happens to match the host.
+      if (represented.has(normalized) || created.has(normalized) || hasMountedAncestor(normalized)) {
+        return;
+      }
       addParentDirectories(args, created, normalized);
       args.push("--symlink", target, normalized);
       represented.add(normalized);
@@ -539,9 +645,9 @@ export async function buildLocalProcessSandboxSpawnTarget(input: {
       addSymlink(normalized, fallbackTarget);
     }
     for (const systemPath of SYSTEM_READ_PATHS) await mount(systemPath, "ro");
-    for (const executablePath of await executableReadPaths(input.executable)) await mount(executablePath, "ro");
+    await applyExecutableSandboxPlan(input.executable, mount, addSymlink);
     if (networkScope === "allowlist") {
-      for (const nodePath of await executableReadPaths(process.execPath)) await mount(nodePath, "ro");
+      await applyExecutableSandboxPlan(process.execPath, mount, addSymlink);
     }
     for (const managedPath of input.options.managedPaths ?? []) await mount(managedPath.path, managedPath.access);
     for (const extraPath of input.options.extraPaths ?? []) await mount(extraPath.path, extraPath.access);
