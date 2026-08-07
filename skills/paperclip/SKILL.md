@@ -81,14 +81,20 @@ Do not infer secret availability from environment-variable names. Before declari
 an owned login or integration task blocked for missing credentials, list the
 grants available to this run:
 
-```bash
-curl -sS --fail-with-body \
-  -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
-  "$PAPERCLIP_API_URL/api/agents/me/secrets"
+Use the `paperclipApiRequest` tool. Do **not** use `curl`: the sandbox network
+allowlist does not include the Paperclip API, so a direct network call cannot
+reach it regardless of the path you use.
+
+🔴 **The tool takes a path RELATIVE to `/api`.** Passing `/api/agents/me/secrets`
+produces `/api/api/agents/me/secrets` and returns `404 {"error":"API route not
+found"}` — a real failure that looks like a missing route.
+
+```
+paperclipApiRequest  method: GET   path: /agents/me/secrets
 ```
 
 For a grant whose delivery is `api` or `both`, fetch its value exactly once with
-`POST /api/agents/me/secrets/{key}/value`, writing the response only to a
+`paperclipApiRequest` (`POST`, path `/agents/me/secrets/{key}/value`), writing the response only to a
 mode-600 file beneath `$PAPERCLIP_RUN_SCRATCH_DIR`. Parse and use it in the
 same bounded command; never print the response, its keys, a derived username,
 or any value to stdout, comments, artifacts, prompts, or shell history. Remove
