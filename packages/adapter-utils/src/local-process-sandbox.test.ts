@@ -7,6 +7,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildLocalProcessSandboxSpawnTarget,
+  executableSandboxPlan,
   parseLocalProcessFilesystemScope,
   parseLocalProcessFilesystemWorkspaceAccess,
   parseLocalProcessNetworkAllowlist,
@@ -24,6 +25,131 @@ function mountTriplets(args: string[], flag: "--bind" | "--ro-bind"): Array<[str
     if (args[index] === flag) mounts.push([args[index + 1], args[index + 2]]);
   }
   return mounts;
+}
+
+function isDirectChildOfRoot(candidate: string): boolean {
+  const normalized = path.resolve(candidate);
+  return path.dirname(normalized) === path.parse(normalized).root;
+}
+
+/** Negative mount assertions required for every symlink-chain case. */
+function expectNarrowExecutableMounts(mounts: string[], homeDir: string): void {
+  expect(mounts).not.toContain("/");
+  expect(mounts).not.toContain(homeDir);
+  expect(mounts.some(isDirectChildOfRoot)).toBe(false);
+}
+
+function isStrictPathDescendant(ancestor: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(ancestor), path.resolve(candidate));
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+/**
+ * Path is reachable in the sandbox only when the argv list actually creates or
+ * mounts it, and that happens before any later `--dir` / `--bind` / `--ro-bind`
+ * that passes through it. Ancestor-of-a-mount is not enough — inspect args.
+ */
+function isSandboxReachable(candidate: string, args: string[]): boolean {
+  const normalized = path.resolve(candidate);
+  let availableAt = -1;
+
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "--") break;
+    if (args[index] === "--dir" && index + 1 < args.length) {
+      if (path.resolve(args[index + 1]) === normalized) {
+        availableAt = index;
+        break;
+      }
+      index += 1;
+      continue;
+    }
+    if ((args[index] === "--bind" || args[index] === "--ro-bind") && index + 2 < args.length) {
+      const dest = path.resolve(args[index + 2]);
+      if (dest === normalized || isStrictPathDescendant(dest, normalized)) {
+        availableAt = index;
+        break;
+      }
+      index += 2;
+      continue;
+    }
+  }
+
+  if (availableAt < 0) return false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "--") break;
+    if (args[index] === "--dir" && index + 1 < args.length) {
+      const dirPath = path.resolve(args[index + 1]);
+      if (isStrictPathDescendant(normalized, dirPath) && index < availableAt) return false;
+      index += 1;
+      continue;
+    }
+    if ((args[index] === "--bind" || args[index] === "--ro-bind") && index + 2 < args.length) {
+      const dest = path.resolve(args[index + 2]);
+      if (isStrictPathDescendant(normalized, dest) && index < availableAt) return false;
+      index += 2;
+      continue;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Invariant: no `--dir` / `--bind` / `--ro-bind` may target a path whose any
+ * ancestor was earlier announced as `--symlink` in the same argv list.
+ * Bubblewrap applies args in order; mkdir through a prior symlink kills startup.
+ */
+function expectNoPathCreationThroughPriorSymlink(args: string[]): void {
+  const announcedSymlinks = new Set<string>();
+  const violations: string[] = [];
+
+  const hasSymlinkAncestor = (candidate: string): boolean => {
+    let current = path.dirname(path.resolve(candidate));
+    while (current !== path.dirname(current)) {
+      if (announcedSymlinks.has(current)) return true;
+      current = path.dirname(current);
+    }
+    return false;
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "--") break;
+    if (args[index] === "--symlink" && index + 2 < args.length) {
+      announcedSymlinks.add(path.resolve(args[index + 2]));
+      index += 2;
+      continue;
+    }
+    if (args[index] === "--dir" && index + 1 < args.length) {
+      const dirPath = path.resolve(args[index + 1]);
+      if (hasSymlinkAncestor(dirPath)) {
+        violations.push(`--dir ${dirPath} passes through a prior --symlink`);
+      }
+      index += 1;
+      continue;
+    }
+    if ((args[index] === "--bind" || args[index] === "--ro-bind") && index + 2 < args.length) {
+      const dest = path.resolve(args[index + 2]);
+      if (hasSymlinkAncestor(dest)) {
+        violations.push(`${args[index]} ${dest} passes through a prior --symlink`);
+      }
+      index += 2;
+      continue;
+    }
+  }
+
+  expect(violations, violations.join("\n") || "expected no symlink-order violations").toEqual([]);
+}
+
+/** buildLocalProcessSandboxSpawnTarget refuses non-Linux hosts; tests need argv. */
+async function withLinuxPlatform<T>(run: () => Promise<T>): Promise<T> {
+  const previous = process.platform;
+  Object.defineProperty(process, "platform", { configurable: true, value: "linux" });
+  try {
+    return await run();
+  } finally {
+    Object.defineProperty(process, "platform", { configurable: true, value: previous });
+  }
 }
 
 async function withTmpDir<T>(tmpDir: string, run: () => Promise<T>): Promise<T> {
@@ -755,4 +881,310 @@ describe("local process sandbox", () => {
       }
     },
   );
+
+  describe("executableSandboxPlan symlink chain", () => {
+    async function makeFixtureRoot(prefix: string): Promise<string> {
+      // Realpath so macOS `/var → private/var` is not mistaken for an install hop.
+      const raw = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+      cleanup.push(raw);
+      return fs.realpath(raw);
+    }
+
+    it("recreates a two-level Codex-style chain with a relative directory hop", async () => {
+      const root = await makeFixtureRoot("paperclip-exec-plan-codex-");
+      const homeDir = path.join(root, "home");
+      const localBin = path.join(homeDir, ".local", "bin");
+      const version = "0.146.0-alpha.1";
+      const standalone = path.join(root, "npm", "codex", "standalone");
+      const releaseRoot = path.join(standalone, "releases", version);
+      const realBin = path.join(releaseRoot, "bin", "codex");
+      const currentLink = path.join(standalone, "current");
+      const command = path.join(localBin, "codex");
+
+      await fs.mkdir(localBin, { recursive: true });
+      await fs.mkdir(path.join(releaseRoot, "bin"), { recursive: true });
+      await fs.writeFile(path.join(releaseRoot, "package.json"), "{\"name\":\"codex\"}\n");
+      await fs.writeFile(realBin, "#!/bin/sh\n");
+      await fs.symlink(`releases/${version}`, currentLink);
+      await fs.symlink(path.join(currentLink, "bin", "codex"), command);
+
+      const plan = await executableSandboxPlan(command);
+
+      expect(plan.mounts).toContain(releaseRoot);
+      expect(plan.mounts).toContain(localBin);
+      expect(plan.mounts).not.toContain(standalone);
+      expect(plan.mounts).not.toContain(path.join(standalone, "releases"));
+      expectNarrowExecutableMounts(plan.mounts, homeDir);
+
+      expect(plan.symlinks).toEqual(expect.arrayContaining([
+        { linkPath: command, target: path.join(currentLink, "bin", "codex") },
+        { linkPath: currentLink, target: `releases/${version}` },
+      ]));
+      expect(plan.symlinks).toHaveLength(2);
+      const currentEntry = plan.symlinks.find((entry) => entry.linkPath === currentLink);
+      expect(currentEntry?.target).toBe(`releases/${version}`);
+      expect(path.isAbsolute(currentEntry!.target)).toBe(false);
+    });
+
+    it("matches production Codex two-level chain without package.json (mounts bin, not release root)", async () => {
+      // Production Codex installs under ~/.codex/packages/standalone have no
+      // package.json in the release tree — nearestPackageRoot falls back to
+      // dirname(realpath), i.e. .../releases/<version>/bin, not the release root.
+      // Keep the install tree inside home (as on a real server) so
+      // expectNarrowExecutableMounts can actually see a home-wide mount.
+      const root = await makeFixtureRoot("paperclip-exec-plan-codex-prod-");
+      const homeDir = path.join(root, "home");
+      const workspace = path.join(root, "workspace");
+      const localBin = path.join(homeDir, ".local", "bin");
+      const version = "0.146.0-x86_64-unknown-linux-musl";
+      const standalone = path.join(homeDir, ".codex", "packages", "standalone");
+      const releaseRoot = path.join(standalone, "releases", version);
+      const releaseBin = path.join(releaseRoot, "bin");
+      const realBin = path.join(releaseBin, "codex");
+      const currentLink = path.join(standalone, "current");
+      const command = path.join(localBin, "codex");
+
+      await fs.mkdir(workspace, { recursive: true });
+      await fs.mkdir(localBin, { recursive: true });
+      await fs.mkdir(releaseBin, { recursive: true });
+      await fs.writeFile(realBin, "#!/bin/sh\n");
+      await fs.symlink(`releases/${version}`, currentLink);
+      await fs.symlink(path.join(currentLink, "bin", "codex"), command);
+
+      const plan = await executableSandboxPlan(command);
+
+      expect(plan.mounts).toContain(releaseBin);
+      expect(plan.mounts).not.toContain(releaseRoot);
+      expect(plan.mounts).toContain(localBin);
+      expect(plan.mounts).not.toContain(standalone);
+      expect(plan.mounts).not.toContain(path.join(standalone, "releases"));
+      expectNarrowExecutableMounts(plan.mounts, homeDir);
+
+      expect(plan.symlinks).toEqual(expect.arrayContaining([
+        { linkPath: command, target: path.join(currentLink, "bin", "codex") },
+        { linkPath: currentLink, target: `releases/${version}` },
+      ]));
+      expect(plan.symlinks).toHaveLength(2);
+      const currentEntry = plan.symlinks.find((entry) => entry.linkPath === currentLink);
+      expect(currentEntry?.target).toBe(`releases/${version}`);
+      expect(path.isAbsolute(currentEntry!.target)).toBe(false);
+
+      // Relative current → releases/<version> must resolve inside the sandbox:
+      // releaseRoot must appear as --dir (or mount) in argv before anything under it.
+      const currentTargetResolved = path.resolve(path.dirname(currentLink), currentEntry!.target);
+      expect(currentTargetResolved).toBe(releaseRoot);
+      const target = await withLinuxPlatform(() =>
+        buildLocalProcessSandboxSpawnTarget({
+          executable: command,
+          args: ["--version"],
+          cwd: workspace,
+          options: {
+            workspaceDir: workspace,
+            filesystemScope: "workspace",
+            homeDir,
+          },
+        }),
+      );
+      expect(isSandboxReachable(releaseRoot, target.args)).toBe(true);
+    });
+
+    it("walks three or more symlink hops without hard-coding depth two", async () => {
+      const root = await makeFixtureRoot("paperclip-exec-plan-deep-");
+      const homeDir = path.join(root, "home");
+      const localBin = path.join(homeDir, ".local", "bin");
+      const vendor = path.join(root, "vendor");
+      const releaseRoot = path.join(vendor, "pkg");
+      const realBin = path.join(releaseRoot, "bin", "tool");
+      const hopA = path.join(vendor, "hop-a");
+      const hopB = path.join(vendor, "hop-b");
+      const command = path.join(localBin, "tool");
+
+      await fs.mkdir(localBin, { recursive: true });
+      await fs.mkdir(path.join(releaseRoot, "bin"), { recursive: true });
+      await fs.writeFile(path.join(releaseRoot, "package.json"), "{\"name\":\"tool\"}\n");
+      await fs.writeFile(realBin, "#!/bin/sh\n");
+      await fs.symlink("pkg", hopB);
+      await fs.symlink("hop-b", hopA);
+      await fs.symlink(path.join(hopA, "bin", "tool"), command);
+
+      const plan = await executableSandboxPlan(command);
+
+      expect(plan.mounts).toContain(releaseRoot);
+      expect(plan.mounts).toContain(localBin);
+      expect(plan.symlinks).toHaveLength(3);
+      expect(plan.symlinks).toEqual(expect.arrayContaining([
+        { linkPath: command, target: path.join(hopA, "bin", "tool") },
+        { linkPath: hopA, target: "hop-b" },
+        { linkPath: hopB, target: "pkg" },
+      ]));
+      expect(plan.symlinks.every((entry) => entry.linkPath === command || !path.isAbsolute(entry.target))).toBe(true);
+      expectNarrowExecutableMounts(plan.mounts, homeDir);
+    });
+
+    it("returns empty symlinks for a plain executable and keeps prior mounts", async () => {
+      const root = await makeFixtureRoot("paperclip-exec-plan-plain-");
+      const packageRoot = path.join(root, "pkg");
+      const command = path.join(packageRoot, "bin", "tool");
+      await fs.mkdir(path.dirname(command), { recursive: true });
+      await fs.writeFile(path.join(packageRoot, "package.json"), "{\"name\":\"tool\"}\n");
+      await fs.writeFile(command, "#!/bin/sh\n");
+
+      const plan = await executableSandboxPlan(command);
+
+      expect(plan.symlinks).toEqual([]);
+      expect(plan.mounts).toEqual(expect.arrayContaining([path.dirname(command), packageRoot]));
+      expect(plan.mounts).toHaveLength(2);
+    });
+
+    it("preserves Claude-style single-hop mounts and records one symlink", async () => {
+      const root = await makeFixtureRoot("paperclip-exec-plan-claude-");
+      const homeDir = path.join(root, "home");
+      const localBin = path.join(homeDir, ".local", "bin");
+      const packageRoot = path.join(root, "claude-pkg");
+      const realBin = path.join(packageRoot, "bin", "claude");
+      const command = path.join(localBin, "claude");
+
+      await fs.mkdir(localBin, { recursive: true });
+      await fs.mkdir(path.dirname(realBin), { recursive: true });
+      await fs.writeFile(path.join(packageRoot, "package.json"), "{\"name\":\"claude\"}\n");
+      await fs.writeFile(realBin, "#!/bin/sh\n");
+      await fs.symlink(realBin, command);
+
+      const plan = await executableSandboxPlan(command);
+
+      expect(plan.mounts).toEqual(expect.arrayContaining([localBin, packageRoot]));
+      expect(plan.mounts).toHaveLength(2);
+      expect(plan.symlinks).toEqual([{ linkPath: command, target: realBin }]);
+      expectNarrowExecutableMounts(plan.mounts, homeDir);
+    });
+
+    it("terminates self and mutual cycles without throwing", async () => {
+      const root = await makeFixtureRoot("paperclip-exec-plan-cycle-");
+      const homeDir = path.join(root, "home");
+      const selfLink = path.join(root, "self");
+      const a = path.join(root, "a");
+      const b = path.join(root, "b");
+      await fs.symlink(selfLink, selfLink);
+      await fs.symlink(b, a);
+      await fs.symlink(a, b);
+
+      await expect(executableSandboxPlan(selfLink)).resolves.toMatchObject({
+        mounts: expect.arrayContaining([path.dirname(selfLink)]),
+      });
+      const selfPlan = await executableSandboxPlan(selfLink);
+      expect(selfPlan.symlinks.length).toBeGreaterThanOrEqual(1);
+      expectNarrowExecutableMounts(selfPlan.mounts, homeDir);
+
+      await expect(executableSandboxPlan(a)).resolves.toMatchObject({
+        mounts: expect.arrayContaining([path.dirname(a)]),
+      });
+      const mutualPlan = await executableSandboxPlan(a);
+      expect(mutualPlan.symlinks.length).toBeGreaterThanOrEqual(1);
+      expectNarrowExecutableMounts(mutualPlan.mounts, homeDir);
+    });
+
+    it("sees a directory symlink near the root without canonicalizing the base", async () => {
+      const root = await makeFixtureRoot("paperclip-exec-plan-near-root-");
+      const homeDir = path.join(root, "home");
+      // Keep the install under an un-realpath'd alias so the directory hop remains on the walk.
+      const realTree = path.join(root, "real-tree");
+      const aliasTree = path.join(root, "alias-tree");
+      const packageRoot = path.join(realTree, "pkg");
+      const realBin = path.join(packageRoot, "bin", "tool");
+      const command = path.join(aliasTree, "pkg", "bin", "tool");
+
+      await fs.mkdir(path.dirname(realBin), { recursive: true });
+      await fs.writeFile(path.join(packageRoot, "package.json"), "{\"name\":\"tool\"}\n");
+      await fs.writeFile(realBin, "#!/bin/sh\n");
+      // Relative target — proves the walk does not absolutize directory-link targets.
+      await fs.symlink("real-tree", aliasTree);
+
+      const plan = await executableSandboxPlan(command);
+
+      expect(plan.symlinks).toEqual([
+        { linkPath: aliasTree, target: "real-tree" },
+      ]);
+      expect(plan.mounts).toContain(packageRoot);
+      expect(plan.mounts).toContain(path.dirname(command));
+      expect(plan.mounts).not.toContain(aliasTree);
+      expectNarrowExecutableMounts(plan.mounts, homeDir);
+    });
+  });
+
+  describe("sandbox argv does not create paths through prior symlinks", () => {
+    async function makeFixtureRoot(prefix: string): Promise<string> {
+      const raw = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+      cleanup.push(raw);
+      return fs.realpath(raw);
+    }
+
+    it("does not --dir/--bind under a directory symlink hop on the command path", async () => {
+      // First symlink on the command path is a directory component (alias-tree),
+      // not a file at the leaf — the bug fires when mkdir walks through it.
+      const root = await makeFixtureRoot("paperclip-sandbox-argv-alias-tree-");
+      const workspace = path.join(root, "workspace");
+      const realTree = path.join(root, "real-tree");
+      const aliasTree = path.join(root, "alias-tree");
+      const packageRoot = path.join(realTree, "pkg");
+      const realBin = path.join(packageRoot, "bin", "tool");
+      const command = path.join(aliasTree, "pkg", "bin", "tool");
+
+      await fs.mkdir(workspace, { recursive: true });
+      await fs.mkdir(path.dirname(realBin), { recursive: true });
+      await fs.writeFile(path.join(packageRoot, "package.json"), "{\"name\":\"tool\"}\n");
+      await fs.writeFile(realBin, "#!/bin/sh\n");
+      await fs.symlink("real-tree", aliasTree);
+
+      const target = await withLinuxPlatform(() =>
+        buildLocalProcessSandboxSpawnTarget({
+          executable: command,
+          args: ["--version"],
+          cwd: workspace,
+          options: {
+            workspaceDir: workspace,
+            filesystemScope: "workspace",
+          },
+        }),
+      );
+
+      expectNoPathCreationThroughPriorSymlink(target.args);
+    });
+
+    it("does not --dir/--bind under a home directory that is itself a symlink", async () => {
+      // Common production layout: $HOME is a symlink to another tree. The first
+      // hop on the command path is then the home directory itself.
+      const root = await makeFixtureRoot("paperclip-sandbox-argv-home-link-");
+      const workspace = path.join(root, "workspace");
+      const realHome = path.join(root, "real-home");
+      const homeDir = path.join(root, "home");
+      const localBin = path.join(homeDir, ".local", "bin");
+      const packageRoot = path.join(homeDir, ".codex", "packages", "standalone", "pkg");
+      const realBin = path.join(packageRoot, "bin", "tool");
+      const command = path.join(localBin, "tool");
+
+      await fs.mkdir(workspace, { recursive: true });
+      await fs.mkdir(realHome, { recursive: true });
+      await fs.symlink("real-home", homeDir);
+      await fs.mkdir(path.dirname(realBin), { recursive: true });
+      await fs.mkdir(localBin, { recursive: true });
+      await fs.writeFile(path.join(packageRoot, "package.json"), "{\"name\":\"tool\"}\n");
+      await fs.writeFile(realBin, "#!/bin/sh\n");
+      await fs.symlink(realBin, command);
+
+      const target = await withLinuxPlatform(() =>
+        buildLocalProcessSandboxSpawnTarget({
+          executable: command,
+          args: ["--version"],
+          cwd: workspace,
+          options: {
+            workspaceDir: workspace,
+            filesystemScope: "workspace",
+            homeDir,
+          },
+        }),
+      );
+
+      expectNoPathCreationThroughPriorSymlink(target.args);
+    });
+  });
 });

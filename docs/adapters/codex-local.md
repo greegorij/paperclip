@@ -44,6 +44,15 @@ The adapter symlinks Paperclip skills into the global Codex skills directory (`~
 
 When `filesystemScope`/`networkScope` are enabled, Bubblewrap is the hard execution boundary. In this setup you can keep `dangerouslyBypassApprovalsAndSandbox=false` while still passing Codex CLI `--sandbox danger-full-access` through `extraArgs`, so Codex does not add a second inner sandbox on top of Bubblewrap.
 
+What the Bubblewrap workspace sandbox actually brings in from the host:
+
+- **Mounted read-only (system):** `/usr` and related cert/userdb/timezone/gitconfig paths, plus top-level `/bin`, `/sbin`, `/lib`, `/lib64` when they are real directories (merged-/usr hosts recreate those as symlinks to `usr/...` instead of mounting them).
+- **Mounted (workspace):** the configured workspace directory (`rw` by default, or `ro` when `filesystemWorkspaceAccess=ro`), plus any explicit managed/extra paths.
+- **Mounted read-only (engine):** the command directory (`dirname` of the Codex executable path) and the real package root of the fully resolved binary — not parent stop directories along a symlink install layout.
+- **Recreated inside the sandbox:** symlink hops on the executable path (for example `~/.local/bin/codex` and a `standalone/current → releases/<version>` style directory link) are replayed with their literal `readlink` targets, including relative ones. Intermediate directories such as `standalone/` or `standalone/releases/` are not mounted.
+
+Parent directories of those reconstructed links are created empty in the sandbox so relative targets in the chain can resolve. Package-root discovery walks upward from the resolved binary without a home ceiling, so a host home path may still appear among mounts when that is the nearest package boundary found.
+
 ## Read-only shadow evaluation
 
 Set `shadowReadOnly=true` only for offline evaluation or shadow comparisons, not for normal agent work. The adapter fails closed unless it can use the local Codex CLI, mount the workspace read-only, and apply a non-empty network allowlist. ACP, remote execution, and additional filesystem paths are rejected.
