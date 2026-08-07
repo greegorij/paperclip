@@ -108,12 +108,18 @@ function addParentDirectories(args: string[], created: Set<string>, candidate: s
 }
 
 async function nearestPackageRoot(candidate: string): Promise<string> {
+  // Cap the upward walk at the user home directory. Without this ceiling, a
+  // package.json in $HOME (or any ancestor below /) becomes the "package root"
+  // and the whole home tree is mounted into the sandbox.
+  const fallback = path.dirname(candidate);
+  const ceiling = path.resolve(os.homedir());
   let current = path.dirname(candidate);
   while (current !== path.dirname(current)) {
+    if (path.resolve(current) === ceiling) return fallback;
     if (await pathExists(path.join(current, "package.json"))) return current;
     current = path.dirname(current);
   }
-  return path.dirname(candidate);
+  return fallback;
 }
 
 const EXECUTABLE_SYMLINK_MAX_STEPS = 40;
