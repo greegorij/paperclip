@@ -36,10 +36,6 @@ export type HeartbeatRunScratchCleanupResult =
 
 const TEMP_ENV_KEYS = ["TMPDIR", "TEMP", "TMP"] as const;
 const ISSUE_SEGMENT_MAX_CHARS = 32;
-// agent-browser stores its control socket below XDG_RUNTIME_DIR. Keep this
-// deliberately short: a full UUID makes otherwise valid run scratch paths
-// exceed the Unix-domain socket path limit on Linux.
-const BROWSER_SESSION_MAX_CHARS = 20;
 
 function sanitizePathSegment(value: string | null | undefined, fallback: string): string {
   const normalized = (value ?? "")
@@ -61,7 +57,7 @@ export function buildHeartbeatRunBrowserSession(runId: string): string {
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return `pc-${(normalized || "run").slice(0, BROWSER_SESSION_MAX_CHARS - 3)}`;
+  return `paperclip-${normalized || "run"}`;
 }
 
 /**

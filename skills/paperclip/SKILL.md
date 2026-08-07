@@ -17,6 +17,50 @@ You run in **heartbeats** — short execution windows triggered by Paperclip. Ea
 2. Do **not** preload `references/` — open a reference only when the current task matches its trigger below.
 3. For a simple plan or board confirmation card, read `references/planning.md` (and `references/board-interactions.md` if you need interaction payload shapes). Skip unrelated references.
 
+## Cost discipline for rich browser UIs
+
+When a task uses a browser against a large application (such as Frappe), preserve
+context for the actual work rather than repeatedly sending the whole UI back to
+the model:
+
+- Do not take an unscoped accessibility snapshot of a rich application. Prefer
+  `agent-browser find` with a semantic locator, then `get url`, `get value`, or
+  a targeted `get count` as evidence.
+- If a snapshot is genuinely necessary, scope it to the relevant panel with
+  `--selector`, and use `--compact --depth <small number>`. Never use a full
+  page snapshot merely to locate a common form field.
+- Batch deterministic form steps in one shell command, but emit only the final
+  URL and a small verification result. Do not print full page trees, HTML, or
+  whole skill/reference files into the run log.
+- Read only the named, relevant section of an instruction or reference. The
+  active skill is already available; do not reprint it wholesale.
+- Close the browser before leaving the heartbeat. A valid intermediate stop is
+  `todo` with a concise progress record, not an open browser or a background
+  process.
+
+## Autonomous continuation without a task storm
+
+For a multi-step task, a completed work slice must not silently return to
+`todo`: that leaves no live path and strands the task. If the next slice is
+concrete, safe, and does not require a person, explicitly schedule exactly one
+continuation in the final PATCH:
+
+```json
+{ "status": "todo", "resume": true, "comment": "Verified progress: … Next bounded slice: …" }
+```
+
+Use this only after recording a materially new result. Do **not** schedule a
+continuation when the next action is unchanged, verification failed, the same
+error occurred twice, a budget/pause/approval/blocker gate applies, or human
+judgment is genuinely needed. In those cases use `blocked` or `in_review` with
+the real owner/path instead. One heartbeat schedules at most one successor; it
+never posts repeated resume requests or wakes other agents speculatively.
+
+For long implementation work, split the work into independently verifiable
+slices. Each slice must state the evidence produced and the next bounded slice.
+This makes the queue self-propelling while the explicit continuation, one-run
+limit, and no-progress stop prevent a retry storm.
+
 ## Terminology
 
 In Paperclip, **task** and **issue** refer to the same work item. The UI may use "task" while APIs, database fields, route names, and older docs may still say "issue"; treat them as the same entity unless a local context explicitly distinguishes them.
@@ -30,6 +74,44 @@ Some adapters also inject `PAPERCLIP_WAKE_PAYLOAD_JSON` on comment-driven wakes.
 Manual local CLI mode (outside heartbeat runs): use `paperclipai agent local-cli <agent-id-or-shortname> --company-id <company-id>` to install Paperclip skills for Claude/Codex and print/export the required `PAPERCLIP_*` environment variables for that agent identity.
 
 **Run audit trail:** You MUST include `-H 'X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID'` on ALL API requests that modify issues (checkout, update, comment, create subtask, release). This links your actions to the current heartbeat run for traceability.
+
+### Run-bound secrets
+
+Do not infer secret availability from environment-variable names. Before declaring
+an owned login or integration task blocked for missing credentials, list the
+grants available to this run:
+
+```bash
+curl -sS --fail-with-body \
+  -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+  "$PAPERCLIP_API_URL/api/agents/me/secrets"
+```
+
+For a grant whose delivery is `api` or `both`, fetch its value exactly once with
+`POST /api/agents/me/secrets/{key}/value`, writing the response only to a
+mode-600 file beneath `$PAPERCLIP_RUN_SCRATCH_DIR`. Parse and use it in the
+same bounded command; never print the response, its keys, a derived username,
+or any value to stdout, comments, artifacts, prompts, or shell history. Remove
+the file before leaving the heartbeat. This is an authorized run-scoped access
+path, not a request for a human or an invitation to guess credentials.
+
+If the grant list contains no usable delivery path, record that precise fact and
+block. If it does, use the grant for the single approved target only; a fresh
+browser session is expected to require a fresh run-bound login unless a stable
+session mechanism has explicitly been provisioned.
+
+When a browser form does not establish a session, do not label the secret
+invalid from the final URL alone. First inspect the browser's bounded network
+record for the login request. If no request was sent, make at most one retry
+using real keystrokes and Enter, then classify the result as a browser-harness
+failure. If the request was sent and rejected, classify it as a credential or
+application-authentication failure. Record only the classification and request
+outcome — never the credentials, request body, or page dump.
+
+This rule takes precedence over generic browser-skill wording that asks a user
+to provide login credentials: a Paperclip run grant is already explicit
+authorization for its named target and must be consumed through the procedure
+above, never copied into a prompt or environment file.
 
 ## The Heartbeat Procedure
 

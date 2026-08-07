@@ -34,6 +34,7 @@ import {
   builtInAgentMarkersEqual,
   readBuiltInAgentMarker,
 } from "./built-in-agent-metadata.js";
+import { invalidateProviderBudgetPacingCache } from "./provider-budget-pacing.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -529,7 +530,7 @@ export function agentService(db: Db) {
     const shouldRecordRevision = Boolean(options?.recordRevision) && hasConfigPatchFields(normalizedPatch);
     const beforeConfig = shouldRecordRevision ? buildConfigSnapshot(existing) : null;
 
-    return db.transaction(async (tx) => {
+    const normalizedUpdated = await db.transaction(async (tx) => {
       const txDb = tx as unknown as Db;
       const updated = await tx
         .update(agents)
@@ -543,18 +544,18 @@ export function agentService(db: Db) {
         await syncAgentSecretBindings(updated, txDb);
       }
 
-      const normalizedUpdated = await agentService(txDb).getById(updated.id);
-      if (!normalizedUpdated) {
+      const normalized = await agentService(txDb).getById(updated.id);
+      if (!normalized) {
         throw notFound("Agent not found");
       }
 
       if (shouldRecordRevision && beforeConfig) {
-        const afterConfig = buildConfigSnapshot(normalizedUpdated);
+        const afterConfig = buildConfigSnapshot(normalized);
         const changedKeys = diffConfigSnapshot(beforeConfig, afterConfig);
         if (changedKeys.length > 0) {
           await tx.insert(agentConfigRevisions).values({
-            companyId: normalizedUpdated.companyId,
-            agentId: normalizedUpdated.id,
+            companyId: normalized.companyId,
+            agentId: normalized.id,
             createdByAgentId: options?.recordRevision?.createdByAgentId ?? null,
             createdByUserId: options?.recordRevision?.createdByUserId ?? null,
             source: options?.recordRevision?.source ?? "patch",
@@ -566,8 +567,19 @@ export function agentService(db: Db) {
         }
       }
 
-      return normalizedUpdated;
+      return normalized;
     });
+    if (
+      normalizedUpdated &&
+      (
+        Object.prototype.hasOwnProperty.call(normalizedPatch, "status") ||
+        Object.prototype.hasOwnProperty.call(normalizedPatch, "adapterType") ||
+        Object.prototype.hasOwnProperty.call(normalizedPatch, "runtimeConfig")
+      )
+    ) {
+      invalidateProviderBudgetPacingCache(normalizedUpdated.companyId);
+    }
+    return normalizedUpdated;
   }
 
   return {
@@ -649,7 +661,11 @@ export function agentService(db: Db) {
         .where(eq(agents.id, id))
         .returning()
         .then((rows) => rows[0] ?? null);
-      return updated ? getById(updated.id) : null;
+      const result = updated ? await getById(updated.id) : null;
+      if (result) {
+        invalidateProviderBudgetPacingCache(result.companyId);
+      }
+      return result;
     },
 
     resume: async (id: string) => {
@@ -672,7 +688,11 @@ export function agentService(db: Db) {
         .where(eq(agents.id, id))
         .returning()
         .then((rows) => rows[0] ?? null);
-      return updated ? getById(updated.id) : null;
+      const result = updated ? await getById(updated.id) : null;
+      if (result) {
+        invalidateProviderBudgetPacingCache(result.companyId);
+      }
+      return result;
     },
 
     clearError: async (id: string) => {

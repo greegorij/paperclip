@@ -1529,17 +1529,45 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     if (!watchdogIssue || watchdogIssue.status !== "done") return;
     if (reviewedFingerprintForWatchdogIssue(watchdogIssue) !== classification.stopFingerprint) return;
 
-    await db
-      .update(issues)
-      .set({
-        status: "blocked",
-        description: descriptionWithActionRequiredFingerprint(
-          watchdogIssue.description,
-          classification.stopFingerprint,
-        ),
-        updatedAt: new Date(),
-      })
-      .where(and(eq(issues.companyId, watchdog.companyId), eq(issues.id, watchdogIssue.id)));
+    const now = new Date();
+    await db.transaction(async (tx) => {
+      await tx
+        .update(issues)
+        .set({
+          status: "blocked",
+          description: descriptionWithActionRequiredFingerprint(
+            watchdogIssue.description,
+            classification.stopFingerprint,
+          ),
+          updatedAt: now,
+        })
+        .where(and(eq(issues.companyId, watchdog.companyId), eq(issues.id, watchdogIssue.id)));
+
+      // A completed review can retain an older queued/deferred wake. Once the
+      // review becomes an explicit board-action blocker, that wake must not be
+      // replayed merely because its assignee is later resumed. Scope this to
+      // the generated review itself: the watched source may still have a valid
+      // future wake and must remain untouched.
+      await tx
+        .update(agentWakeupRequests)
+        .set({
+          status: "cancelled",
+          finishedAt: now,
+          error: "Cancelled because task-watchdog review requires board action",
+          updatedAt: now,
+        })
+        .where(and(
+          eq(agentWakeupRequests.companyId, watchdog.companyId),
+          inArray(agentWakeupRequests.status, [...TASK_WATCHDOG_WAKE_REQUEST_STATUSES]),
+          isNull(agentWakeupRequests.runId),
+          or(
+            sql`${agentWakeupRequests.payload}->>'issueId' = ${watchdogIssue.id}`,
+            sql`${agentWakeupRequests.payload}->>'taskId' = ${watchdogIssue.id}`,
+            sql`${agentWakeupRequests.payload}->'_paperclipWakeContext'->>'issueId' = ${watchdogIssue.id}`,
+            sql`${agentWakeupRequests.payload}->'_paperclipWakeContext'->>'taskId' = ${watchdogIssue.id}`,
+          ),
+        ));
+    });
   }
 
   async function ensureReusableWatchdogIssue(input: {

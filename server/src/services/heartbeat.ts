@@ -417,7 +417,7 @@ const GIT_SENSITIVE_LOCAL_ADAPTER_TYPES = new Set([
 ]);
 export const MAX_TURN_CONTINUATION_RETRY_REASON = "max_turns_continuation";
 export const MAX_TURN_CONTINUATION_WAKE_REASON = "max_turns_continuation_retry";
-const MAX_TURN_CONTINUATION_DEFAULT_MAX_ATTEMPTS = 2;
+const MAX_TURN_CONTINUATION_DEFAULT_MAX_ATTEMPTS = 1;
 const MAX_TURN_CONTINUATION_MAX_ATTEMPTS_CAP = 10;
 const MAX_TURN_CONTINUATION_DEFAULT_DELAY_MS = 1_000;
 const MAX_TURN_CONTINUATION_MAX_DELAY_MS = 5 * 60 * 1000;
@@ -4068,6 +4068,23 @@ export type ExecutionWorkspaceReuseRequestForIssue = {
  */
 export function isReadOnlyIssueWorkMode(workMode: string | null | undefined): boolean {
   return workMode === "ask" || workMode === "planning";
+}
+
+/**
+ * An execution workspace created before a project received its primary workspace
+ * has no project-workspace binding. Once a primary workspace exists, restoring
+ * that legacy record would launch from stale context and fail later validation.
+ */
+export function shouldDiscardLegacyUnboundExecutionWorkspace(input: {
+  reuseRequested: boolean;
+  persistedWorkspaceExists: boolean;
+  persistedProjectWorkspaceId: string | null | undefined;
+  resolvedProjectWorkspaceId: string | null | undefined;
+}): boolean {
+  return input.reuseRequested
+    && input.persistedWorkspaceExists
+    && !readNonEmptyString(input.persistedProjectWorkspaceId)
+    && Boolean(readNonEmptyString(input.resolvedProjectWorkspaceId));
 }
 
 export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
@@ -10764,8 +10781,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const shouldQuarantineWorkspaceForRetry =
       workspaceValidationRetryPayload !== null &&
       Object.keys(workspaceValidationRetryPayload).length > 0;
+    const maxTurnRetryPaperclipWake =
+      retryReason === MAX_TURN_CONTINUATION_RETRY_REASON
+        ? (() => {
+            const { continuationSummary: _omittedContinuationSummary, ...paperclipWakeWithoutContinuationSummary } =
+              parseObject(contextSnapshot.paperclipWake);
+            return {
+              ...paperclipWakeWithoutContinuationSummary,
+              fallbackFetchNeeded: true,
+            };
+          })()
+        : null;
     const retryContextSnapshot: Record<string, unknown> = withRecoveryModelProfileHint({
       ...contextSnapshot,
+      ...(maxTurnRetryPaperclipWake ? { paperclipWake: maxTurnRetryPaperclipWake } : {}),
       retryOfRunId: run.id,
       wakeReason,
       retryReason,
@@ -11785,9 +11814,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     const cached = peekProviderBudgetPacing(agent.companyId);
     if (!cached || cached.stale) {
-      void getProviderBudgetPacing(db, agent.companyId, { bypassCache: cached?.stale ?? false }).catch((err) => {
-        logger.warn({ err, companyId: agent.companyId, provider }, "provider pacing refresh failed; retaining fail-open admission");
-      });
+      void getProviderBudgetPacing(db, agent.companyId, { bypassCache: cached?.stale ?? false })
+        .then(() => {
+          void resumeQueuedRuns().catch((err) => {
+            logger.warn(
+              { err, companyId: agent.companyId, provider },
+              "provider pacing refresh succeeded but queued-run admission retry failed",
+            );
+          });
+        })
+        .catch((err) => {
+          logger.warn({ err, companyId: agent.companyId, provider }, "provider pacing refresh failed; retaining fail-open admission");
+        });
     }
     const pacing = cached ? pacingForAdapterType(cached.snapshot, agent.adapterType) : null;
     if (!pacing || pacing.admissionCeiling == null) {
@@ -13577,8 +13615,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       existingExecutionWorkspaceStatus: existingExecutionWorkspace?.status ?? null,
       issueWorkMode: issueRef?.workMode ?? null,
     });
-    const requestedShouldReuseExisting = workspaceReuseRequest.requestedShouldReuseExisting;
-    const reusableExistingExecutionWorkspace = workspaceReuseRequest.existingExecutionWorkspaceAvailable
+    let requestedShouldReuseExisting = workspaceReuseRequest.requestedShouldReuseExisting;
+    let reusableExistingExecutionWorkspace = workspaceReuseRequest.existingExecutionWorkspaceAvailable
       ? existingExecutionWorkspace
       : null;
     const requestedReusableExecutionWorkspaceConfig = reusableExistingExecutionWorkspace?.config ?? null;
@@ -13887,6 +13925,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           },
         ),
     });
+    if (shouldDiscardLegacyUnboundExecutionWorkspace({
+      reuseRequested: requestedShouldReuseExisting,
+      persistedWorkspaceExists: reusableExistingExecutionWorkspace !== null,
+      persistedProjectWorkspaceId: reusableExistingExecutionWorkspace?.projectWorkspaceId,
+      resolvedProjectWorkspaceId:
+        issueRef?.projectWorkspaceId ?? resolvedWorkspace.workspaceId,
+    })) {
+      // Historical workspaces without a projectWorkspaceId become outdated once a
+      // project workspace is expected; rematerialize instead of restoring and
+      // failing closed at adapter launch validation.
+      requestedShouldReuseExisting = false;
+      reusableExistingExecutionWorkspace = null;
+    }
     const hostExecutionWorkspaceConfig = stripHostWorkspaceProvisionForLowTrustSandbox({
       config: mergedConfig,
       trustPreset,

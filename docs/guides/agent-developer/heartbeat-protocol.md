@@ -138,6 +138,11 @@ implementation pass:
 - Its input is the stopped snapshot and heartbeat context. The agent should
   produce one evidence-based disposition: confirm the current state or restore
   one valid live path.
+- A completed review is accepted only when the source is terminal, has a real
+  live path, or is waiting on a person. If none applies, Paperclip leaves that
+  watchdog in a visible action-required blocked state for the same stopped
+  fingerprint instead of repeatedly waking it. A material change to the
+  stopped snapshot may reopen one new bounded review.
 - It must not broadly explore APIs or documentation when that supplied context
   already answers the question.
 - A task watchdog never creates another task watchdog. It may create a normal,

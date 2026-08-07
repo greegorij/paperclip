@@ -79,6 +79,8 @@ import {
   withRecoveryModelProfileHint,
 } from "./model-profile-hint.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
+import { PRODUCTIVITY_REVIEW_ORIGIN_KIND } from "../productivity-review.js";
+import { TASK_WATCHDOG_ORIGIN_KIND } from "../task-watchdog-scope.js";
 
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = ["interrupted", "failed", "cancelled", "timed_out"] as const;
@@ -3238,17 +3240,25 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
 
   async function resolveContinuationWaitingOnReview(issue: typeof issues.$inferSelect) {
     const existingBlockers = await existingUnresolvedBlockerIssues(issue.companyId, issue.id);
-    const openChildren = await db
-      .select({ id: issues.id, identifier: issues.identifier })
-      .from(issues)
-      .where(
-        and(
-          eq(issues.companyId, issue.companyId),
-          eq(issues.parentId, issue.id),
-          visibleIssueCondition(),
-          notInArray(issues.status, ["done", "cancelled"]),
-        ),
-      );
+    // Observational children (task watchdog / productivity review) are not
+    // dependent work — excluding them prevents a parent from blocking on itself.
+    const openChildren = (
+      await db
+        .select({ id: issues.id, identifier: issues.identifier, originKind: issues.originKind })
+        .from(issues)
+        .where(
+          and(
+            eq(issues.companyId, issue.companyId),
+            eq(issues.parentId, issue.id),
+            visibleIssueCondition(),
+            notInArray(issues.status, ["done", "cancelled"]),
+          ),
+        )
+    ).filter(
+      (child) =>
+        child.originKind !== TASK_WATCHDOG_ORIGIN_KIND &&
+        child.originKind !== PRODUCTIVITY_REVIEW_ORIGIN_KIND,
+    );
     const blockedByIssueIds = [...new Set([...existingBlockers.map((row) => row.id), ...openChildren.map((row) => row.id)])];
     if (blockedByIssueIds.length === 0) return null;
 

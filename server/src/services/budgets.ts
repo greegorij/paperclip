@@ -325,7 +325,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
     });
   }
 
-  async function resumeScopeFromBudget(policy: PolicyRow) {
+  async function resumeScopeFromBudget(policy: Pick<PolicyRow, "scopeType" | "scopeId">) {
     const now = new Date();
     if (policy.scopeType === "agent") {
       await db
@@ -479,6 +479,93 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       .returning()
       .then((rows) => rows[0] ?? null);
     return incident ? { incident, created: true } : null;
+  }
+
+  async function policyCurrentlyHardStops(policy: PolicyRow) {
+    if (!policy.isActive || !policy.hardStopEnabled || skipUnenforceableBudgetPolicy(policy)) {
+      return false;
+    }
+    return (await computeObservedAmount(db, policy)) >= policy.amount;
+  }
+
+  /**
+   * Close open hard incidents whose live observed spend is back under the policy,
+   * then resume only budget-paused scopes that no longer have any active hard stop.
+   * Manual / system pauses are preserved by resumeScopeFromBudget's pauseReason filter.
+   */
+  async function reconcileStaleHardIncidents(companyId: string, incidents: IncidentRow[]) {
+    const staleScopes = new Map<string, Pick<PolicyRow, "scopeType" | "scopeId">>();
+    const now = new Date();
+
+    for (const incident of incidents) {
+      if (incident.thresholdType !== "hard") continue;
+      const policy = await getPolicyRow(incident.policyId);
+      if (await policyCurrentlyHardStops(policy)) continue;
+
+      await db
+        .update(budgetIncidents)
+        .set({ status: "resolved", resolvedAt: now, updatedAt: now })
+        .where(eq(budgetIncidents.id, incident.id));
+      staleScopes.set(`${policy.scopeType}:${policy.scopeId}`, {
+        scopeType: policy.scopeType,
+        scopeId: policy.scopeId,
+      });
+    }
+
+    for (const scope of staleScopes.values()) {
+      const scopePolicies = await db
+        .select()
+        .from(budgetPolicies)
+        .where(and(
+          eq(budgetPolicies.companyId, companyId),
+          eq(budgetPolicies.scopeType, scope.scopeType),
+          eq(budgetPolicies.scopeId, scope.scopeId),
+        ));
+      const stillHardStopped = (await Promise.all(scopePolicies.map(policyCurrentlyHardStops))).some(Boolean);
+      if (!stillHardStopped) await resumeScopeFromBudget(scope);
+    }
+  }
+
+  async function resumeScopeIfNoHardStopRemains(
+    companyId: string,
+    scopeType: BudgetScopeType,
+    scopeId: string,
+  ) {
+    const scopePolicies = await db
+      .select()
+      .from(budgetPolicies)
+      .where(and(
+        eq(budgetPolicies.companyId, companyId),
+        eq(budgetPolicies.scopeType, scopeType),
+        eq(budgetPolicies.scopeId, scopeId),
+      ));
+    const stillHardStopped = (await Promise.all(scopePolicies.map(policyCurrentlyHardStops))).some(Boolean);
+    if (!stillHardStopped) await resumeScopeFromBudget({ scopeType, scopeId });
+  }
+
+  /**
+   * Reconcile open hard incidents for one scope (including expired windows) and
+   * clear a budget-owned pause when no live hard stop remains.
+   */
+  async function reconcileCurrentScopeHardIncidents(
+    companyId: string,
+    scopeType: BudgetScopeType,
+    scopeId: string,
+  ) {
+    const incidents = await db
+      .select()
+      .from(budgetIncidents)
+      .where(and(
+        eq(budgetIncidents.companyId, companyId),
+        eq(budgetIncidents.scopeType, scopeType),
+        eq(budgetIncidents.scopeId, scopeId),
+        eq(budgetIncidents.thresholdType, "hard"),
+        eq(budgetIncidents.status, "open"),
+      ));
+    await reconcileStaleHardIncidents(companyId, incidents);
+    // Cover budget pauses left behind when the open hard incident aged out of the
+    // current window (or was otherwise missing) while live spend is now under limit.
+    await resumeScopeIfNoHardStopRemains(companyId, scopeType, scopeId);
   }
 
   async function resolveOpenSoftIncidents(policyId: string) {
@@ -696,11 +783,31 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
 
     overview: async (companyId: string): Promise<BudgetOverview> => {
       const rows = await listPolicyRows(companyId);
-      const policies = await Promise.all(rows.map((row) => buildPolicySummary(row)));
       // Incidents are tied to a fixed budget window.  An unresolved record from
       // a previous month is useful history, but it must not appear as active
       // work or turn the current budget surface into a false hard stop.
       const now = new Date();
+      const openHardIncidents = await db
+        .select()
+        .from(budgetIncidents)
+        .where(and(
+          eq(budgetIncidents.companyId, companyId),
+          eq(budgetIncidents.status, "open"),
+          eq(budgetIncidents.thresholdType, "hard"),
+        ));
+      await reconcileStaleHardIncidents(companyId, openHardIncidents);
+      const resumedScopes = new Set<string>();
+      for (const row of rows) {
+        const key = `${row.scopeType}:${row.scopeId}`;
+        if (resumedScopes.has(key)) continue;
+        resumedScopes.add(key);
+        await resumeScopeIfNoHardStopRemains(
+          companyId,
+          row.scopeType as BudgetScopeType,
+          row.scopeId,
+        );
+      }
+      const policies = await Promise.all(rows.map((row) => buildPolicySummary(row)));
       const activeIncidentRows = await db
         .select()
         .from(budgetIncidents)
@@ -788,6 +895,12 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
               },
             });
           }
+        } else {
+          await reconcileCurrentScopeHardIncidents(
+            policy.companyId,
+            policy.scopeType as BudgetScopeType,
+            policy.scopeId,
+          );
         }
       }
     },
@@ -797,7 +910,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       agentId: string,
       context?: { issueId?: string | null; projectId?: string | null },
     ) => {
-      const agent = await db
+      let agent = await db
         .select({
           status: agents.status,
           pauseReason: agents.pauseReason,
@@ -810,7 +923,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         .then((rows) => rows[0] ?? null);
       if (!agent || agent.companyId !== companyId) throw notFound("Agent not found");
 
-      const company = await db
+      let company = await db
         .select({
           status: companies.status,
           pauseReason: companies.pauseReason,
@@ -820,6 +933,19 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         .where(eq(companies.id, companyId))
         .then((rows) => rows[0] ?? null);
       if (!company) throw notFound("Company not found");
+      if (company.status === "paused" && company.pauseReason === "budget") {
+        await reconcileCurrentScopeHardIncidents(companyId, "company", companyId);
+        company = await db
+          .select({
+            status: companies.status,
+            pauseReason: companies.pauseReason,
+            name: companies.name,
+          })
+          .from(companies)
+          .where(eq(companies.id, companyId))
+          .then((rows) => rows[0] ?? null);
+        if (!company) throw notFound("Company not found");
+      }
       if (company.status === "paused") {
         return {
           scopeType: "company" as const,
@@ -858,6 +984,22 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       }
 
       if (agent.status === "paused" && agent.pauseReason === "budget") {
+        await reconcileCurrentScopeHardIncidents(companyId, "agent", agentId);
+        agent = await db
+          .select({
+            status: agents.status,
+            pauseReason: agents.pauseReason,
+            companyId: agents.companyId,
+            name: agents.name,
+            adapterType: agents.adapterType,
+          })
+          .from(agents)
+          .where(eq(agents.id, agentId))
+          .then((rows) => rows[0] ?? null);
+        if (!agent || agent.companyId !== companyId) throw notFound("Agent not found");
+      }
+
+      if (agent.status === "paused" && agent.pauseReason === "budget") {
         return {
           scopeType: "agent" as const,
           scopeId: agentId,
@@ -893,7 +1035,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
 
       const candidateProjectId = context?.projectId ?? null;
       if (candidateProjectId) {
-        const project = await db
+        let project = await db
           .select({
             id: projects.id,
             name: projects.name,
@@ -932,6 +1074,21 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           }
 
           if (project.pausedAt && project.pauseReason === "budget") {
+            await reconcileCurrentScopeHardIncidents(companyId, "project", project.id);
+            project = await db
+              .select({
+                id: projects.id,
+                name: projects.name,
+                companyId: projects.companyId,
+                pauseReason: projects.pauseReason,
+                pausedAt: projects.pausedAt,
+              })
+              .from(projects)
+              .where(eq(projects.id, candidateProjectId))
+              .then((rows) => rows[0] ?? null);
+          }
+
+          if (project && project.pausedAt && project.pauseReason === "budget") {
             return {
               scopeType: "project" as const,
               scopeId: project.id,

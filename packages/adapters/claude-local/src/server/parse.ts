@@ -289,6 +289,33 @@ export function isClaudeImageProcessingError(parsed: Record<string, unknown>): b
   );
 }
 
+/**
+ * Detects a Claude CLI infrastructure failure that masquerades as a clean
+ * result (`subtype=success`, `is_error=false`): a UserPromptSubmit hook blocked
+ * the turn because its command could not open a file / path was missing.
+ *
+ * Requires both signals so real policy hook denials without a missing-file
+ * cause stay untouched.
+ */
+export function isClaudeUserPromptSubmitHookInfrastructureError(
+  parsed: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!parsed) return false;
+
+  const resultText = asString(parsed.result, "").trim();
+  const haystack = [resultText, ...extractClaudeErrorMessages(parsed)]
+    .map((msg) => msg.trim())
+    .filter(Boolean)
+    .join("\n");
+  if (!haystack) return false;
+
+  if (!/UserPromptSubmit operation blocked by hook/i.test(haystack)) {
+    return false;
+  }
+
+  return /can't open file|No such file or directory/i.test(haystack);
+}
+
 function buildClaudeTransientHaystack(input: {
   parsed?: Record<string, unknown> | null;
   stdout?: string | null;
@@ -468,7 +495,14 @@ export function isClaudeTransientUpstreamError(input: {
 }): boolean {
   const parsed = input.parsed ?? null;
   // Deterministic failures are handled by their own classifiers.
-  if (parsed && (isClaudeMaxTurnsResult(parsed) || isClaudeUnknownSessionError(parsed) || isClaudePoisonedPreviousMessageIdError(parsed) || isClaudeImageProcessingError(parsed))) {
+  if (
+    parsed &&
+    (isClaudeMaxTurnsResult(parsed) ||
+      isClaudeUnknownSessionError(parsed) ||
+      isClaudePoisonedPreviousMessageIdError(parsed) ||
+      isClaudeImageProcessingError(parsed) ||
+      isClaudeUserPromptSubmitHookInfrastructureError(parsed))
+  ) {
     return false;
   }
   const loginMeta = detectClaudeLoginRequired({
@@ -491,7 +525,14 @@ export function isClaudeProviderQuotaError(input: {
   errorMessage?: string | null;
 }): boolean {
   const parsed = input.parsed ?? null;
-  if (parsed && (isClaudeMaxTurnsResult(parsed) || isClaudeUnknownSessionError(parsed) || isClaudePoisonedPreviousMessageIdError(parsed) || isClaudeImageProcessingError(parsed))) {
+  if (
+    parsed &&
+    (isClaudeMaxTurnsResult(parsed) ||
+      isClaudeUnknownSessionError(parsed) ||
+      isClaudePoisonedPreviousMessageIdError(parsed) ||
+      isClaudeImageProcessingError(parsed) ||
+      isClaudeUserPromptSubmitHookInfrastructureError(parsed))
+  ) {
     return false;
   }
   const loginMeta = detectClaudeLoginRequired({

@@ -3181,6 +3181,10 @@ export function agentRoutes(
       return;
     }
 
+    void heartbeat.resumeQueuedRuns().catch((err) => {
+      logger.warn({ err, agentId: agent.id, companyId: agent.companyId }, "agent resumed but queued-run admission retry failed");
+    });
+
     await logActivity(db, {
       companyId: agent.companyId,
       actorType: "user",

@@ -1,7 +1,10 @@
-import { and, eq, gte, lt, notInArray, sql } from "drizzle-orm";
+import { and, eq, gte, isNull, lt, ne, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { costEvents, heartbeatRuns } from "@paperclipai/db";
 import { asNumber, parseObject } from "../adapters/utils.js";
+
+/** Preflight workspace failures never reach adapter/model invocation; exclude from run caps. */
+const PREFLIGHT_WORKSPACE_VALIDATION_FAILURE_CODE = "workspace_validation_failed";
 
 export type HeartbeatDailyCapPolicy = {
   maxDailyRuns: number | null;
@@ -72,6 +75,12 @@ export async function getHeartbeatDailyCapBlock(
       gte(heartbeatRuns.startedAt, start),
       lt(heartbeatRuns.startedAt, end),
       notInArray(heartbeatRuns.status, ["queued", "scheduled_retry"]),
+      // Preflight workspace_validation_failed dies before adapter/model start and
+      // must not consume maxDailyRuns. Started cancelled runs still count.
+      or(
+        isNull(heartbeatRuns.errorCode),
+        ne(heartbeatRuns.errorCode, PREFLIGHT_WORKSPACE_VALIDATION_FAILURE_CODE),
+      ),
     ];
     if (options.excludeRunId) {
       conditions.push(sql`${heartbeatRuns.id} <> ${options.excludeRunId}`);

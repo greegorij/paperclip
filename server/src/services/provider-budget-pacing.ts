@@ -250,6 +250,14 @@ export function peekProviderBudgetPacing(
   };
 }
 
+/**
+ * Drop the settled TTL entry for a company. In-flight computations are left alone
+ * so concurrent callers keep single-flight coalescing.
+ */
+export function invalidateProviderBudgetPacingCache(companyId: string) {
+  pacingCache.delete(companyId);
+}
+
 /** Find pacing for the provider behind an agent adapter type. */
 export function pacingForAdapterType(
   snapshot: CompanyBudgetPacingSnapshot,

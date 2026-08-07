@@ -73,8 +73,14 @@ export function parseCodexJsonl(stdout: string) {
 
     if (type === "turn.completed") {
       const usageObj = parseObject(event.usage);
-      usage.inputTokens = asNumber(usageObj.input_tokens, usage.inputTokens);
-      usage.cachedInputTokens = asNumber(usageObj.cached_input_tokens, usage.cachedInputTokens);
+      // Codex reports `cached_input_tokens` as a subset of `input_tokens`.
+      // Paperclip's ledger stores fresh input and cache reads separately; keeping
+      // the total here would charge a cached context twice and can falsely trip
+      // a total_tokens safety cap.
+      const totalInputTokens = asNumber(usageObj.input_tokens, usage.inputTokens + usage.cachedInputTokens);
+      const cachedInputTokens = asNumber(usageObj.cached_input_tokens, usage.cachedInputTokens);
+      usage.inputTokens = Math.max(0, totalInputTokens - cachedInputTokens);
+      usage.cachedInputTokens = cachedInputTokens;
       usage.outputTokens = asNumber(usageObj.output_tokens, usage.outputTokens);
       continue;
     }

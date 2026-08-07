@@ -548,3 +548,397 @@ describe("claude local sandbox network trusted urls", () => {
     expect(runAdapterExecutionTargetProcess).not.toHaveBeenCalled();
   });
 });
+
+describe("claude local profile MCP sandbox paths", () => {
+  const cleanupDirs: string[] = [];
+  let previousPaperclipHome: string | undefined;
+
+  afterEach(async () => {
+    vi.clearAllMocks();
+    if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+    else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+    previousPaperclipHome = undefined;
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (!dir) continue;
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it("mounts absolute paths from the merged allowlisted stdio profile server only", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-claude-profile-sandbox-"));
+    cleanupDirs.push(rootDir);
+    previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    process.env.PAPERCLIP_HOME = path.join(rootDir, "paperclip-home");
+    const workspaceDir = path.join(rootDir, "workspace");
+    const claudeConfigDir = path.join(rootDir, "claude-config");
+    const installRoot = path.join(rootDir, "paperclip-install");
+    const executable = path.join(rootDir, "paperclip", "bin", "server");
+    const paperclipArg = path.join(installRoot, "packages", "mcp-server", "src", "stdio.ts");
+    const cwd = path.join(rootDir, "paperclip");
+    const unallowlistedExecutable = path.join(rootDir, "other", "server");
+    const httpExecutable = path.join(rootDir, "http", "server");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(path.dirname(executable), { recursive: true });
+    await mkdir(path.dirname(paperclipArg), { recursive: true });
+    await mkdir(path.dirname(unallowlistedExecutable), { recursive: true });
+    await mkdir(claudeConfigDir, { recursive: true });
+    await writeFile(executable, "#!/bin/sh\n");
+    await writeFile(paperclipArg, "export {};\n");
+    await writeFile(unallowlistedExecutable, "#!/bin/sh\n");
+    await writeFile(path.join(claudeConfigDir, ".claude.json"), JSON.stringify({
+      mcpServers: {
+        paperclip: {
+          type: "stdio",
+          command: executable,
+          args: ["--source", paperclipArg, paperclipArg, "--flag", "relative-source"],
+          cwd,
+        },
+        other: { command: unallowlistedExecutable, args: [paperclipArg] },
+        remote: { type: "http", command: httpExecutable, url: "https://mcp.example.test" },
+      },
+    }));
+
+    await execute({
+      runId: "run-profile-mcp-sandbox",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "Claude Coder",
+        adapterType: "claude_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: "claude",
+        cwd: workspaceDir,
+        filesystemScope: "workspace",
+        env: { CLAUDE_CONFIG_DIR: claudeConfigDir },
+      },
+      context: { paperclipWorkspace: { cwd: workspaceDir, source: "project_primary" } },
+      runtimeMcp: {
+        getServers: () => [{
+          name: "runtime-mcp",
+          url: "https://runtime.example.test/mcp",
+          token: "token-1",
+          connectionId: "connection-1",
+        }],
+      },
+      onLog: async () => {},
+    });
+
+    const sandbox = runAdapterExecutionTargetProcess.mock.calls[0]?.[4]?.localProcessSandbox;
+    expect(sandbox?.managedPaths).toEqual(expect.arrayContaining([
+      { path: executable, access: "ro" },
+      { path: paperclipArg, access: "ro" },
+      { path: cwd, access: "ro" },
+      { path: installRoot, access: "ro" },
+    ]));
+    expect(sandbox?.managedPaths).not.toEqual(expect.arrayContaining([
+      { path: unallowlistedExecutable, access: "ro" },
+    ]));
+    expect(sandbox?.managedPaths).not.toEqual(expect.arrayContaining([
+      { path: "relative-source", access: "ro" },
+    ]));
+    expect(sandbox?.managedPaths).not.toEqual(expect.arrayContaining([
+      { path: httpExecutable, access: "ro" },
+    ]));
+    expect(sandbox?.managedPaths?.filter(({ path: candidate }) => candidate === paperclipArg)).toHaveLength(1);
+    expect(sandbox?.managedPaths?.filter(({ path: candidate }) => candidate === installRoot)).toHaveLength(1);
+  });
+});
+
+describe("claude UserPromptSubmit hook infrastructure failure", () => {
+  const cleanupDirs: string[] = [];
+  const sessionUuid = "11111111-1111-4111-8111-111111111111";
+
+  const hookInfraResult = (sessionId: string) =>
+    [
+      JSON.stringify({ type: "system", subtype: "init", session_id: sessionId, model: "claude-sonnet" }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        session_id: sessionId,
+        result:
+          "UserPromptSubmit operation blocked by hook:\ncan't open file '/tmp/missing-hook.sh': No such file or directory",
+        usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 0 },
+      }),
+    ].join("\n");
+
+  const successResult = (sessionId: string) =>
+    [
+      JSON.stringify({ type: "system", subtype: "init", session_id: sessionId, model: "claude-sonnet" }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        session_id: sessionId,
+        result: "ok",
+        usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 },
+      }),
+    ].join("\n");
+
+  afterEach(async () => {
+    vi.clearAllMocks();
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (!dir) continue;
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it("treats a fresh-session hook missing-file success envelope as adapter failure and clears session", async () => {
+    const workspaceDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-claude-hook-infra-fresh-"));
+    cleanupDirs.push(workspaceDir);
+
+    runAdapterExecutionTargetProcess.mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: hookInfraResult("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+      stderr: "",
+      pid: 501,
+      startedAt: new Date().toISOString(),
+    });
+
+    const result = await execute({
+      runId: "run-hook-infra-fresh",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "Claude Coder",
+        adapterType: "claude_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: "claude",
+        engine: "cli",
+        cwd: workspaceDir,
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: workspaceDir,
+          source: "project_primary",
+        },
+      },
+      onLog: async () => {},
+    });
+
+    expect(runAdapterExecutionTargetProcess).toHaveBeenCalledTimes(1);
+    expect(result.sessionId).toBeNull();
+    expect(result.sessionParams).toBeNull();
+    expect(result.clearSession).toBe(true);
+    expect(result.errorCode).toBe("claude_hook_infrastructure");
+    expect(result.errorMessage ?? "").toContain("UserPromptSubmit operation blocked by hook");
+  });
+
+  it("retries exactly once with a fresh session when resume hits the hook infrastructure failure", async () => {
+    const workspaceDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-claude-hook-infra-resume-"));
+    cleanupDirs.push(workspaceDir);
+    const logs: string[] = [];
+    const freshSessionId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+    runAdapterExecutionTargetProcess
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: hookInfraResult(sessionUuid),
+        stderr: "",
+        pid: 502,
+        startedAt: new Date().toISOString(),
+      })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: successResult(freshSessionId),
+        stderr: "",
+        pid: 503,
+        startedAt: new Date().toISOString(),
+      });
+
+    const result = await execute({
+      runId: "run-hook-infra-resume",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "Claude Coder",
+        adapterType: "claude_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: sessionUuid,
+        sessionParams: {
+          sessionId: sessionUuid,
+          cwd: workspaceDir,
+        },
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: "claude",
+        engine: "cli",
+        cwd: workspaceDir,
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: workspaceDir,
+          source: "project_primary",
+        },
+      },
+      onLog: async (_stream, chunk) => {
+        logs.push(chunk);
+      },
+    });
+
+    expect(runAdapterExecutionTargetProcess).toHaveBeenCalledTimes(2);
+    const firstArgs = runAdapterExecutionTargetProcess.mock.calls[0]?.[3] as string[];
+    const secondArgs = runAdapterExecutionTargetProcess.mock.calls[1]?.[3] as string[];
+    expect(firstArgs).toContain("--resume");
+    expect(firstArgs).toContain(sessionUuid);
+    expect(secondArgs).not.toContain("--resume");
+    expect(result.sessionId).toBe(freshSessionId);
+    expect(result.errorCode).toBeNull();
+    expect(logs.some((line) => line.includes("UserPromptSubmit hook infrastructure failure"))).toBe(true);
+  });
+
+  it("retries at most once when the fresh-session attempt also hits hook infrastructure failure", async () => {
+    const workspaceDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-claude-hook-infra-no-retry-"));
+    cleanupDirs.push(workspaceDir);
+
+    runAdapterExecutionTargetProcess
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: hookInfraResult(sessionUuid),
+        stderr: "",
+        pid: 504,
+        startedAt: new Date().toISOString(),
+      })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: hookInfraResult("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+        stderr: "",
+        pid: 505,
+        startedAt: new Date().toISOString(),
+      });
+
+    const result = await execute({
+      runId: "run-hook-infra-resume-still-broken",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "Claude Coder",
+        adapterType: "claude_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: sessionUuid,
+        sessionParams: {
+          sessionId: sessionUuid,
+          cwd: workspaceDir,
+        },
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: "claude",
+        engine: "cli",
+        cwd: workspaceDir,
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: workspaceDir,
+          source: "project_primary",
+        },
+      },
+      onLog: async () => {},
+    });
+
+    // Resume once, then exactly one fresh attempt — no further automatic retries.
+    expect(runAdapterExecutionTargetProcess).toHaveBeenCalledTimes(2);
+    expect(result.clearSession).toBe(true);
+    expect(result.sessionId).toBeNull();
+    expect(result.errorCode).toBe("claude_hook_infrastructure");
+  });
+
+  it("does not treat a plain UserPromptSubmit hook denial as infrastructure failure", async () => {
+    const workspaceDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-claude-hook-policy-"));
+    cleanupDirs.push(workspaceDir);
+
+    runAdapterExecutionTargetProcess.mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: [
+        JSON.stringify({
+          type: "system",
+          subtype: "init",
+          session_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          model: "claude-sonnet",
+        }),
+        JSON.stringify({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          session_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          result: "UserPromptSubmit operation blocked by hook",
+          usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 0 },
+        }),
+      ].join("\n"),
+      stderr: "",
+      pid: 506,
+      startedAt: new Date().toISOString(),
+    });
+
+    const result = await execute({
+      runId: "run-hook-policy-denial",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "Claude Coder",
+        adapterType: "claude_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: "claude",
+        engine: "cli",
+        cwd: workspaceDir,
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: workspaceDir,
+          source: "project_primary",
+        },
+      },
+      onLog: async () => {},
+    });
+
+    expect(runAdapterExecutionTargetProcess).toHaveBeenCalledTimes(1);
+    expect(result.errorCode).toBeNull();
+    expect(result.clearSession).toBeFalsy();
+    expect(result.sessionId).toBe("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+  });
+});

@@ -54,7 +54,6 @@ import {
   parseLocalProcessNetworkAllowlist,
   parseLocalProcessNetworkScope,
   type LocalProcessSandboxOptions,
-  type LocalProcessSandboxPath,
 } from "@paperclipai/adapter-utils/local-process-sandbox";
 import {
   claudeModelUsageTotals,
@@ -69,7 +68,6 @@ import {
   isClaudeUnknownSessionError,
   isClaudePoisonedPreviousMessageIdError,
   isClaudeImageProcessingError,
-  isClaudeUserPromptSubmitHookInfrastructureError,
   isClaudeModelNotFoundError,
 } from "./parse.js";
 import {
@@ -119,63 +117,6 @@ interface ClaudeRuntimeConfig {
   timeoutSec: number;
   graceSec: number;
   extraArgs: string[];
-}
-
-function profileMcpInstallRootFromAbsoluteArg(candidate: string): string | null {
-  const normalized = path.resolve(candidate);
-  const parts = normalized.split(path.sep);
-  for (let i = 0; i < parts.length - 1; i++) {
-    if (parts[i] === "packages" && parts[i + 1] === "mcp-server") {
-      const root = parts.slice(0, i).join(path.sep);
-      return root.length > 0 ? root : path.sep;
-    }
-  }
-  return null;
-}
-
-function profileMcpSandboxPathsFromConfig(value: unknown): LocalProcessSandboxPath[] {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-  const record = value as Record<string, unknown>;
-  const mcpServers = record.mcpServers;
-  if (!mcpServers || typeof mcpServers !== "object" || Array.isArray(mcpServers)) return [];
-
-  const mcpServersRecord = mcpServers as Record<string, unknown>;
-  const paths = new Set<string>();
-  const addAbsolutePath = (candidate: unknown) => {
-    if (typeof candidate !== "string" || !path.isAbsolute(candidate)) return;
-    paths.add(path.resolve(candidate));
-  };
-  // Intentionally hard-coded to the literal profile key "paperclip" only.
-  // Do not reuse PROFILE_MCP_SERVER_ALLOWLIST here — that list can grow and
-  // would silently broaden sandbox path mounts.
-  const entry = mcpServersRecord.paperclip;
-  if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-    const server = entry as Record<string, unknown>;
-    const type = typeof server.type === "string" ? server.type.trim().toLowerCase() : "";
-    if (!type || type === "stdio") {
-      addAbsolutePath(server.command);
-      if (Array.isArray(server.args)) {
-        for (const arg of server.args) {
-          addAbsolutePath(arg);
-          if (typeof arg === "string" && path.isAbsolute(arg)) {
-            const installRoot = profileMcpInstallRootFromAbsoluteArg(arg);
-            if (installRoot) paths.add(installRoot);
-          }
-        }
-      }
-      addAbsolutePath(server.cwd);
-    }
-  }
-
-  return Array.from(paths, (candidate) => ({ path: candidate, access: "ro" as const }));
-}
-
-async function readProfileMcpSandboxPaths(mcpConfigPath: string): Promise<LocalProcessSandboxPath[]> {
-  try {
-    return profileMcpSandboxPathsFromConfig(JSON.parse(await fs.readFile(mcpConfigPath, "utf8")));
-  } catch {
-    return [];
-  }
 }
 
 export function claudeSessionCwdMatchesExecutionTarget(input: {
@@ -644,7 +585,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const effectiveClaudeConfigDir = disposableClaudeConfigDir ?? sharedClaudeConfigDir;
   let localMcpConfigPath = "";
   let localMcpConfigDir = "";
-  let profileMcpSandboxPaths: LocalProcessSandboxPath[] = [];
   if (!shadowReadOnly) {
     localMcpConfigPath = await writePaperclipClaudeMcpConfig({
       stateDir: claudeRuntimeStateDir,
@@ -654,7 +594,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       claudeConfigDir: executionTargetIsRemote ? undefined : sharedClaudeConfigDir,
     });
     localMcpConfigDir = path.dirname(localMcpConfigPath);
-    profileMcpSandboxPaths = await readProfileMcpSandboxPaths(localMcpConfigPath);
   }
   const networkScope = parseLocalProcessNetworkScope(config.networkScope);
   const filesystemScope = shadowReadOnly
@@ -676,7 +615,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 { path: path.join(path.dirname(sharedClaudeConfigDir), ".claude.json"), access: "rw" as const },
                 { path: promptBundle.addDir, access: "ro" as const },
                 { path: localMcpConfigDir, access: "ro" as const },
-                ...profileMcpSandboxPaths,
               ],
           extraPaths: shadowReadOnly ? [] : parseLocalProcessSandboxExtraPaths(config.filesystemExtraPaths),
           homeDir: filesystemScope ? path.dirname(effectiveClaudeConfigDir) : null,
@@ -1273,9 +1211,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       (asString(parsed.session_id, opts.fallbackSessionId ?? "") || opts.fallbackSessionId);
     const clearSessionForMaxTurns = isClaudeMaxTurnsResult(parsed);
     const poisonedPreviousMessageId = isClaudePoisonedPreviousMessageIdError(parsed);
-    // Hook script missing-file failures can exit as subtype=success / is_error=false
-    // while still blocking the turn. Treat as adapter failure and drop the session.
-    const hookInfrastructureError = isClaudeUserPromptSubmitHookInfrastructureError(parsed);
     // Fable 5 policy refusals exit cleanly (exitCode=0, is_error=false), so this
     // is intentionally independent of `failed` — otherwise a refusal looks like a
     // successful run to Paperclip and the heartbeat stalls silently. See RY-604.
@@ -1283,9 +1218,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const parsedIsError = asBoolean(parsed.is_error, false);
     const parsedSubtype = asString(parsed.subtype, "").trim().toLowerCase();
     const parsedSucceeded = parsedSubtype === "success" && !parsedIsError;
-    const failed =
-      hookInfrastructureError ||
-      (!parsedSucceeded && ((proc.exitCode ?? 0) !== 0 || parsedIsError));
+    const failed = !parsedSucceeded && ((proc.exitCode ?? 0) !== 0 || parsedIsError);
     // Validate-before-persist guard: never persist a sessionId whose transcript
     // is known-poisoned. The Claude CLI keeps an on-disk JSONL keyed by the
     // session id; if the last entry contains a non-`msg_`-prefixed
@@ -1293,9 +1226,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // /v1/messages and the issue is permanently unrecoverable until the
     // sessionId is dropped server-side. Drop here so resolveNextSessionState
     // calls clearTaskSessions on the next heartbeat. See RED-978 / RED-976.
-    // Same drop for UserPromptSubmit hook infrastructure failures (missing hook
-    // script path) — the resumed transcript is unusable until the session is cleared.
-    const shouldDropSessionForPoison = poisonedPreviousMessageId || hookInfrastructureError;
+    const shouldDropSessionForPoison = poisonedPreviousMessageId;
     const resolvedSessionId = shouldDropSessionForPoison ? null : rawResolvedSessionId;
     const resolvedSessionParams = resolvedSessionId
       ? ({
@@ -1321,7 +1252,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       !loginMeta.requiresLogin &&
       !clearSessionForMaxTurns &&
       !poisonedPreviousMessageId &&
-      !hookInfrastructureError &&
       isClaudeProviderQuotaError({
         parsed,
         stdout: proc.stdout,
@@ -1333,7 +1263,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       !loginMeta.requiresLogin &&
       !clearSessionForMaxTurns &&
       !poisonedPreviousMessageId &&
-      !hookInfrastructureError &&
       !providerQuota &&
       isClaudeTransientUpstreamError({
         parsed,
@@ -1362,8 +1291,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? "max_turns_exhausted"
       : failed && poisonedPreviousMessageId
       ? "claude_poisoned_previous_message_id"
-      : failed && hookInfrastructureError
-      ? "claude_hook_infrastructure"
       : providerQuota
       ? "provider_quota"
       : transientUpstream
@@ -1382,7 +1309,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ...parsed,
       ...(failed && clearSessionForMaxTurns ? { stopReason: "max_turns_exhausted" } : {}),
       ...(failed && poisonedPreviousMessageId ? { stopReason: "claude_poisoned_previous_message_id" } : {}),
-      ...(failed && hookInfrastructureError ? { stopReason: "claude_hook_infrastructure" } : {}),
       ...(claudeRefusal ? { stopReason: "refusal", errorFamily: "model_refusal" } : {}),
       ...(errorFamily ? { errorFamily } : {}),
       ...(transientRetryNotBefore ? { retryNotBefore: transientRetryNotBefore.toISOString() } : {}),
@@ -1418,20 +1344,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         // state error. Force the server to drop persisted session state for
         // this issue so the next continuation starts from a clean slate.
         poisonedPreviousMessageId ||
-        hookInfrastructureError ||
         Boolean(opts.clearSessionOnMissingSession && !resolvedSessionId),
     };
   };
 
     const initial = await runAttempt(sessionId ?? null);
-    const attemptLooksFailed =
-      (initial.proc.exitCode ?? 0) !== 0 ||
-      asBoolean(initial.parsed?.is_error, false) ||
-      Boolean(initial.parsed && isClaudeUserPromptSubmitHookInfrastructureError(initial.parsed));
     const sessionErrorKind =
       sessionId &&
       !initial.proc.timedOut &&
-      attemptLooksFailed &&
+      (initial.proc.exitCode ?? 0) !== 0 &&
       initial.parsed
         ? isClaudeUnknownSessionError(initial.parsed)
           ? "unknown"
@@ -1439,8 +1360,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           ? "poisoned"
           : isClaudeImageProcessingError(initial.parsed)
           ? "image"
-          : isClaudeUserPromptSubmitHookInfrastructureError(initial.parsed)
-          ? "hook_infra"
           : null
         : null;
 
@@ -1450,8 +1369,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           ? "returned a poisoned message-id"
           : sessionErrorKind === "image"
           ? "contains an unprocessable image"
-          : sessionErrorKind === "hook_infra"
-          ? "hit a UserPromptSubmit hook infrastructure failure"
           : "is unavailable";
       await onLog(
         "stdout",

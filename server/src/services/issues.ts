@@ -114,6 +114,7 @@ import {
 } from "./recovery/origins.js";
 import { classifyIssueGraphLiveness, type IssueLivenessFinding } from "./recovery/issue-graph-liveness.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
+import { TASK_WATCHDOG_ORIGIN_KIND } from "./task-watchdog-scope.js";
 import { finalizeStatusCardsForStalledGeneration } from "./status-card-finalization.js";
 import { finalizeSummarySlotsForTerminalIssue } from "./summary-slot-finalization.js";
 import { logActivity } from "./activity-log.js";
@@ -2379,6 +2380,10 @@ async function listIssueBlockerAttentionMap(
             eq(issues.companyId, companyId),
             inArray(issues.parentId, chunk),
             notInArray(issues.status, BLOCKER_ATTENTION_CHILD_TERMINAL_STATUSES),
+            // Watchdog issues observe a subtree; they are not deliverable
+            // children. Counting one as an active child can permanently keep
+            // its watched issue blocked after every real dependency is done.
+            or(isNull(issues.originKind), ne(issues.originKind, TASK_WATCHDOG_ORIGIN_KIND)),
           ),
         );
       const [explicitBlockerRows, childRows] = await Promise.all([

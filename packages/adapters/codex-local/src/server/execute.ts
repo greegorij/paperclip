@@ -26,6 +26,7 @@ import {
   asString,
   asNumber,
   parseObject,
+  parseJson,
   buildPaperclipEnv,
   buildInvocationEnvForLogs,
   ensureAbsoluteDirectory,
@@ -121,6 +122,14 @@ function stripCodexRolloutNoise(text: string): string {
   return kept.join("\n");
 }
 
+function hasCodexSuccessfulTerminalEvent(stdout: string): boolean {
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const event = parseObject(parseJson(rawLine.trim()));
+    if (asString(event.type, "") === "turn.completed") return true;
+  }
+  return false;
+}
+
 function firstNonEmptyLine(text: string): string {
   return (
     text
@@ -156,6 +165,21 @@ function signalCodexChild(
 function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean {
   const raw = env[key];
   return typeof raw === "string" && raw.trim().length > 0;
+}
+
+/**
+ * Host-local heartbeat projects PAPERCLIP_RUN_SCRATCH_DIR into adapter env.
+ * Bubblewrap only mounts explicit managedPaths, so that scratch must be opted
+ * in as RW when present — but never invent a default, and never accept a
+ * relative or `..`-bearing path (would widen sandbox unexpectedly).
+ */
+function resolveSafeAbsoluteRunScratchDirFromEnv(env: Record<string, string>): string | null {
+  const raw = env.PAPERCLIP_RUN_SCRATCH_DIR;
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed || !path.isAbsolute(trimmed)) return null;
+  if (trimmed.split(/[\\/]/).includes("..")) return null;
+  return path.resolve(trimmed);
 }
 
 function resolveCodexBillingType(env: Record<string, string>): "api" | "subscription" {
@@ -797,6 +821,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       asNumber(config.timeoutSec, 0),
     );
     const graceSec = asNumber(config.graceSec, 20);
+    const terminalResultCleanupGraceMs = Math.max(
+      0,
+      asNumber(config.terminalResultCleanupGraceMs, 5_000),
+    );
     let effectiveExecutionCwd = targetWorkspaceRealization?.mode === "in_place"
       ? targetWorkspaceRealization.authoritativeRoot
       : adapterExecutionTargetRemoteCwd(executionTarget, cwd);
@@ -1013,13 +1041,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ),
     );
     const billingType = resolveCodexBillingType(effectiveEnv);
+    const localProcessSandboxManagedPaths: LocalProcessSandboxOptions["managedPaths"] = [
+      { path: localFilesystemSandboxCodexHome, access: "rw" },
+    ];
+    const runScratchDir = resolveSafeAbsoluteRunScratchDirFromEnv(env);
+    if (
+      !shadowReadOnly &&
+      runScratchDir &&
+      path.resolve(runScratchDir) !== path.resolve(localFilesystemSandboxCodexHome)
+    ) {
+      localProcessSandboxManagedPaths.push({ path: runScratchDir, access: "rw" });
+    }
     const localProcessSandbox: LocalProcessSandboxOptions | null =
       (filesystemScope || networkScope) && !executionTargetIsRemote
         ? {
             workspaceDir: effectiveExecutionCwd,
             filesystemScope,
             filesystemWorkspaceAccess,
-            managedPaths: [{ path: localFilesystemSandboxCodexHome, access: "rw" }],
+            managedPaths: localProcessSandboxManagedPaths,
             extraPaths: shadowReadOnly ? [] : parseLocalProcessSandboxExtraPaths(config.filesystemExtraPaths),
             pathAliases: !shadowReadOnly && targetWorkspaceRealization?.mode === "copy"
               ? targetWorkspaceRealization.pathAliases
@@ -1359,6 +1398,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           // Capture this adapter's output in files so its non-blocking writer
           // never sees a full stdout/stderr pipe.
           outputCapture: "tempfile",
+          // A completed Codex turn can leave a browser/tool descendant holding
+          // the inherited process group open. Once the JSONL protocol confirms
+          // success, reap that background work rather than leaving the run stuck.
+          terminalResultCleanup: {
+            graceMs: terminalResultCleanupGraceMs,
+            hasTerminalResult: ({ stdout }) => hasCodexSuccessfulTerminalEvent(stdout),
+          },
           onLog: async (stream, chunk) => {
             monitor?.noteOutputChunk(stream, chunk);
             if (stream === "stdout") {
@@ -1373,13 +1419,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           localProcessSandbox,
         });
         const cleanedStderr = stripCodexRolloutNoise(proc.stderr);
+        const parsed = parseCodexJsonl(proc.stdout);
+        const completedBeforeCleanup = Boolean(
+          proc.terminalResultCleanup && hasCodexSuccessfulTerminalEvent(proc.stdout),
+        );
         return {
           proc: {
             ...proc,
+            ...(completedBeforeCleanup ? { exitCode: 0, signal: null } : {}),
             stderr: cleanedStderr,
           },
           rawStderr: proc.stderr,
-          parsed: parseCodexJsonl(proc.stdout),
+          parsed,
           monitor: monitorFired
             ? {
                 fired: true as const,

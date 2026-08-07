@@ -117,18 +117,18 @@ const ANTHROPIC_PROFILE_ENTRY_KEYS = Object.freeze([
 ]);
 
 const ANTHROPIC_EXPECTED_MAX_TURNS = Object.freeze({
-  jarvis: 20,
-  "szef-komercyjny": 40,
+  jarvis: 16,
+  "szef-komercyjny": 32,
   "senior-programista": 40,
   "analityk-biznesowy": 40,
   "designer-ui": 40,
   "konfigurator-systemu": 40,
   "modelarz-procesow": 40,
-  "specjalista-deck-w": 40,
+  "specjalista-deck-w": 32,
   "specjalista-komunikacji-klienckiej": 40,
-  "specjalista-ofert": 40,
+  "specjalista-ofert": 32,
   badacz: 30,
-  krytyk: 30,
+  krytyk: 20,
   "czytacz-transkryptow": 30,
   "in-ynier-wdro-e": 30,
   "kurator-crm": 30,
@@ -580,6 +580,9 @@ function parseSecretRefBinding(record, label, { allowRedactedSecretRefs = false 
   const out = {
     type: "secret_ref",
     secretId: record.secretId,
+    version: "latest",
+    projectionClass: "unclassified",
+    projectionAllowlistKey: null,
   };
   if (record.version !== undefined) {
     if (!isSecretVersionSelector(record.version)) {
@@ -631,6 +634,9 @@ function parseUserSecretRefBinding(record, label) {
   const out = {
     type: "user_secret_ref",
     key: record.key,
+    version: "latest",
+    required: true,
+    allowMissingOverride: false,
   };
   if (record.version !== undefined) {
     if (!isSecretVersionSelector(record.version)) {
@@ -704,6 +710,32 @@ function preserveManagedAdapterConfigFields(
       allowRedactedSecretRefs,
     });
     if (preserved) out[key] = preserved;
+  }
+  return out;
+}
+
+function canonicalizeAdapterConfigSecretBindings(
+  adapterConfig,
+  { allowRedactedSecretRefs = false } = {},
+) {
+  const source = asRecord(adapterConfig) ?? {};
+  const out = cloneJson(source);
+  for (const [key, value] of Object.entries(source)) {
+    if (key === "env") continue;
+    const binding = tryPreserveSecretBinding(value, `adapterConfig.${key}`, {
+      allowRedactedSecretRefs,
+    });
+    if (binding) out[key] = binding;
+  }
+  const env = asRecord(source.env);
+  if (env) {
+    out.env = { ...env };
+    for (const [key, value] of Object.entries(env)) {
+      const binding = tryPreserveSecretBinding(value, `adapterConfig.env.${key}`, {
+        allowRedactedSecretRefs,
+      });
+      if (binding) out.env[key] = binding;
+    }
   }
   return out;
 }
@@ -884,6 +916,10 @@ function matchesFullSafeProfileState({
       runtimeEnv[configEnvName] = configBinding.value;
     }
     const currentState = normalizeLiveAgentState(liveAgent);
+    currentState.adapterConfig = canonicalizeAdapterConfigSecretBindings(
+      currentState.adapterConfig,
+      { allowRedactedSecretRefs },
+    );
     const expectedState = normalizeExpectedState(
       profileName,
       profileEntry,
@@ -1192,7 +1228,7 @@ async function verifyPatchedAgent(client, expectedStep) {
   if (live.adapterType !== expectedStep.to.adapterType) {
     return { ok: false, error: `${expectedStep.slug}: adapterType verify mismatch` };
   }
-  const liveAdapterConfig = asRecord(live.adapterConfig) ?? {};
+  const liveAdapterConfig = canonicalizeAdapterConfigSecretBindings(live.adapterConfig);
   if (!deepEqual(liveAdapterConfig, expectedStep.to.adapterConfig)) {
     return { ok: false, error: `${expectedStep.slug}: adapterConfig verify mismatch` };
   }
@@ -1230,8 +1266,9 @@ async function verifyRestoredAgent(client, step) {
   if (live.adapterType !== step.from.adapterType) {
     return { ok: false, error: `${step.slug}: restore adapterType mismatch` };
   }
-  const liveAdapterConfig = asRecord(live.adapterConfig) ?? {};
-  if (!deepEqual(liveAdapterConfig, step.from.adapterConfig)) {
+  const liveAdapterConfig = canonicalizeAdapterConfigSecretBindings(live.adapterConfig);
+  const expectedAdapterConfig = canonicalizeAdapterConfigSecretBindings(step.from.adapterConfig);
+  if (!deepEqual(liveAdapterConfig, expectedAdapterConfig)) {
     return { ok: false, error: `${step.slug}: restore adapterConfig mismatch` };
   }
   const liveRuntime = asRecord(live.runtimeConfig) ?? {};
@@ -1386,7 +1423,7 @@ async function rollbackStep({ client, step, report }) {
   const restoreBody = {
     status: "paused",
     adapterType: step.from.adapterType,
-    adapterConfig: step.from.adapterConfig,
+    adapterConfig: canonicalizeAdapterConfigSecretBindings(step.from.adapterConfig),
     runtimeConfig: step.from.runtimeConfig,
     replaceAdapterConfig: true,
   };
@@ -1563,7 +1600,7 @@ function buildStateBackupPayload({
       state: {
         status: step.from.status,
         adapterType: step.from.adapterType,
-        adapterConfig: cloneJson(step.from.adapterConfig),
+        adapterConfig: canonicalizeAdapterConfigSecretBindings(step.from.adapterConfig),
         runtimeConfig: cloneJson(step.from.runtimeConfig),
       },
     })),
@@ -1748,6 +1785,9 @@ export async function applyProviderProfileSwitch({
       baseUrl: process.env.PAPERCLIP_API_URL,
       apiKey: process.env.PAPERCLIP_API_KEY,
       dryRun: false,
+      // Live verification and rollback must compare the persisted secret-reference
+      // shape. Reports are redacted separately before they leave this module.
+      redactResponseData: false,
     });
 
   const fresh = liveSnapshot ?? await snapshotFn({
@@ -2008,6 +2048,8 @@ export async function rollbackProviderProfileSwitch({
       baseUrl: process.env.PAPERCLIP_API_URL,
       apiKey: process.env.PAPERCLIP_API_KEY,
       dryRun: false,
+      // Rollback verification needs the persisted bindings, never redacted views.
+      redactResponseData: false,
     });
   const fresh = liveSnapshot ?? await snapshotFn({ companyId, internalCapture: true });
   const backupValidation = validateRollbackBackupPayload(payload, fresh, {

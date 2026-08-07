@@ -718,21 +718,11 @@ describe("local process sandbox", () => {
       const targetUrl = `http://127.0.0.1:${address.port}/canary`;
       const deniedUrl = "http://example.com/";
       const script = `
-const http = require("node:http");
-const proxy = new URL(process.env.HTTP_PROXY);
-function request(url) {
-  return new Promise((resolve, reject) => {
-    http.get({ hostname: proxy.hostname, port: proxy.port, path: url }, (response) => {
-      let body = "";
-      response.on("data", (chunk) => body += chunk);
-      response.on("end", () => resolve({ status: response.statusCode, body }));
-    }).on("error", reject);
-  });
-}
 (async () => {
-  const allowed = await request(${JSON.stringify(targetUrl)});
-  const denied = await request(${JSON.stringify(deniedUrl)});
-  if (allowed.status !== 200 || allowed.body !== "allowed-response" || denied.status !== 403) process.exit(8);
+  if (process.env.NODE_USE_ENV_PROXY !== "1") process.exit(6);
+  const allowed = await fetch(${JSON.stringify(targetUrl)});
+  const denied = await fetch(${JSON.stringify(deniedUrl)});
+  if (allowed.status !== 200 || await allowed.text() !== "allowed-response" || denied.status !== 403) process.exit(8);
 })().catch((error) => { console.error(error); process.exit(7); });
 `;
       try {

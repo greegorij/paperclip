@@ -1600,6 +1600,31 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
+  it("wakes the assignee when an assigned review issue moves back to todo", async () => {
+    const issue = makeIssue("in_review");
+    const updatedAt = new Date("2026-08-03T10:00:00.000Z");
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue,
+      ...patch,
+      updatedAt,
+    }));
+
+    const res = await request(await installActor(createApp()))
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({ status: "todo" });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "22222222-2222-4222-8222-222222222222",
+      expect.objectContaining({
+        reason: "issue_status_changed",
+        idempotencyKey: `issue_status_changed:11111111-1111-4111-8111-111111111111:in_review->todo:${updatedAt.getTime()}`,
+        payload: expect.objectContaining({ fromStatus: "in_review", toStatus: "todo" }),
+      }),
+    );
+  });
+
   it("does not duplicate the blocked-to-todo wake when an idempotent wake already exists", async () => {
     const issue = makeIssue("blocked");
     const updatedAt = new Date("2026-08-02T12:00:00.000Z");
@@ -1713,6 +1738,30 @@ describe.sequential("issue comment reopen routes", () => {
         payload: expect.objectContaining({
           commentId: "comment-1",
           reopenedFrom: "done",
+          resumeIntent: true,
+          followUpRequested: true,
+        }),
+      }),
+    );
+  });
+
+  it("wakes an assignee that explicitly continues an already-actionable task", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...makeIssue("todo"),
+      ...patch,
+    }));
+
+    const res = await request(await installActor(createApp(), agentActor()))
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({ comment: "Continue the next verified batch.", resume: true });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "22222222-2222-4222-8222-222222222222",
+      expect.objectContaining({
+        reason: "issue_commented",
+        payload: expect.objectContaining({
           resumeIntent: true,
           followUpRequested: true,
         }),

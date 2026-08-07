@@ -580,6 +580,32 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     const firstFingerprint = firstWatchdog!.lastObservedFingerprint!;
 
     await db.update(issues).set({ status: "done", updatedAt: new Date() }).where(eq(issues.id, watchdogIssueId));
+    await db.insert(agentWakeupRequests).values([
+      {
+        companyId,
+        agentId,
+        source: "on_demand",
+        reason: "stale watchdog wake",
+        payload: { issueId: watchdogIssueId },
+        status: "queued",
+      },
+      {
+        companyId,
+        agentId,
+        source: "on_demand",
+        reason: "deferred stale watchdog wake",
+        payload: { _paperclipWakeContext: { taskId: watchdogIssueId } },
+        status: "deferred_issue_execution",
+      },
+      {
+        companyId,
+        agentId,
+        source: "on_demand",
+        reason: "valid source wake",
+        payload: { issueId: sourceId },
+        status: "queued",
+      },
+    ]);
     const reviewed = await service.reconcileTaskWatchdogs({ companyId });
 
     expect(reviewed).toMatchObject({ checked: 1, triggered: 0, alreadyReviewed: 1 });
@@ -588,6 +614,25 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     expect(actionRequired?.description).toContain(
       `Task watchdog action-required fingerprint: ${firstFingerprint}`,
     );
+    const wakeRows = await db
+      .select({ status: agentWakeupRequests.status, payload: agentWakeupRequests.payload, error: agentWakeupRequests.error })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
+    expect(wakeRows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        status: "cancelled",
+        payload: { issueId: watchdogIssueId },
+        error: "Cancelled because task-watchdog review requires board action",
+      }),
+      expect.objectContaining({
+        status: "cancelled",
+        payload: { _paperclipWakeContext: { taskId: watchdogIssueId } },
+      }),
+      expect.objectContaining({ status: "queued", payload: { issueId: sourceId }, error: null }),
+    ]));
+    expect(wakeRows.filter((wake) => wake.status === "queued").map((wake) => wake.payload)).toEqual([
+      { issueId: sourceId },
+    ]);
 
     await db.update(issues).set({ updatedAt: new Date(Date.now() + 60_000) }).where(eq(issues.id, sourceId));
     const unchanged = await service.reconcileTaskWatchdogs({ companyId });

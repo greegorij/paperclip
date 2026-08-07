@@ -8810,6 +8810,10 @@ export function issueRoutes(
       isClosedIssueStatus(existing.status) &&
       issue.status === "todo" &&
       req.body.status !== undefined;
+    const statusChangedFromReviewToTodo =
+      existing.status === "in_review" &&
+      issue.status === "todo" &&
+      req.body.status !== undefined;
     const previousExecutionState = parseIssueExecutionState(existing.executionState);
     const nextExecutionState = parseIssueExecutionState(issue.executionState);
     const executionStageWakeup = buildExecutionStageWakeup({
@@ -8825,14 +8829,19 @@ export function issueRoutes(
     // peers) with an assignee is only a live path once the issue-linked wake exists.
     const shouldWakeAssigneeOnStatusRestore =
       !assigneeChanged &&
-      (statusChangedFromBacklog || statusChangedFromBlockedToTodo || statusChangedFromClosedToTodo) &&
+      (statusChangedFromBacklog ||
+        statusChangedFromBlockedToTodo ||
+        statusChangedFromClosedToTodo ||
+        statusChangedFromReviewToTodo) &&
       Boolean(issue.assigneeAgentId);
     if (shouldWakeAssigneeOnStatusRestore && issue.assigneeAgentId) {
       const fromStatus = statusChangedFromBacklog
         ? "backlog"
         : statusChangedFromBlockedToTodo
           ? "blocked"
-          : existing.status;
+          : statusChangedFromReviewToTodo
+            ? "in_review"
+            : existing.status;
       const idempotencyKey = buildIssueStatusChangedWakeIdempotencyKey({
         issueId: issue.id,
         fromStatus,
@@ -9045,13 +9054,24 @@ export function issueRoutes(
         const assigneeId = issue.assigneeAgentId;
         const actorIsAgent = actor.actorType === "agent";
         const selfComment = actorIsAgent && actor.actorId === assigneeId;
+        // An assignee can deliberately schedule one bounded follow-up from an
+        // already-actionable task.  Previously `resume: true` only woke an
+        // assignee after reopening a terminal/blocked task; on `todo` it was
+        // recorded but inert, leaving a completed work slice without a live
+        // continuation path.
+        const explicitSameAssigneeContinuation =
+          resumeRequested === true && selfComment && issue.status === "todo";
         const skipAssigneeCommentWake = shouldSkipAssigneeCommentWake({
           selfComment,
           issueStatus: issue.status,
           resumeRequested: resumeRequested === true,
         });
 
-        if (assigneeId && !assigneeChanged && (reopened || !skipAssigneeCommentWake)) {
+        if (
+          assigneeId &&
+          !assigneeChanged &&
+          (reopened || explicitSameAssigneeContinuation || !skipAssigneeCommentWake)
+        ) {
           addWakeup(assigneeId, {
             source: "automation",
             triggerDetail: "system",

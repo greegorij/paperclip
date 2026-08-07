@@ -616,6 +616,7 @@ export async function buildLocalProcessSandboxSpawnTarget(input: {
   }
   if (networkScope === "allowlist") {
     const proxyUrl = `http://127.0.0.1:${SANDBOX_PROXY_PORT}`;
+    env.NODE_USE_ENV_PROXY = "1";
     env.HTTP_PROXY = proxyUrl;
     env.HTTPS_PROXY = proxyUrl;
     env.http_proxy = proxyUrl;

@@ -653,7 +653,7 @@
       "name": "Szef Komercyjny",
       "role": "pm",
       "adapterType": "claude_local",
-      "model": "claude-opus-5",
+      "model": "claude-sonnet-5",
       "manageStatus": false,
       "skills": [
         "paperclip",
