@@ -30,6 +30,15 @@ import { TASK_WATCHDOG_ORIGIN_KIND } from "./task-watchdog-scope.js";
 
 const TASK_WATCHDOG_STOP_FINGERPRINT_PREFIX = "task_watchdog_stop:";
 const TASK_WATCHDOG_ACTION_REQUIRED_PREFIX = "Task watchdog action-required fingerprint:";
+const TASK_WATCHDOG_ABANDONED_PREFIX = "Task watchdog abandoned fingerprint:";
+// Escape hatch for the action-required reopen trap: reopen a completed
+// watchdog review to "blocked" only within this window after completion.
+// Beyond it, leave the review done and annotate once that the watched
+// subtree fingerprint has not moved. 7 days is shorter than the orphaned
+// production cases (~10 days) and longer than a typical issue work cycle.
+const TASK_WATCHDOG_ACTION_REQUIRED_REOPEN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const TASK_WATCHDOG_ACTION_REQUIRED_REOPEN_WINDOW_DAYS =
+  TASK_WATCHDOG_ACTION_REQUIRED_REOPEN_WINDOW_MS / (24 * 60 * 60 * 1000);
 const TASK_WATCHDOG_SUBTREE_MAX_DEPTH = 100;
 const TASK_WATCHDOG_LIVE_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const TASK_WATCHDOG_WAKE_REQUEST_STATUSES = ["queued", "deferred_issue_execution"] as const;
@@ -643,6 +652,26 @@ function descriptionWithActionRequiredFingerprint(description: string | null, st
     .filter((line) => !line.startsWith(TASK_WATCHDOG_ACTION_REQUIRED_PREFIX));
   while (lines.at(-1) === "") lines.pop();
   return [...lines, "", `${TASK_WATCHDOG_ACTION_REQUIRED_PREFIX} ${stopFingerprint}`].join("\n");
+}
+
+function abandonedFingerprintForWatchdogIssue(issue: Pick<IssueRow, "description">) {
+  const line = issue.description
+    ?.split("\n")
+    .find((candidate) => candidate.startsWith(TASK_WATCHDOG_ABANDONED_PREFIX));
+  return normalizeStopFingerprint(line?.slice(TASK_WATCHDOG_ABANDONED_PREFIX.length).trim());
+}
+
+function descriptionWithAbandonedFingerprint(description: string | null, stopFingerprint: string) {
+  const lines = (description ?? "")
+    .split("\n")
+    .filter((line) => !line.startsWith(TASK_WATCHDOG_ABANDONED_PREFIX));
+  while (lines.at(-1) === "") lines.pop();
+  return [
+    ...lines,
+    "",
+    `${TASK_WATCHDOG_ABANDONED_PREFIX} ${stopFingerprint}`,
+    `The watched subtree fingerprint has not changed for ${TASK_WATCHDOG_ACTION_REQUIRED_REOPEN_WINDOW_DAYS} days since this review was completed; the watchdog will no longer reopen this issue.`,
+  ].join("\n");
 }
 
 function taskWatchdogWakeIdempotencyKey(watchdogId: string, stopFingerprint: string) {
@@ -1528,18 +1557,64 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       .then((rows) => rows[0] ?? null);
     if (!watchdogIssue || watchdogIssue.status !== "done") return;
     if (reviewedFingerprintForWatchdogIssue(watchdogIssue) !== classification.stopFingerprint) return;
+    // One-shot abandon marker: do not re-annotate on later reconciles.
+    if (abandonedFingerprintForWatchdogIssue(watchdogIssue) === classification.stopFingerprint) return;
 
-    await db
-      .update(issues)
-      .set({
-        status: "blocked",
-        description: descriptionWithActionRequiredFingerprint(
-          watchdogIssue.description,
-          classification.stopFingerprint,
-        ),
-        updatedAt: new Date(),
-      })
-      .where(and(eq(issues.companyId, watchdog.companyId), eq(issues.id, watchdogIssue.id)));
+    const now = new Date();
+    const completedAtMs = toEpochMs(watchdogIssue.completedAt);
+    const ageMs = completedAtMs == null ? 0 : now.getTime() - completedAtMs;
+    if (completedAtMs != null && ageMs >= TASK_WATCHDOG_ACTION_REQUIRED_REOPEN_WINDOW_MS) {
+      await db
+        .update(issues)
+        .set({
+          description: descriptionWithAbandonedFingerprint(
+            watchdogIssue.description,
+            classification.stopFingerprint,
+          ),
+          updatedAt: now,
+        })
+        .where(and(eq(issues.companyId, watchdog.companyId), eq(issues.id, watchdogIssue.id)));
+      return;
+    }
+
+    await db.transaction(async (tx) => {
+      await tx
+        .update(issues)
+        .set({
+          status: "blocked",
+          description: descriptionWithActionRequiredFingerprint(
+            watchdogIssue.description,
+            classification.stopFingerprint,
+          ),
+          updatedAt: now,
+        })
+        .where(and(eq(issues.companyId, watchdog.companyId), eq(issues.id, watchdogIssue.id)));
+
+      // A completed review can retain an older queued/deferred wake. Once the
+      // review becomes an explicit board-action blocker, that wake must not be
+      // replayed merely because its assignee is later resumed. Scope this to
+      // the generated review itself: the watched source may still have a valid
+      // future wake and must remain untouched.
+      await tx
+        .update(agentWakeupRequests)
+        .set({
+          status: "cancelled",
+          finishedAt: now,
+          error: "Cancelled because task-watchdog review requires board action",
+          updatedAt: now,
+        })
+        .where(and(
+          eq(agentWakeupRequests.companyId, watchdog.companyId),
+          inArray(agentWakeupRequests.status, [...TASK_WATCHDOG_WAKE_REQUEST_STATUSES]),
+          isNull(agentWakeupRequests.runId),
+          or(
+            sql`${agentWakeupRequests.payload}->>'issueId' = ${watchdogIssue.id}`,
+            sql`${agentWakeupRequests.payload}->>'taskId' = ${watchdogIssue.id}`,
+            sql`${agentWakeupRequests.payload}->'_paperclipWakeContext'->>'issueId' = ${watchdogIssue.id}`,
+            sql`${agentWakeupRequests.payload}->'_paperclipWakeContext'->>'taskId' = ${watchdogIssue.id}`,
+          ),
+        ));
+    });
   }
 
   async function ensureReusableWatchdogIssue(input: {
