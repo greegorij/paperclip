@@ -661,6 +661,14 @@ function abandonedFingerprintForWatchdogIssue(issue: Pick<IssueRow, "description
   return normalizeStopFingerprint(line?.slice(TASK_WATCHDOG_ABANDONED_PREFIX.length).trim());
 }
 
+function descriptionWithoutActionRequiredFingerprint(description: string | null) {
+  const lines = (description ?? "")
+    .split("\n")
+    .filter((line) => !line.startsWith(TASK_WATCHDOG_ACTION_REQUIRED_PREFIX));
+  while (lines.at(-1) === "") lines.pop();
+  return lines.join("\n");
+}
+
 function descriptionWithAbandonedFingerprint(description: string | null, stopFingerprint: string) {
   const lines = (description ?? "")
     .split("\n")
@@ -1537,6 +1545,38 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     return updated ?? watchdog;
   }
 
+  async function cancelStaleWatchdogReviewWakes(
+    tx: any,
+    companyId: string,
+    watchdogIssueId: string,
+    now: Date,
+  ) {
+    // A completed review can retain an older queued/deferred wake. Once the
+    // review becomes an explicit board-action blocker (or is healed out of that
+    // trap), that wake must not be replayed merely because its assignee is
+    // later resumed. Scope this to the generated review itself: the watched
+    // source may still have a valid future wake and must remain untouched.
+    await tx
+      .update(agentWakeupRequests)
+      .set({
+        status: "cancelled",
+        finishedAt: now,
+        error: "Cancelled because task-watchdog review requires board action",
+        updatedAt: now,
+      })
+      .where(and(
+        eq(agentWakeupRequests.companyId, companyId),
+        inArray(agentWakeupRequests.status, [...TASK_WATCHDOG_WAKE_REQUEST_STATUSES]),
+        isNull(agentWakeupRequests.runId),
+        or(
+          sql`${agentWakeupRequests.payload}->>'issueId' = ${watchdogIssueId}`,
+          sql`${agentWakeupRequests.payload}->>'taskId' = ${watchdogIssueId}`,
+          sql`${agentWakeupRequests.payload}->'_paperclipWakeContext'->>'issueId' = ${watchdogIssueId}`,
+          sql`${agentWakeupRequests.payload}->'_paperclipWakeContext'->>'taskId' = ${watchdogIssueId}`,
+        ),
+      ));
+  }
+
   async function markUnresolvedWatchdogReviewActionRequired(
     watchdog: IssueWatchdogRow,
     sourceIssue: IssueRow,
@@ -1555,12 +1595,50 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         visibleIssueCondition(),
       ))
       .then((rows) => rows[0] ?? null);
-    if (!watchdogIssue || watchdogIssue.status !== "done") return;
+    if (!watchdogIssue) return;
+
+    const now = new Date();
+
+    // Healing branch: part 1 only enters when status is `done`, so issues the
+    // trap already flipped to `blocked` were stuck forever. Release only when
+    // the trap itself left the action-required marker, completion is old
+    // enough to measure, and the watched subtree still has the same stop
+    // fingerprint (otherwise the block remains intentional).
+    if (watchdogIssue.status === "blocked") {
+      if (actionRequiredFingerprintForWatchdogIssue(watchdogIssue) !== classification.stopFingerprint) {
+        return;
+      }
+      if (abandonedFingerprintForWatchdogIssue(watchdogIssue) === classification.stopFingerprint) {
+        return;
+      }
+      const completedAtMs = toEpochMs(watchdogIssue.completedAt);
+      if (completedAtMs == null) return;
+      const ageMs = now.getTime() - completedAtMs;
+      if (ageMs < TASK_WATCHDOG_ACTION_REQUIRED_REOPEN_WINDOW_MS) return;
+
+      await db.transaction(async (tx) => {
+        await tx
+          .update(issues)
+          .set({
+            status: "done",
+            description: descriptionWithAbandonedFingerprint(
+              descriptionWithoutActionRequiredFingerprint(watchdogIssue.description),
+              classification.stopFingerprint,
+            ),
+            updatedAt: now,
+          })
+          .where(and(eq(issues.companyId, watchdog.companyId), eq(issues.id, watchdogIssue.id)));
+
+        await cancelStaleWatchdogReviewWakes(tx, watchdog.companyId, watchdogIssue.id, now);
+      });
+      return;
+    }
+
+    if (watchdogIssue.status !== "done") return;
     if (reviewedFingerprintForWatchdogIssue(watchdogIssue) !== classification.stopFingerprint) return;
     // One-shot abandon marker: do not re-annotate on later reconciles.
     if (abandonedFingerprintForWatchdogIssue(watchdogIssue) === classification.stopFingerprint) return;
 
-    const now = new Date();
     const completedAtMs = toEpochMs(watchdogIssue.completedAt);
     const ageMs = completedAtMs == null ? 0 : now.getTime() - completedAtMs;
     if (completedAtMs != null && ageMs >= TASK_WATCHDOG_ACTION_REQUIRED_REOPEN_WINDOW_MS) {
@@ -1590,30 +1668,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         })
         .where(and(eq(issues.companyId, watchdog.companyId), eq(issues.id, watchdogIssue.id)));
 
-      // A completed review can retain an older queued/deferred wake. Once the
-      // review becomes an explicit board-action blocker, that wake must not be
-      // replayed merely because its assignee is later resumed. Scope this to
-      // the generated review itself: the watched source may still have a valid
-      // future wake and must remain untouched.
-      await tx
-        .update(agentWakeupRequests)
-        .set({
-          status: "cancelled",
-          finishedAt: now,
-          error: "Cancelled because task-watchdog review requires board action",
-          updatedAt: now,
-        })
-        .where(and(
-          eq(agentWakeupRequests.companyId, watchdog.companyId),
-          inArray(agentWakeupRequests.status, [...TASK_WATCHDOG_WAKE_REQUEST_STATUSES]),
-          isNull(agentWakeupRequests.runId),
-          or(
-            sql`${agentWakeupRequests.payload}->>'issueId' = ${watchdogIssue.id}`,
-            sql`${agentWakeupRequests.payload}->>'taskId' = ${watchdogIssue.id}`,
-            sql`${agentWakeupRequests.payload}->'_paperclipWakeContext'->>'issueId' = ${watchdogIssue.id}`,
-            sql`${agentWakeupRequests.payload}->'_paperclipWakeContext'->>'taskId' = ${watchdogIssue.id}`,
-          ),
-        ));
+      await cancelStaleWatchdogReviewWakes(tx, watchdog.companyId, watchdogIssue.id, now);
     });
   }
 

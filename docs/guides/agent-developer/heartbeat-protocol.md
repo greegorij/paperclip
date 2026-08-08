@@ -143,6 +143,17 @@ implementation pass:
   watchdog in a visible action-required blocked state for the same stopped
   fingerprint instead of repeatedly waking it. A material change to the
   stopped snapshot may reopen one new bounded review.
+- That blocked state is bounded, not permanent. A watched subtree that is
+  genuinely abandoned never changes its stop fingerprint, so the block would
+  otherwise outlive any usefulness. Once the review has been complete for
+  longer than the action-required reopen window, Paperclip stops holding it:
+  a review that is still `done` is left alone, and one already flipped to
+  `blocked` is released back to `done`. Either way it receives a one-shot
+  abandon annotation recording that the watchdog gave up on that fingerprint,
+  and any stale queued wake for the review is cancelled. Only blocks that
+  carry the watchdog's own action-required marker are released this way — a
+  block placed for any other reason is never touched, and neither is a review
+  whose completion timestamp is missing.
 - It must not broadly explore APIs or documentation when that supplied context
   already answers the question.
 - A task watchdog never creates another task watchdog. It may create a normal,

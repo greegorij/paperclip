@@ -735,6 +735,222 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     expect(wakes).toHaveLength(1);
   });
 
+  async function seedTrapBlockedWatchdogReview(input: {
+    identifier: string;
+    completedAt: Date | null;
+    actionRequiredFingerprint?: string | null;
+    descriptionExtra?: string;
+  }) {
+    const companyId = await seedCompany();
+    const sourceId = await seedIssue(companyId, { identifier: input.identifier, status: "todo" });
+    const agentId = await seedAgent(companyId);
+    await seedWatchdog(companyId, sourceId, agentId);
+    const { service, wakes } = createService();
+
+    const first = await service.reconcileTaskWatchdogs({ companyId });
+    expect(first).toMatchObject({ checked: 1, triggered: 1 });
+    const [firstWatchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    const watchdogIssueId = firstWatchdog!.watchdogIssueId!;
+    const firstFingerprint = firstWatchdog!.lastObservedFingerprint!;
+    wakes.length = 0;
+
+    // Age past the reopen window while still done so part 1 would abandon —
+    // then force the production trap state: already blocked with the marker.
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    await db.update(issues).set({
+      status: "done",
+      completedAt: yesterday,
+      updatedAt: yesterday,
+    }).where(eq(issues.id, watchdogIssueId));
+    await service.reconcileTaskWatchdogs({ companyId });
+
+    const actionRequiredFingerprint = input.actionRequiredFingerprint === undefined
+      ? firstFingerprint
+      : input.actionRequiredFingerprint;
+    const baseDescription = [
+      "Task watchdog review issue.",
+      input.descriptionExtra,
+      actionRequiredFingerprint
+        ? `Task watchdog action-required fingerprint: ${actionRequiredFingerprint}`
+        : null,
+    ].filter((line): line is string => Boolean(line)).join("\n\n");
+
+    await db.update(issues).set({
+      status: "blocked",
+      completedAt: input.completedAt,
+      description: baseDescription,
+      originFingerprint: firstFingerprint,
+      updatedAt: new Date(),
+    }).where(eq(issues.id, watchdogIssueId));
+    await db.update(issueWatchdogs).set({
+      lastReviewedFingerprint: firstFingerprint,
+      lastReviewedStopSnapshot: firstWatchdog!.lastObservedStopSnapshot,
+      updatedAt: new Date(),
+    }).where(eq(issueWatchdogs.issueId, sourceId));
+    // Suppress stale-blocked wake recovery so these cases exercise the healing
+    // branch (and its refusal paths) rather than the skipped-wake reopen path.
+    await db.insert(heartbeatRuns).values({
+      id: randomUUID(),
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "succeeded",
+      createdAt: new Date(),
+      startedAt: new Date(),
+      finishedAt: new Date(),
+      contextSnapshot: { issueId: watchdogIssueId },
+    });
+    wakes.length = 0;
+
+    return { companyId, sourceId, agentId, service, wakes, watchdogIssueId, firstFingerprint };
+  }
+
+  it("releases a long-blocked action-required review to done with a one-shot abandon annotation", async () => {
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    const { service, wakes, watchdogIssueId, firstFingerprint, companyId, agentId } =
+      await seedTrapBlockedWatchdogReview({
+        identifier: "WDOG-HEAL",
+        completedAt: tenDaysAgo,
+      });
+
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "on_demand",
+      reason: "stale watchdog wake after trap",
+      payload: { issueId: watchdogIssueId },
+      status: "queued",
+    });
+
+    const healed = await service.reconcileTaskWatchdogs({ companyId });
+    expect(healed).toMatchObject({ checked: 1, triggered: 0, alreadyReviewed: 1 });
+    expect(wakes).toHaveLength(0);
+
+    const [afterHeal] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    expect(afterHeal).toMatchObject({ status: "done", originFingerprint: firstFingerprint });
+    expect(afterHeal?.description).toContain(`Task watchdog abandoned fingerprint: ${firstFingerprint}`);
+    expect(afterHeal?.description).not.toContain("Task watchdog action-required fingerprint:");
+    expect(afterHeal?.description).toMatch(/7 days/i);
+    const abandonMatches = afterHeal?.description?.match(/Task watchdog abandoned fingerprint:/g) ?? [];
+    expect(abandonMatches).toHaveLength(1);
+
+    const wakeRows = await db
+      .select({ status: agentWakeupRequests.status, error: agentWakeupRequests.error })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
+    expect(wakeRows).toEqual([
+      expect.objectContaining({
+        status: "cancelled",
+        error: "Cancelled because task-watchdog review requires board action",
+      }),
+    ]);
+  });
+
+  it("does not re-annotate after healing a long-blocked action-required review", async () => {
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    const { service, watchdogIssueId, companyId } = await seedTrapBlockedWatchdogReview({
+      identifier: "WDOG-HEAL-ONCE",
+      completedAt: tenDaysAgo,
+    });
+
+    await service.reconcileTaskWatchdogs({ companyId });
+    const [afterFirst] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    expect(afterFirst?.status).toBe("done");
+    expect(afterFirst?.description).toContain("Task watchdog abandoned fingerprint:");
+
+    const again = await service.reconcileTaskWatchdogs({ companyId });
+    expect(again).toMatchObject({ checked: 1, triggered: 0, alreadyReviewed: 1 });
+    const [afterSecond] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    expect(afterSecond?.status).toBe("done");
+    expect(afterSecond?.description).toBe(afterFirst?.description);
+    const abandonMatches = afterSecond?.description?.match(/Task watchdog abandoned fingerprint:/g) ?? [];
+    expect(abandonMatches).toHaveLength(1);
+  });
+
+  it("keeps a recently blocked action-required review blocked", async () => {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const { service, wakes, watchdogIssueId, companyId, firstFingerprint } =
+      await seedTrapBlockedWatchdogReview({
+        identifier: "WDOG-HEAL-FRESH",
+        completedAt: yesterday,
+      });
+
+    const result = await service.reconcileTaskWatchdogs({ companyId });
+    expect(result).toMatchObject({ checked: 1, triggered: 0, alreadyReviewed: 1 });
+    expect(wakes).toHaveLength(0);
+
+    const [stillBlocked] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    expect(stillBlocked).toMatchObject({ status: "blocked", originFingerprint: firstFingerprint });
+    expect(stillBlocked?.description).toContain(`Task watchdog action-required fingerprint: ${firstFingerprint}`);
+    expect(stillBlocked?.description ?? "").not.toContain("Task watchdog abandoned fingerprint:");
+  });
+
+  it("does not heal a long-blocked review whose action-required fingerprint no longer matches", async () => {
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    const staleFingerprint = "task_watchdog_stop:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const { service, wakes, watchdogIssueId, companyId, firstFingerprint } =
+      await seedTrapBlockedWatchdogReview({
+        identifier: "WDOG-HEAL-MISMATCH",
+        completedAt: tenDaysAgo,
+        actionRequiredFingerprint: staleFingerprint,
+      });
+
+    const result = await service.reconcileTaskWatchdogs({ companyId });
+    expect(result).toMatchObject({ checked: 1, triggered: 0, alreadyReviewed: 1 });
+    expect(wakes).toHaveLength(0);
+
+    const [stillBlocked] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    expect(stillBlocked).toMatchObject({ status: "blocked", originFingerprint: firstFingerprint });
+    expect(stillBlocked?.description).toContain(`Task watchdog action-required fingerprint: ${staleFingerprint}`);
+    expect(stillBlocked?.description ?? "").not.toContain("Task watchdog abandoned fingerprint:");
+  });
+
+  it("does not heal a long-blocked action-required review without a completion date", async () => {
+    const { service, wakes, watchdogIssueId, companyId, firstFingerprint } =
+      await seedTrapBlockedWatchdogReview({
+        identifier: "WDOG-HEAL-NO-DATE",
+        completedAt: null,
+      });
+
+    const result = await service.reconcileTaskWatchdogs({ companyId });
+    expect(result).toMatchObject({ checked: 1, triggered: 0, alreadyReviewed: 1 });
+    expect(wakes).toHaveLength(0);
+
+    const [stillBlocked] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    expect(stillBlocked).toMatchObject({
+      status: "blocked",
+      originFingerprint: firstFingerprint,
+      completedAt: null,
+    });
+    expect(stillBlocked?.description).toContain(`Task watchdog action-required fingerprint: ${firstFingerprint}`);
+    expect(stillBlocked?.description ?? "").not.toContain("Task watchdog abandoned fingerprint:");
+  });
+
+  it("does not heal a blocked review that lacks the action-required marker", async () => {
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    const { service, wakes, watchdogIssueId, companyId, firstFingerprint } =
+      await seedTrapBlockedWatchdogReview({
+        identifier: "WDOG-HEAL-FOREIGN",
+        completedAt: tenDaysAgo,
+        actionRequiredFingerprint: null,
+        descriptionExtra: "Blocked by a human for an unrelated reason.",
+      });
+
+    const [before] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    const result = await service.reconcileTaskWatchdogs({ companyId });
+    expect(result).toMatchObject({ checked: 1, triggered: 0, alreadyReviewed: 1 });
+    expect(wakes).toHaveLength(0);
+
+    const [after] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    expect(after).toMatchObject({
+      status: "blocked",
+      originFingerprint: firstFingerprint,
+      description: before?.description,
+    });
+    expect(after?.description ?? "").not.toContain("Task watchdog action-required fingerprint:");
+    expect(after?.description ?? "").not.toContain("Task watchdog abandoned fingerprint:");
+  });
+
   it("keeps completed watchdog reviews legal for terminal, live, and human-waiting sources", async () => {
     const companyId = await seedCompany();
     const agentId = await seedAgent(companyId);
