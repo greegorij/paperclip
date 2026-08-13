@@ -1086,7 +1086,7 @@ describe("stageCodexHomeForSync", () => {
 
       staged = await stageCodexHomeForSync(home, { runId: "run-absent" });
       const entries = await fs.readdir(staged);
-      expect(entries.sort()).toEqual(["config.toml", "sessions"]);
+      expect(entries.sort()).toEqual([".paperclip-codex-staged-home", "config.toml", "sessions"]);
     } finally {
       if (staged) await fs.rm(staged, { recursive: true, force: true });
       await fs.rm(root, { recursive: true, force: true });
@@ -1103,7 +1103,11 @@ describe("stageCodexHomeForSync", () => {
       await fs.writeFile(path.join(home, "config.toml"), "x\n", "utf8");
 
       staged = await stageCodexHomeForSync(home, { runId: "run-dangling" });
-      expect((await fs.readdir(staged)).sort()).toEqual(["config.toml", "sessions"]);
+      expect((await fs.readdir(staged)).sort()).toEqual([
+        ".paperclip-codex-staged-home",
+        "config.toml",
+        "sessions",
+      ]);
     } finally {
       if (staged) await fs.rm(staged, { recursive: true, force: true });
       await fs.rm(root, { recursive: true, force: true });

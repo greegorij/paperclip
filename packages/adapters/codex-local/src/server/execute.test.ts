@@ -390,7 +390,10 @@ describe("codex execute — local filesystem sandbox staged CODEX_HOME", () => {
       expect(options.env.CODEX_HOME).toBe(stagedHomePath);
       const managedPaths = options.localProcessSandbox?.managedPaths ?? [];
       expect(options.localProcessSandbox?.filesystemWorkspaceAccess).toBe("ro");
-      expect(managedPaths).toEqual([{ path: stagedHomePath as string, access: "rw" }]);
+      expect(managedPaths).toEqual([
+        { path: stagedHomePath as string, access: "rw" },
+        { path: path.join(fixture.managedCodexHome, "sessions"), access: "rw" },
+      ]);
       expect(managedPaths.some((entry) => entry.path === fixture.sharedHostHome)).toBe(false);
       expect(managedPaths.some((entry) => entry.path === fixture.managedCodexHome)).toBe(false);
       const stagedAuthPath = path.join(stagedHomePath as string, "auth.json");

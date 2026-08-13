@@ -169,7 +169,7 @@ describe("codex remote execution", () => {
     }));
     expect(syncDirectoryToSsh).toHaveBeenCalledTimes(1);
     // The home asset now syncs a curated *staged* allowlist dir, not the raw
-    // managed CODEX_HOME, and carries no `exclude` denylist.
+    // managed CODEX_HOME; only the Paperclip ownership marker is excluded from transfer.
     const homeSyncArgs = (syncDirectoryToSsh.mock.calls[0] as unknown[])?.[0] as {
       localDir: string;
       remoteDir: string;
@@ -178,16 +178,20 @@ describe("codex remote execution", () => {
     };
     expect(homeSyncArgs.localDir).not.toBe(codexHomeDir);
     expect(homeSyncArgs.localDir).toContain("paperclip-codex-home-sync");
-    expect(homeSyncArgs.remoteDir).toBe(`${managedRemoteWorkspace}/.paperclip-runtime/codex/home`);
+    expect(homeSyncArgs.remoteDir).toBe(
+      `${managedRemoteWorkspace}/.paperclip-runtime/codex/runs/run-1/home`,
+    );
     expect(homeSyncArgs.followSymlinks).toBe(true);
-    expect(homeSyncArgs.exclude).toBeUndefined();
+    expect(homeSyncArgs.exclude).toEqual([".paperclip-codex-staged-home"]);
 
     expect(runChildProcess).toHaveBeenCalledTimes(1);
     const call = runChildProcess.mock.calls[0] as unknown as
       | [string, string, string[], { env: Record<string, string>; remoteExecution?: { remoteCwd: string } | null }]
       | undefined;
     expect(call?.[2]).not.toContain("--skip-git-repo-check");
-    expect(call?.[3].env.CODEX_HOME).toBe(`${managedRemoteWorkspace}/.paperclip-runtime/codex/home`);
+    expect(call?.[3].env.CODEX_HOME).toBe(
+      `${managedRemoteWorkspace}/.paperclip-runtime/codex/runs/run-1/home`,
+    );
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_CWD).toBe(managedRemoteWorkspace);
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_WORKTREE_PATH).toBeUndefined();
     expect(JSON.parse(call?.[3].env.PAPERCLIP_WORKSPACES_JSON ?? "[]")).toEqual([
@@ -214,7 +218,7 @@ describe("codex remote execution", () => {
     }));
   });
 
-  it("stages only the allowlist into the home asset: keeps config.toml/skills/auth, drops session+sqlite state, no exclude", async () => {
+  it("stages the runtime allowlist and persistent sessions while dropping sqlite and temporary state", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-allowlist-"));
     cleanupDirs.push(rootDir);
     const workspaceDir = path.join(rootDir, "workspace");
@@ -315,11 +319,19 @@ describe("codex remote execution", () => {
     };
     // Allowlist present; decoys gone.
     expect(snap.entries).toEqual(
-      ["auth.json", "config.json", "config.toml", "instructions.md", "skills"]
+      [
+        ".paperclip-codex-staged-home",
+        "auth.json",
+        "config.json",
+        "config.toml",
+        "instructions.md",
+        "sessions",
+        "skills",
+      ]
         .filter((e) => e !== "config.json") // no config.json was seeded
         .sort(),
     );
-    for (const decoy of ["logs_2.sqlite", "state_5.sqlite", "sessions", "tmp", "plugins"]) {
+    for (const decoy of ["logs_2.sqlite", "state_5.sqlite", "tmp", "plugins"]) {
       expect(snap.entries).not.toContain(decoy);
     }
     // Phase-3 behavioral invariants: provider routing + skills + auth survive staging.
@@ -545,7 +557,9 @@ describe("codex remote execution", () => {
       "session-123",
       "-",
     ]);
-    expect(call?.[3].env.CODEX_HOME).toBe(`${managedRemoteWorkspace}/.paperclip-runtime/codex/home`);
+    expect(call?.[3].env.CODEX_HOME).toBe(
+      `${managedRemoteWorkspace}/.paperclip-runtime/codex/runs/run-target/home`,
+    );
     expect(call?.[3].remoteExecution?.remoteCwd).toBe(managedRemoteWorkspace);
   });
 
@@ -607,14 +621,14 @@ describe("codex remote execution", () => {
       remoteDir: string;
     };
     expect(homeSyncArgs.localDir).toContain("paperclip-codex-home-sync");
-    expect(homeSyncArgs.remoteDir).toBe("/app/.paperclip-runtime/codex/home");
+    expect(homeSyncArgs.remoteDir).toBe("/app/.paperclip-runtime/codex/runs/run-in-place/home");
     const call = runChildProcess.mock.calls[0] as unknown as
       | [string, string, string[], { env: Record<string, string>; remoteExecution?: { remoteCwd: string } | null }]
       | undefined;
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_CWD).toBe("/app");
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_REALIZATION_MODE).toBe("in_place");
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_AUTHORITATIVE_ROOT).toBe("/app");
-    expect(call?.[3].env.CODEX_HOME).toBe("/app/.paperclip-runtime/codex/home");
+    expect(call?.[3].env.CODEX_HOME).toBe("/app/.paperclip-runtime/codex/runs/run-in-place/home");
     expect(call?.[3].remoteExecution?.remoteCwd).toBe("/app");
   });
 });

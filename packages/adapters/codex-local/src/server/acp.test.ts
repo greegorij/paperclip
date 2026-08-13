@@ -13,6 +13,7 @@ import {
   resolveCodexExecutionEngineForRun,
   testCodexAcpEnvironment,
 } from "./acp.js";
+import { resolveManagedCodexHomeDir } from "./codex-home.js";
 
 // A local stand-in for a sandbox runner: runs the managed-runtime staging
 // scripts (mkdir/tar/find) as real child processes so the remote ACP lane can
@@ -839,7 +840,7 @@ describe("codex_local ACP lane", () => {
     const root = await makeTempRoot("paperclip-codex-acp-keep-staged-");
     const localCwd = path.join(root, "worktree");
     const remoteCwd = path.join(root, "remote-workspace");
-    const sourceHome = path.join(root, "codex-home");
+    const sourceHome = resolveManagedCodexHomeDir(process.env, "company-1");
     const sharedHostHome = path.join(root, "shared-codex-home");
     await fs.mkdir(localCwd, { recursive: true });
     await fs.mkdir(remoteCwd, { recursive: true });
@@ -917,7 +918,7 @@ describe("codex_local ACP lane", () => {
     const root = await makeTempRoot("paperclip-codex-acp-drop-staged-");
     const localCwd = path.join(root, "worktree");
     const remoteCwd = path.join(root, "remote-workspace");
-    const sourceHome = path.join(root, "codex-home");
+    const sourceHome = resolveManagedCodexHomeDir(process.env, "company-1");
     const sharedHostHome = path.join(root, "shared-codex-home");
     await fs.mkdir(localCwd, { recursive: true });
     await fs.mkdir(remoteCwd, { recursive: true });

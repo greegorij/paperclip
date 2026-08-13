@@ -132,7 +132,7 @@ describe("codex sandbox auth precedence warning", () => {
     });
 
     // The home asset now ships a curated *staged* allowlist dir (not the raw
-    // host CODEX_HOME) and carries no `exclude` denylist.
+    // host CODEX_HOME); only the Paperclip ownership marker is excluded from transfer.
     const runtimeCall = (prepareAdapterExecutionTargetRuntime.mock.calls[0] as unknown[])?.[0] as {
       assets: Array<{ key: string; localDir: string; exclude?: string[] }>;
     };
@@ -140,7 +140,7 @@ describe("codex sandbox auth precedence warning", () => {
     expect(homeAsset).toBeDefined();
     expect(homeAsset?.localDir).not.toBe(hostCodexHome);
     expect(homeAsset?.localDir).toContain("paperclip-codex-home-sync");
-    expect(homeAsset?.exclude).toBeUndefined();
+    expect(homeAsset?.exclude).toEqual([".paperclip-codex-staged-home"]);
     expect(runAdapterExecutionTargetShellCommand).toHaveBeenCalledWith(
       "run-auth-precedence",
       expect.objectContaining({ kind: "remote", transport: "sandbox", remoteCwd: "/sandbox/workspace" }),
