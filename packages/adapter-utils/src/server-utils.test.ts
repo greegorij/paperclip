@@ -71,6 +71,24 @@ describe("buildInvocationEnvForLogs", () => {
       "env OPENAI_API_KEY=***REDACTED*** PAPERCLIP_API_KEY='***REDACTED***' custom-acp --paperclip-api-key=***REDACTED*** --token ***REDACTED***",
     );
   });
+
+  it("redacts database connection strings from structured metadata", () => {
+    const loggedEnv = buildInvocationEnvForLogs({
+      DATABASE_URL: "postgresql://db-user:db-password@db.internal/paperclip",
+      SAFE_URL: "https://paperclip.example.test",
+    });
+    expect(loggedEnv.DATABASE_URL).toBe("***REDACTED***");
+    expect(loggedEnv.SAFE_URL).toBe("https://paperclip.example.test");
+  });
+
+  it("redacts dynamically named Codex MCP bearer variables", () => {
+    const loggedEnv = buildInvocationEnvForLogs({
+      PAPERCLIP_CODEX_MCP_BEARER_TOKEN_0123456789ABCDEF: "short-lived-run-token",
+    });
+    expect(loggedEnv.PAPERCLIP_CODEX_MCP_BEARER_TOKEN_0123456789ABCDEF).toBe("***REDACTED***");
+    expect(buildInvocationEnvForLogs({ PAPERCLIP_MCP_BEARER: "defense-in-depth" }).PAPERCLIP_MCP_BEARER)
+      .toBe("***REDACTED***");
+  });
 });
 
 describe("sanitizeSshRemoteEnv", () => {
@@ -391,6 +409,42 @@ describe("adapter skill snapshots", () => {
 });
 
 describe("runChildProcess", () => {
+  it("keeps explicit adapter env while blocking inherited server and provider secrets", async () => {
+    const previous = {
+      databaseUrl: process.env.DATABASE_URL,
+      masterKey: process.env.PAPERCLIP_SECRETS_MASTER_KEY,
+      openAiKey: process.env.OPENAI_API_KEY,
+    };
+    process.env.DATABASE_URL = "postgresql://server-only:password@db/paperclip";
+    process.env.PAPERCLIP_SECRETS_MASTER_KEY = "server-master-key";
+    process.env.OPENAI_API_KEY = "provider-auth";
+    try {
+      const result = await runChildProcess(
+        randomUUID(),
+        process.execPath,
+        ["-e", "process.stdout.write(JSON.stringify({database:process.env.DATABASE_URL,master:process.env.PAPERCLIP_SECRETS_MASTER_KEY,openai:process.env.OPENAI_API_KEY,router:process.env.OPENROUTER_API_KEY,custom:process.env.CUSTOM_PROJECT_VALUE}))"],
+        {
+          cwd: process.cwd(),
+          env: { OPENROUTER_API_KEY: "explicit-router-auth", CUSTOM_PROJECT_VALUE: "explicit-value" },
+          timeoutSec: 5,
+          graceSec: 1,
+          onLog: async () => {},
+        },
+      );
+      expect(JSON.parse(result.stdout)).toEqual({
+        router: "explicit-router-auth",
+        custom: "explicit-value",
+      });
+    } finally {
+      if (previous.databaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previous.databaseUrl;
+      if (previous.masterKey === undefined) delete process.env.PAPERCLIP_SECRETS_MASTER_KEY;
+      else process.env.PAPERCLIP_SECRETS_MASTER_KEY = previous.masterKey;
+      if (previous.openAiKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previous.openAiKey;
+    }
+  });
+
   it("does not arm a timeout when timeoutSec is 0", async () => {
     const result = await runChildProcess(
       randomUUID(),

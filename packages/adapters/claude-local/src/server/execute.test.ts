@@ -565,7 +565,7 @@ describe("claude local profile MCP sandbox paths", () => {
     }
   });
 
-  it("mounts absolute paths from the merged allowlisted stdio profile server only", async () => {
+  it("does not mount host profile stdio paths when runtime MCP is HTTP", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-claude-profile-sandbox-"));
     cleanupDirs.push(rootDir);
     previousPaperclipHome = process.env.PAPERCLIP_HOME;
@@ -633,23 +633,13 @@ describe("claude local profile MCP sandbox paths", () => {
     });
 
     const sandbox = runAdapterExecutionTargetProcess.mock.calls[0]?.[4]?.localProcessSandbox;
-    expect(sandbox?.managedPaths).toEqual(expect.arrayContaining([
-      { path: executable, access: "ro" },
-      { path: paperclipArg, access: "ro" },
-      { path: cwd, access: "ro" },
-      { path: installRoot, access: "ro" },
-    ]));
-    expect(sandbox?.managedPaths).not.toEqual(expect.arrayContaining([
-      { path: unallowlistedExecutable, access: "ro" },
-    ]));
-    expect(sandbox?.managedPaths).not.toEqual(expect.arrayContaining([
-      { path: "relative-source", access: "ro" },
-    ]));
-    expect(sandbox?.managedPaths).not.toEqual(expect.arrayContaining([
-      { path: httpExecutable, access: "ro" },
-    ]));
-    expect(sandbox?.managedPaths?.filter(({ path: candidate }) => candidate === paperclipArg)).toHaveLength(1);
-    expect(sandbox?.managedPaths?.filter(({ path: candidate }) => candidate === installRoot)).toHaveLength(1);
+    const mounted = new Set(sandbox?.managedPaths?.map(({ path: candidate }) => candidate));
+    expect(mounted.has(executable)).toBe(false);
+    expect(mounted.has(paperclipArg)).toBe(false);
+    expect(mounted.has(cwd)).toBe(false);
+    expect(mounted.has(installRoot)).toBe(false);
+    expect(mounted.has(unallowlistedExecutable)).toBe(false);
+    expect(mounted.has(httpExecutable)).toBe(false);
   });
 });
 

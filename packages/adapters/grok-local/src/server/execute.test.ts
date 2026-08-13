@@ -7,15 +7,23 @@ import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 const ensureRuntimeInstalledMock = vi.hoisted(() => vi.fn(async () => {}));
 const ensureCommandMock = vi.hoisted(() => vi.fn(async () => {}));
 const prepareRuntimeMock = vi.hoisted(() => vi.fn(async () => ({
-  workspaceRemoteDir: null,
+  workspaceRemoteDir: null as string | null,
+  runtimeRootDir: null as string | null,
   restoreWorkspace: async () => {},
 })));
 const resolveCommandForLogsMock = vi.hoisted(() => vi.fn(async () => "grok"));
 const runProcessMock = vi.hoisted(() => vi.fn());
+const remoteState = vi.hoisted(() => ({ enabled: false }));
+const stopBridgeMock = vi.hoisted(() => vi.fn(async () => {}));
+const startBridgeMock = vi.hoisted(() => vi.fn(async () => ({
+  env: { PAPERCLIP_API_URL: "http://remote-bridge", PAPERCLIP_API_KEY: "bridge-token" },
+  stop: stopBridgeMock,
+})));
 
 vi.mock("@paperclipai/adapter-utils/execution-target", () => ({
-  adapterExecutionTargetIsRemote: () => false,
-  adapterExecutionTargetRemoteCwd: (_target: unknown, cwd: string) => cwd,
+  adapterExecutionTargetIsRemote: () => remoteState.enabled,
+  adapterExecutionTargetRemoteCwd: (_target: unknown, cwd: string) => remoteState.enabled ? "/remote/work" : cwd,
+  adapterExecutionTargetUsesPaperclipBridge: () => remoteState.enabled,
   overrideAdapterExecutionTargetRemoteCwd: (target: unknown, _cwd: string) => target,
   adapterExecutionTargetSessionIdentity: () => ({ kind: "local" }),
   adapterExecutionTargetSessionMatches: () => true,
@@ -27,6 +35,7 @@ vi.mock("@paperclipai/adapter-utils/execution-target", () => ({
   resolveAdapterExecutionTargetCommandForLogs: resolveCommandForLogsMock,
   resolveAdapterExecutionTargetTimeoutSec: (_target: unknown, timeoutSec: number) => timeoutSec,
   runAdapterExecutionTargetProcess: runProcessMock,
+  startAdapterExecutionTargetPaperclipBridge: startBridgeMock,
 }));
 
 import { execute } from "./execute.js";
@@ -50,6 +59,9 @@ describe("grok_local execute", () => {
     prepareRuntimeMock.mockClear();
     resolveCommandForLogsMock.mockClear();
     runProcessMock.mockReset();
+    remoteState.enabled = false;
+    startBridgeMock.mockClear();
+    stopBridgeMock.mockClear();
   });
 
   afterEach(async () => {
@@ -183,5 +195,44 @@ describe("grok_local execute", () => {
     expect(runProcessMock).not.toHaveBeenCalled();
     expect(await pathExists(path.join(root, "Agents.md"))).toBe(false);
     expect(await pathExists(path.join(root, ".claude", "skills", "paperclip"))).toBe(false);
+  });
+
+  it("rewrites remote REST access through the callback bridge and always stops it", async () => {
+    remoteState.enabled = true;
+    const root = await makeTempRoot();
+    prepareRuntimeMock.mockResolvedValueOnce({
+      workspaceRemoteDir: "/remote/work",
+      runtimeRootDir: "/remote/work/.paperclip-runtime/grok/runs/run-remote",
+      restoreWorkspace: async () => {},
+    });
+    runProcessMock.mockImplementationOnce(async (_runId, _target, _command, _args, options) => {
+      expect(options.env).toMatchObject({
+        PAPERCLIP_API_URL: "http://remote-bridge",
+        PAPERCLIP_API_KEY: "bridge-token",
+      });
+      return {
+        exitCode: 0, signal: null, timedOut: false,
+        stdout: JSON.stringify({ type: "end", stopReason: "EndTurn", sessionId: "remote-session" }),
+        stderr: "",
+      };
+    });
+    const result = await execute({
+      runId: "run-remote",
+      agent: { id: "agent-1", companyId: "company-1", name: "Grok", adapterType: "grok_local", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { cwd: root },
+      context: {},
+      authToken: "host-run-jwt",
+      executionTarget: { kind: "remote", transport: "ssh" },
+      onLog: async () => {},
+    } as never);
+
+    expect(result.exitCode).toBe(0);
+    expect(startBridgeMock).toHaveBeenCalledWith(expect.objectContaining({
+      adapterKey: "grok",
+      hostApiToken: "host-run-jwt",
+      runtimeRootDir: "/remote/work/.paperclip-runtime/grok/runs/run-remote",
+    }));
+    expect(stopBridgeMock).toHaveBeenCalledOnce();
   });
 });

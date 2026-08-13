@@ -169,7 +169,7 @@ Typical failure causes:
 
 Claude-specific note:
 
-- If `ANTHROPIC_API_KEY` is set in adapter env or host environment, Claude uses API-key auth instead of subscription login. Paperclip surfaces this as a warning in environment tests, not a hard error.
+- If `ANTHROPIC_API_KEY` is set explicitly in the adapter environment, Claude uses API-key auth instead of subscription login. Provider credentials from the Paperclip server environment are not inherited by agent processes or treated as available by diagnostics.
 
 ## 9. Security and risk notes
 

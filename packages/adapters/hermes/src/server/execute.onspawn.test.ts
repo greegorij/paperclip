@@ -121,7 +121,9 @@ describe("hermes-local adapter onSpawn forwarding", () => {
 
   it("does not inherit PAPERCLIP_API_KEY without a harness token", async () => {
     const previousApiKey = process.env.PAPERCLIP_API_KEY;
+    const previousDatabaseUrl = process.env.DATABASE_URL;
     process.env.PAPERCLIP_API_KEY = "parent-process-key";
+    process.env.DATABASE_URL = "postgresql://server-only-secret";
 
     try {
       const { ctx } = makeCtx();
@@ -131,9 +133,12 @@ describe("hermes-local adapter onSpawn forwarding", () => {
       const lastCall = mocked.mock.calls[mocked.mock.calls.length - 1];
       const opts = lastCall[3] as { env: Record<string, string> };
       expect(opts.env.PAPERCLIP_API_KEY).toBeUndefined();
+      expect(opts.env.DATABASE_URL).toBeUndefined();
     } finally {
       if (previousApiKey === undefined) delete process.env.PAPERCLIP_API_KEY;
       else process.env.PAPERCLIP_API_KEY = previousApiKey;
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
     }
   });
 });

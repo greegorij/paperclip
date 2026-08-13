@@ -170,7 +170,7 @@ describe("ssh env-lab fixture", () => {
     await stopSshEnvLabFixture(statePath);
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
-  it("builds a remote script that sources login profiles but no nvm", async () => {
+  it("uses profile PATH discovery but clears profile secrets before applying explicit env", async () => {
     const target = await buildSshSpawnTarget({
       spec: {
         host: "ssh.example.test",
@@ -184,7 +184,7 @@ describe("ssh env-lab fixture", () => {
       },
       command: "node",
       args: ["--version"],
-      env: { FOO: "bar" },
+      env: { FOO: "bar", EXPLICIT_PROVIDER_KEY: "explicit-value" },
     });
 
     // The remote script rides the last ssh argument. The SSH target is an
@@ -207,7 +207,15 @@ describe("ssh env-lab fixture", () => {
     // quotes are escaped. Assert the command still runs: cd, env, and the argv.
     expect(remoteScript).toContain("cd ");
     expect(remoteScript).toContain("/srv/paperclip/workspace");
-    expect(remoteScript).toContain("exec env ");
+    expect(remoteScript).toContain("paperclip_profile_PATH");
+    expect(remoteScript).toContain("exec env -i ");
+    expect(remoteScript).toContain("PATH=");
+    expect(remoteScript).toContain("HOME=");
+    expect(remoteScript).toContain("EXPLICIT_PROVIDER_KEY=");
+    expect(remoteScript).toContain("explicit-value");
+    expect(remoteScript).not.toContain("DATABASE_URL");
+    expect(remoteScript).not.toContain("OPENAI_API_KEY");
+    expect(remoteScript).not.toContain("SSH_AUTH_SOCK");
     expect(remoteScript).toContain("node");
     expect(remoteScript).toContain("--version");
     await target.cleanup();

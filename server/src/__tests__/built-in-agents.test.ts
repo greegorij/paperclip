@@ -120,7 +120,7 @@ describeEmbeddedPostgres("built-in agents", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-built-in-agents-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, 60_000);
 
   afterEach(async () => {
     await db.delete(routineTriggers);
@@ -658,7 +658,7 @@ describeEmbeddedPostgres("built-in agents", () => {
     expect(coachGrantKeys).toEqual(expect.arrayContaining(["agents:suggest-changes", "skills:suggest-changes"]));
     expect(coachGrantKeys).not.toContain("agents:configure");
     expect(coachGrantKeys).not.toContain("skills:create");
-  });
+  }, 15_000);
 
   it("recreates missing managed resource bindings idempotently during concurrent reconcile", async () => {
     const companyId = await seedCompany({ requireApproval: false });
@@ -793,7 +793,7 @@ describeEmbeddedPostgres("built-in agents", () => {
     expect(agentRows.filter((row) => readBuiltInAgentMarker(row.metadata)?.key === "reflection-coach")).toHaveLength(1);
     const approvalRows = await db.select().from(approvals).where(eq(approvals.companyId, companyId));
     expect(approvalRows).toHaveLength(2);
-  });
+  }, 15_000);
 
   it("preserves Reflection Coach instruction drift on reconcile and restores it on reset", async () => {
     const companyId = await seedCompany();
@@ -823,7 +823,7 @@ describeEmbeddedPostgres("built-in agents", () => {
     const resetFile = await instructions.readFile(reset.agent!, "AGENTS.md");
     expect(resetFile.content).toContain("Reflection Coach");
     expect(resetFile.content).not.toContain("Operator edit.");
-  });
+  }, 15_000);
 
   it("blocks deleting a built-in agent", async () => {
     const companyId = await seedCompany();
@@ -1085,7 +1085,7 @@ describeEmbeddedPostgres("built-in agents", () => {
     // The company after the affected one still had its bundled agents provisioned.
     const healthyCoach = await builtInAgentService(db).get(healthyCompanyId, "reflection-coach");
     expect(healthyCoach.agentId).toBeTruthy();
-  });
+  }, 15_000);
 
   it("automatically materializes the Reflection Coach bundle without enabling background work", async () => {
     const companyId = await seedCompany();

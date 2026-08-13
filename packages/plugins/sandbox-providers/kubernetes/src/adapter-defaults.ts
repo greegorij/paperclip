@@ -107,12 +107,12 @@ export function resolveRunAdapterType(
 
 /**
  * Build the per-run env for the Job: the non-secret `defaultEnv` is the base
- * and the process-env values (the secret API keys named by `envKeys`) override
- * it. Pure for testability.
+ * plus explicitly resolved run env values named by `envKeys`. Host process
+ * credentials are never an implicit source. Pure for testability.
  */
 export function buildAdapterEnv(
   defaults: AdapterDefaults,
-  processEnv: NodeJS.ProcessEnv = process.env,
+  processEnv: NodeJS.ProcessEnv = {},
 ): Record<string, string> {
   const out: Record<string, string> = { ...(defaults.defaultEnv ?? {}) };
   for (const k of defaults.envKeys) {

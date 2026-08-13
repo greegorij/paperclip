@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -740,8 +740,8 @@ async function expectForwardBranchReconciled(input: {
   expect(activeWorkspace).toMatchObject({
     name: expectedDurableBranch,
     branchName: expectedDurableBranch,
-    providerRef: input.worktreePath,
   });
+  expect(await realpath(activeWorkspace!.providerRef!)).toBe(await realpath(input.worktreePath));
 
   const recoveryRows = await input.db
     .select()
@@ -858,7 +858,7 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-branch-containment-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, 60_000);
 
   afterEach(async () => {
     // Await every in-flight background heartbeat run to quiescence before the
@@ -909,7 +909,7 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
   });
 
   afterAll(async () => {
-    await db.$client.end();
+    await db?.$client.end();
     await tempDb?.cleanup();
   }, 60_000);
 

@@ -29,6 +29,7 @@ import type {
 
 import {
   runChildProcess,
+  buildAgentProcessEnv,
   buildPaperclipEnv,
   renderTemplate,
   ensureAbsoluteDirectory,
@@ -463,11 +464,12 @@ export async function execute(
 
   // ── Build environment ──────────────────────────────────────────────────
   const userEnv = config.env as Record<string, string> | undefined;
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    ...(userEnv && typeof userEnv === "object" ? userEnv : {}),
-    ...buildPaperclipEnv(ctx.agent),
-  };
+  const env: Record<string, string> = Object.fromEntries(
+    Object.entries(buildAgentProcessEnv({
+      ...(userEnv && typeof userEnv === "object" ? userEnv : {}),
+      ...buildPaperclipEnv(ctx.agent),
+    })).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
 

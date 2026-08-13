@@ -177,16 +177,16 @@ describe("pi remote execution", () => {
         remoteCwd: managedRemoteWorkspace,
       },
     });
-    expect(String(result.sessionId)).toContain(`${managedRemoteWorkspace}/.paperclip-runtime/pi/sessions/`);
+    expect(String(result.sessionId)).toContain(`/remote/workspace/.paperclip-runtime/pi/session-stores/company-1/agent-1/sessions/`);
     expect(prepareWorkspaceForSshExecution).toHaveBeenCalledTimes(1);
     expect(syncDirectoryToSsh).toHaveBeenCalledTimes(1);
     expect(syncDirectoryToSsh).toHaveBeenCalledWith(expect.objectContaining({
-      remoteDir: `${managedRemoteWorkspace}/.paperclip-runtime/pi/skills`,
+      remoteDir: `${managedRemoteWorkspace}/.paperclip-runtime/pi/runs/run-1/skills`,
       followSymlinks: true,
     }));
     expect(runSshCommand).toHaveBeenCalledWith(
       expect.anything(),
-      expect.stringContaining(".paperclip-runtime/pi/sessions"),
+      expect.stringContaining(".paperclip-runtime/pi/session-stores/company-1/agent-1/sessions"),
       expect.anything(),
     );
     const call = runChildProcess.mock.calls[0] as unknown as
@@ -194,7 +194,7 @@ describe("pi remote execution", () => {
       | undefined;
     expect(call?.[2]).toContain("--session");
     expect(call?.[2]).toContain("--skill");
-    expect(call?.[2]).toContain(`${managedRemoteWorkspace}/.paperclip-runtime/pi/skills`);
+    expect(call?.[2]).toContain(`${managedRemoteWorkspace}/.paperclip-runtime/pi/runs/run-1/skills`);
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_CWD).toBe(managedRemoteWorkspace);
     expect(JSON.parse(call?.[3].env.PAPERCLIP_WORKSPACES_JSON ?? "[]")).toEqual([
       {
@@ -277,13 +277,13 @@ describe("pi remote execution", () => {
     });
 
     expect(syncDirectoryToSsh).toHaveBeenCalledWith(expect.objectContaining({
-      remoteDir: `${managedRemoteWorkspace}/.paperclip-runtime/pi/agentConfig`,
+      remoteDir: `${managedRemoteWorkspace}/.paperclip-runtime/pi/runs/run-providers/agentConfig`,
     }));
     const call = runChildProcess.mock.calls[0] as unknown as
       | [string, string, string[], { env: Record<string, string> }]
       | undefined;
     expect(call?.[3].env.PI_CODING_AGENT_DIR).toBe(
-      `${managedRemoteWorkspace}/.paperclip-runtime/pi/agentConfig`,
+      `${managedRemoteWorkspace}/.paperclip-runtime/pi/runs/run-providers/agentConfig`,
     );
     expect(call?.[2]).toContain("--provider");
     expect(call?.[2]).toContain("tensorix");
@@ -446,7 +446,7 @@ describe("pi remote execution", () => {
     const sessionIndex = call?.[2].indexOf("--session") ?? -1;
     expect(sessionIndex).toBeGreaterThanOrEqual(0);
     const usedSession = sessionIndex >= 0 ? call?.[2][sessionIndex + 1] : null;
-    expect(usedSession).toContain(`${managedRemoteWorkspaceFresh}/.paperclip-runtime/pi/sessions/`);
+    expect(usedSession).toContain(`/remote/workspace/.paperclip-runtime/pi/session-stores/company-1/agent-1/sessions/`);
     expect(usedSession).not.toBe("/remote/workspace/.paperclip-runtime/pi/sessions/session-123.jsonl");
   });
 

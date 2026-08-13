@@ -16,6 +16,24 @@ import { buildCodexAuthInboundProvision } from "./codex-auth-merge-scripts.js";
 const execFile = promisify(execFileCallback);
 
 describe("codex home auth merge on sandbox asset extract", () => {
+  it("links a run home to a stable remote session store", () => {
+    const provision = buildCodexAuthInboundProvision(
+      "/workspace/.paperclip-runtime/codex/session-stores/company/agent",
+      "/workspace",
+    );
+    const command = provision.postUploadCommand?.({
+      assetTarPath: "/runtime/home.tar",
+      assetDir: "/runtime/home",
+      runtimeRootDir: "/runtime",
+    }) ?? "";
+    expect(command).toContain("mkdir '/workspace/.paperclip-runtime/codex/session-stores/company/agent'");
+    expect(command).toContain("chmod 700 '/workspace/.paperclip-runtime/codex/session-stores/company/agent'");
+    expect(command).toContain("Refusing unsafe private store component");
+    expect(command).toContain("-L '/workspace/.paperclip-runtime/codex'");
+    expect(command).toContain("cp -R '/runtime/home/sessions/.'");
+    expect(command).toContain("ln -s '/workspace/.paperclip-runtime/codex/session-stores/company/agent' '/runtime/home/sessions'");
+  });
+
   const cleanupDirs: string[] = [];
 
   afterEach(async () => {

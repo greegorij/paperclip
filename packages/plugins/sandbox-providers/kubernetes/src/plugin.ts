@@ -419,9 +419,9 @@ const plugin = definePlugin({
       () => orchestrator.release(clients, namespace, jobName),
     );
 
-    // defaultEnv (non-secret base, e.g. the inference base URL) is layered first;
-    // the process-env secrets named by envKeys override it.
-    const adapterEnv = buildAdapterEnv(adapterDefaults);
+    // defaultEnv is layered with only the caller-resolved run env. The plugin
+    // host's process.env is outside the agent credential boundary.
+    const adapterEnv = buildAdapterEnv(adapterDefaults, params.env ?? {});
     adapterEnv.PAPERCLIP_NETWORK_EGRESS_POLICY = "kubernetes-default-deny";
     adapterEnv.PAPERCLIP_NETWORK_EGRESS_GRANT_PATH = NETWORK_EGRESS_GRANT_PATH;
     adapterEnv.PAPERCLIP_NETWORK_EGRESS_ALLOW_FQDNS = scopedNetworkEgress.allowFqdns.join(",");

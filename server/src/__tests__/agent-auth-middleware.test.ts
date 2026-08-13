@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agentApiKeys,
@@ -163,12 +163,57 @@ describe("agent auth middleware", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     if (originalSecret === undefined) delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
     else process.env.PAPERCLIP_AGENT_JWT_SECRET = originalSecret;
     if (originalTtl === undefined) delete process.env.PAPERCLIP_AGENT_JWT_TTL_SECONDS;
     else process.env.PAPERCLIP_AGENT_JWT_TTL_SECONDS = originalTtl;
     if (originalInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
     else process.env.PAPERCLIP_INSTANCE_ID = originalInstanceId;
+  });
+
+  it("renews an expired signed token only while its exact run remains active", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const token = createLocalAgentJwt(
+      agentId, companyId, "codex_local", runId, null, { kind: "standard" }, 60,
+    );
+    vi.setSystemTime(new Date("2026-01-02T00:00:01.000Z"));
+
+    const active = createDbState({
+      agent: { id: agentId, companyId },
+      run: { id: runId, companyId, agentId },
+    });
+    const activeResponse = await request(createApp(active.db))
+      .get("/actor")
+      .set("Authorization", `Bearer ${token}`)
+      .set("X-Paperclip-Run-Id", runId);
+    expect(activeResponse.body).toMatchObject({ source: "agent_jwt", runId });
+
+    const finished = createDbState({ agent: { id: agentId, companyId } });
+    const finishedResponse = await request(createApp(finished.db))
+      .get("/actor")
+      .set("Authorization", `Bearer ${token}`)
+      .set("X-Paperclip-Run-Id", runId);
+    expect(finishedResponse.body.source).not.toBe("agent_jwt");
+  });
+
+  it("rejects a still-unexpired signed token after its run is no longer active", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const token = createLocalAgentJwt(agentId, companyId, "codex_local", runId);
+    const finished = createDbState({ agent: { id: agentId, companyId } });
+
+    const response = await request(createApp(finished.db))
+      .get("/actor")
+      .set("Authorization", `Bearer ${token}`)
+      .set("X-Paperclip-Run-Id", runId);
+
+    expect(response.body.source).not.toBe("agent_jwt");
   });
 
   it("uses the signed responsible_user_id claim and keeps the signed run id authoritative", async () => {

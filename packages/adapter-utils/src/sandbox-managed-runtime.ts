@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { assertSafeManagedPathSegment } from "./safe-path-segment.js";
 import { promisify } from "node:util";
 import {
   buildRemoteGitDeltaBundleScript,
@@ -310,6 +311,8 @@ export interface PreparedSandboxManagedRuntime {
    */
   additionalSourceFailures: AdditionalSourceStagingFailure[];
   restoreWorkspace(onProgress?: RuntimeProgressSink): Promise<void>;
+  /** Idempotent removal of the exact per-run sandbox runtime root. */
+  disposeRuntime(): Promise<void>;
 }
 
 /** One additional (referenced) project that failed to stage into the sandbox. */
@@ -685,6 +688,7 @@ function makeTransferProgress(
 
 export async function prepareSandboxManagedRuntime(input: {
   spec: SandboxRemoteExecutionSpec;
+  runId?: string;
   adapterKey: string;
   client: SandboxManagedRuntimeClient;
   workspaceLocalDir: string;
@@ -704,8 +708,18 @@ export async function prepareSandboxManagedRuntime(input: {
   onProgress?: RuntimeProgressSink;
   onRuntimeProgress?: RuntimeStatusSink;
 }): Promise<PreparedSandboxManagedRuntime> {
+  const adapterKey = assertSafeManagedPathSegment(
+    input.adapterKey,
+    "Sandbox managed runtime adapterKey",
+  );
+  const runId = input.runId;
+  if (runId !== undefined && !/^[A-Za-z0-9_-]+$/.test(runId)) {
+    throw new Error("Sandbox managed runtime runId must be a safe path segment");
+  }
   const workspaceRemoteDir = input.workspaceRemoteDir ?? input.spec.remoteCwd;
-  const runtimeRootDir = path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
+  const runtimeRootDir = runId === undefined
+    ? path.posix.join(workspaceRemoteDir, ".paperclip-runtime", adapterKey)
+    : path.posix.join(workspaceRemoteDir, ".paperclip-runtime", adapterKey, "runs", runId);
   const syncWorkspace = input.syncWorkspace !== false;
   const gitSnapshot = syncWorkspace ? await readGitWorkspaceSnapshot(input.workspaceLocalDir) : null;
   const gitIgnoredExcludes = gitSnapshot?.ignoredPaths;
@@ -760,6 +774,25 @@ export async function prepareSandboxManagedRuntime(input: {
   // git-history semantics (anchor-only).
   const additionalSourceExclude = mergeExcludes(SANDBOX_WORKSPACE_HEAVY_DIR_EXCLUDES, [".git"]);
 
+  const cleanupRunRoot = async (): Promise<void> => {
+    if (!runId) return;
+    const normalized = path.posix.normalize(runtimeRootDir);
+    const expected = path.posix.join(path.posix.normalize(workspaceRemoteDir), ".paperclip-runtime", adapterKey, "runs", runId);
+    if (normalized !== expected || !normalized.endsWith(`/runs/${runId}`)) {
+      throw new Error("Refusing to clean an unowned sandbox managed-runtime path");
+    }
+    const components = [
+      path.posix.join(workspaceRemoteDir, ".paperclip-runtime"),
+      path.posix.join(workspaceRemoteDir, ".paperclip-runtime", adapterKey),
+      path.posix.join(workspaceRemoteDir, ".paperclip-runtime", adapterKey, "runs"),
+      normalized,
+    ];
+    const guards = components.map((component) =>
+      `if [ -L ${shellQuote(component)} ] || { [ -e ${shellQuote(component)} ] && [ ! -d ${shellQuote(component)} ]; }; then exit 73; fi`,
+    );
+    await input.client.run(`${guards.join(" && ")} && rm -rf -- ${shellQuote(normalized)}`, { timeoutMs: input.spec.timeoutMs });
+  };
+
   // Every delegated post-upload command (extract/wipe/remove-deleted/asset merge)
   // must run under the run-specific timeout (`spec.timeoutMs`), not the provider
   // sync client's default timeout — the two can differ, and before staging was
@@ -776,6 +809,7 @@ export async function prepareSandboxManagedRuntime(input: {
       timeoutMs: command.timeoutMs ?? input.spec.timeoutMs,
     }));
 
+  try {
   await withTempDir("paperclip-sandbox-sync-", async (tempDir) => {
     const preservedNames = new Set([
       ".paperclip-runtime",
@@ -1028,6 +1062,12 @@ export async function prepareSandboxManagedRuntime(input: {
       }
     }
   });
+  } catch (error) {
+    await cleanupRunRoot().catch((cleanupError) => {
+      console.warn(`[paperclip] Sandbox run cleanup also failed after preparation failure: ${String(cleanupError)}`);
+    });
+    throw error;
+  }
 
   const assetDirs = Object.fromEntries(
     (input.assets ?? []).map((asset) => [asset.key, path.posix.join(runtimeRootDir, asset.key)]),
@@ -1043,17 +1083,18 @@ export async function prepareSandboxManagedRuntime(input: {
     additionalSourceFailures,
     restoreWorkspace: async (onProgress?: RuntimeProgressSink) => {
       const restoreSink = onProgress ?? input.onProgress;
-      if (!syncWorkspace) {
-        for (const asset of input.assets ?? []) {
-          if (!asset.restore) continue;
-          await asset.restore({
-            assetDir: path.posix.join(runtimeRootDir, asset.key),
-            readFile: async (remotePath) => toBuffer(await input.client.readFile(remotePath)),
-          });
+      try {
+        if (!syncWorkspace) {
+          for (const asset of input.assets ?? []) {
+            if (!asset.restore) continue;
+            await asset.restore({
+              assetDir: path.posix.join(runtimeRootDir, asset.key),
+              readFile: async (remotePath) => toBuffer(await input.client.readFile(remotePath)),
+            });
+          }
+          return;
         }
-        return;
-      }
-      await withTempDir("paperclip-sandbox-restore-", async (tempDir) => {
+        await withTempDir("paperclip-sandbox-restore-", async (tempDir) => {
         let importedRef: string | null = null;
         let importedHead: string | null = null;
         let remoteWorkspaceStatus = "dirty";
@@ -1218,7 +1259,11 @@ export async function prepareSandboxManagedRuntime(input: {
             await deleteLocalGitRef({ localDir: input.workspaceLocalDir, ref: importedRef });
           }
         }
-      });
+        });
+      } catch (error) {
+        throw error;
+      }
     },
+    disposeRuntime: cleanupRunRoot,
   };
 }

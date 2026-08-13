@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -10,8 +11,105 @@ import {
 } from "@paperclipai/adapter-utils/execution-target";
 import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
+import { buildRemotePrivateStoreProvision } from "@paperclipai/adapter-utils/remote-private-store";
 
 const SEEDED_SHARED_FILES = ["settings.json", "CLAUDE.md"] as const;
+const MCP_RUN_OWNER_MARKER = ".paperclip-mcp-run";
+const MCP_SWEEP_MAX_ENTRIES = 128;
+const mcpSweepCursorByStateDir = new Map<string, number>();
+
+type McpRunOwner = { owner: "paperclip-claude-mcp"; runId: string; pid: number; createdAt: string };
+
+function assertSafeRunId(runId: string): void {
+  if (!/^[A-Za-z0-9_-]+$/.test(runId)) throw new Error("Claude MCP runId must be a safe path segment");
+}
+
+export async function cleanupPaperclipClaudeMcpRun(stateDir: string, runId: string): Promise<void> {
+  assertSafeRunId(runId);
+  const runDir = path.join(stateDir, "runs", runId);
+  const marker = await fs.readFile(path.join(runDir, MCP_RUN_OWNER_MARKER), "utf8").catch(() => null);
+  if (!marker) return;
+  let owned = marker.trim() === runId; // cleanup compatibility for pre-lease markers
+  try {
+    const parsed = JSON.parse(marker) as Partial<McpRunOwner>;
+    owned = parsed.owner === "paperclip-claude-mcp" && parsed.runId === runId;
+  } catch {}
+  if (!owned) return;
+  await fs.rm(runDir, { recursive: true, force: true });
+}
+
+function processIsAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return Boolean(error && typeof error === "object" && "code" in error && error.code === "EPERM");
+  }
+}
+
+/**
+ * Recover bearer-bearing configs left by SIGKILL/reboot. Only new-format,
+ * Paperclip-owned directories whose owner process is provably gone are
+ * removed. Live leases, foreign entries, legacy markers and symlinks fail
+ * closed. The bounded scan prevents an operator-controlled state directory
+ * from turning adapter startup into unbounded filesystem work.
+ */
+export async function sweepAbandonedPaperclipClaudeMcpRuns(
+  stateDir: string,
+  options: {
+    isProcessAlive?: (pid: number) => boolean;
+    onWarning?: (message: string) => void;
+    removeRun?: (runDir: string) => Promise<void>;
+  } = {},
+): Promise<void> {
+  const runsDir = path.join(stateDir, "runs");
+  let entries: Dirent[];
+  try {
+    const runsStat = await fs.lstat(runsDir).catch(() => null);
+    if (!runsStat || !runsStat.isDirectory() || runsStat.isSymbolicLink()) return;
+    entries = await fs.readdir(runsDir, { withFileTypes: true });
+  } catch (error) {
+    options.onWarning?.(`Claude MCP residue scan skipped: ${String(error)}`);
+    return;
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  const start = mcpSweepCursorByStateDir.get(stateDir) ?? 0;
+  const batch = Array.from(
+    { length: Math.min(MCP_SWEEP_MAX_ENTRIES, entries.length) },
+    (_, offset) => entries[(start + offset) % entries.length]!,
+  );
+  mcpSweepCursorByStateDir.set(stateDir, entries.length === 0 ? 0 : (start + batch.length) % entries.length);
+  for (const entry of batch) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !/^[A-Za-z0-9_-]+$/.test(entry.name)) continue;
+    const runDir = path.join(runsDir, entry.name);
+    const markerPath = path.join(runDir, MCP_RUN_OWNER_MARKER);
+    const markerStat = await fs.lstat(markerPath).catch(() => null);
+    if (!markerStat?.isFile() || markerStat.isSymbolicLink()) continue;
+    let owner: Partial<McpRunOwner>;
+    try {
+      owner = JSON.parse(await fs.readFile(markerPath, "utf8")) as Partial<McpRunOwner>;
+    } catch {
+      continue;
+    }
+    if (
+      owner.owner !== "paperclip-claude-mcp" ||
+      owner.runId !== entry.name ||
+      typeof owner.pid !== "number" ||
+      typeof owner.createdAt !== "string" ||
+      !Number.isFinite(Date.parse(owner.createdAt)) ||
+      (options.isProcessAlive ?? processIsAlive)(owner.pid)
+    ) continue;
+    // Re-check the owned directory itself immediately before recursive removal.
+    const finalStat = await fs.lstat(runDir).catch(() => null);
+    if (!finalStat?.isDirectory() || finalStat.isSymbolicLink()) continue;
+    try {
+      await (options.removeRun ?? ((candidate) => fs.rm(candidate, { recursive: true, force: true })))(runDir);
+    } catch (error) {
+      options.onWarning?.(`Claude MCP residue cleanup skipped for ${entry.name}: ${String(error)}`);
+    }
+  }
+}
 
 /** Whitelist for disposable shadow/read-only Claude config staging. */
 const DISPOSABLE_CLAUDE_CONFIG_FILES = [
@@ -304,6 +402,7 @@ export async function writePaperclipClaudeMcpConfig(input: {
   /** @internal test seam — override profile file reads. */
   _readProfileFile?: (profilePath: string) => Promise<string>;
 }): Promise<string> {
+  assertSafeRunId(input.runId);
   const configDir = path.join(input.stateDir, "runs", input.runId, "mcp");
   const configPath = path.join(configDir, "mcp-config.json");
   const usedNames = new Set<string>();
@@ -341,6 +440,14 @@ export async function writePaperclipClaudeMcpConfig(input: {
   }
 
   await fs.mkdir(configDir, { recursive: true });
+  await fs.chmod(path.dirname(configDir), 0o700);
+  const owner: McpRunOwner = {
+    owner: "paperclip-claude-mcp",
+    runId: input.runId,
+    pid: process.pid,
+    createdAt: new Date().toISOString(),
+  };
+  await fs.writeFile(path.join(path.dirname(configDir), MCP_RUN_OWNER_MARKER), `${JSON.stringify(owner)}\n`, { mode: 0o600 });
   await fs.writeFile(configPath, JSON.stringify({ mcpServers }), { mode: 0o600 });
   return configPath;
 }
@@ -383,7 +490,18 @@ export async function prepareClaudeConfigSeed(
 export function buildRemoteClaudeConfigMaterializationCommand(input: {
   remoteClaudeConfigDir: string;
   remoteClaudeConfigSeedDir: string;
+  persistentProjectsDir?: string;
+  persistentProjectsRemoteCwd?: string;
 }): string {
+  const projectsLink = input.persistentProjectsDir
+    ? `${buildRemotePrivateStoreProvision({
+        remoteCwd: input.persistentProjectsRemoteCwd ?? "",
+        adapterKey: "claude",
+        storeDir: input.persistentProjectsDir,
+      })} && ` +
+      `rm -rf ${shellQuote(path.posix.join(input.remoteClaudeConfigDir, "projects"))} && ` +
+      `ln -s ${shellQuote(input.persistentProjectsDir)} ${shellQuote(path.posix.join(input.remoteClaudeConfigDir, "projects"))} && `
+    : "";
   return `mkdir -p ${shellQuote(input.remoteClaudeConfigDir)} && ` +
     `if [ -d ${shellQuote(input.remoteClaudeConfigSeedDir)} ]; then ` +
     `cp -R ${shellQuote(`${input.remoteClaudeConfigSeedDir}/.`)} ${shellQuote(input.remoteClaudeConfigDir)}/; ` +
@@ -392,7 +510,7 @@ export function buildRemoteClaudeConfigMaterializationCommand(input: {
     `if [ -n "\${HOME:-}" ] && [ -f "\${HOME}/.claude/\${file}" ] && [ ! -f ${shellQuote(input.remoteClaudeConfigDir)}/"\${file}" ]; then ` +
     `cp "\${HOME}/.claude/\${file}" ${shellQuote(input.remoteClaudeConfigDir)}/"\${file}"; ` +
     `fi; ` +
-    `done`;
+    `done; ` + projectsLink + `:`;
 }
 
 export async function materializeRemoteClaudeConfig(input: {
@@ -400,6 +518,8 @@ export async function materializeRemoteClaudeConfig(input: {
   target: AdapterExecutionTarget | null | undefined;
   remoteClaudeConfigDir: string;
   remoteClaudeConfigSeedDir: string;
+  persistentProjectsDir?: string;
+  persistentProjectsRemoteCwd?: string;
   options: AdapterExecutionTargetShellOptions;
 }): Promise<void> {
   await runAdapterExecutionTargetShellCommand(
@@ -408,6 +528,8 @@ export async function materializeRemoteClaudeConfig(input: {
     buildRemoteClaudeConfigMaterializationCommand({
       remoteClaudeConfigDir: input.remoteClaudeConfigDir,
       remoteClaudeConfigSeedDir: input.remoteClaudeConfigSeedDir,
+      persistentProjectsDir: input.persistentProjectsDir,
+      persistentProjectsRemoteCwd: input.persistentProjectsRemoteCwd,
     }),
     input.options,
   );

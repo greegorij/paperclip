@@ -3639,7 +3639,15 @@ export function createToolGatewayService(
         clientMetadata,
       });
     }
-    if (row.token.expiresAt && row.token.expiresAt.getTime() <= Date.now()) {
+    // Heartbeat-run tokens are governed by the exact active run below. Their
+    // nominal expiry bounds abandoned tokens, but an intentionally unbounded
+    // active run must not lose optional MCP access at that wall-clock edge.
+    // All other token subjects retain strict wall-clock expiry.
+    if (
+      row.token.subjectType !== "heartbeat_run" &&
+      row.token.expiresAt &&
+      row.token.expiresAt.getTime() <= Date.now()
+    ) {
       await recordNamedGatewayAuthFailure({
         gatewayId: input.gatewayId,
         gatewayPublicId: input.gatewayPublicId,

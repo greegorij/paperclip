@@ -1,4 +1,5 @@
 import path from "node:path";
+import { assertSafeManagedPathSegment } from "./safe-path-segment.js";
 import { GIT_ARCHIVE_EXCLUDES } from "./git-workspace-sync.js";
 import {
   type SshRemoteExecutionSpec,
@@ -68,6 +69,63 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
+export function buildRemoteRunCleanupCommand(input: {
+  baseWorkspaceRemoteDir: string;
+  workspaceRemoteDir: string;
+  runtimeRootDir: string;
+  adapterKey: string;
+  runId: string;
+  syncWorkspace: boolean;
+}): string {
+  if (
+    !path.posix.isAbsolute(input.baseWorkspaceRemoteDir) ||
+    path.posix.normalize(input.baseWorkspaceRemoteDir) !== input.baseWorkspaceRemoteDir
+  ) {
+    throw new Error("Remote managed-runtime base must be a normalized absolute path");
+  }
+  const expectedTarget = input.syncWorkspace
+    ? path.posix.join(input.baseWorkspaceRemoteDir, ".paperclip-runtime", "runs", input.runId)
+    : path.posix.join(input.baseWorkspaceRemoteDir, ".paperclip-runtime", input.adapterKey, "runs", input.runId);
+  const actualTarget = input.syncWorkspace ? path.posix.dirname(input.workspaceRemoteDir) : input.runtimeRootDir;
+  if (
+    actualTarget !== expectedTarget ||
+    actualTarget === "/" ||
+    actualTarget.includes("/../") ||
+    !actualTarget.endsWith(`/runs/${input.runId}`)
+  ) {
+    throw new Error("Refusing to clean an unowned remote managed-runtime path");
+  }
+  const managedComponents = input.syncWorkspace
+    ? [
+        path.posix.join(input.baseWorkspaceRemoteDir, ".paperclip-runtime"),
+        path.posix.join(input.baseWorkspaceRemoteDir, ".paperclip-runtime", "runs"),
+        actualTarget,
+      ]
+    : [
+        path.posix.join(input.baseWorkspaceRemoteDir, ".paperclip-runtime"),
+        path.posix.join(input.baseWorkspaceRemoteDir, ".paperclip-runtime", input.adapterKey),
+        path.posix.join(input.baseWorkspaceRemoteDir, ".paperclip-runtime", input.adapterKey, "runs"),
+        actualTarget,
+      ];
+  const guards = managedComponents.map((component) =>
+    `if [ -L ${shellQuote(component)} ] || { [ -e ${shellQuote(component)} ] && [ ! -d ${shellQuote(component)} ]; }; then ` +
+      `echo ${shellQuote(`Refusing unsafe managed path: ${component}`)} >&2; exit 73; fi`,
+  );
+  return `${guards.join(" && ")} && rm -rf -- ${shellQuote(actualTarget)}`;
+}
+
+async function cleanupRemoteRun(input: {
+  spec: SshRemoteExecutionSpec;
+  baseWorkspaceRemoteDir: string;
+  workspaceRemoteDir: string;
+  runtimeRootDir: string;
+  adapterKey: string;
+  runId: string;
+  syncWorkspace: boolean;
+}): Promise<void> {
+  await runSshCommand(input.spec, buildRemoteRunCleanupCommand(input));
+}
+
 async function readRemoteFile(spec: SshRemoteExecutionSpec, remotePath: string): Promise<Buffer> {
   const result = await runSshCommand(spec, `base64 < ${shellQuote(remotePath)}`, {
     maxBuffer: 1024 * 1024,
@@ -113,8 +171,30 @@ export async function prepareRemoteManagedRuntime(input: {
   // Upload progress sink. Threaded for the byte-counting transport rewrite; the
   // child task wires it into the workspace/asset transfers.
   onProgress?: RuntimeProgressSink;
+  /** @internal deterministic failure seam for ownership/cleanup tests. */
+  _captureDirectorySnapshot?: typeof captureDirectorySnapshot;
 }): Promise<PreparedRemoteManagedRuntime> {
-  const baseWorkspaceRemoteDir = input.workspaceRemoteDir ?? input.spec.remoteCwd;
+  const adapterKey = assertSafeManagedPathSegment(
+    input.adapterKey,
+    "Remote managed runtime adapterKey",
+  );
+  if (!/^[A-Za-z0-9_-]+$/.test(input.runId)) {
+    throw new Error("Remote managed runtime runId must be a safe path segment");
+  }
+  const rawBaseWorkspaceRemoteDir = input.workspaceRemoteDir ?? input.spec.remoteCwd;
+  if (
+    !path.posix.isAbsolute(rawBaseWorkspaceRemoteDir) ||
+    rawBaseWorkspaceRemoteDir.includes("\0") ||
+    rawBaseWorkspaceRemoteDir.split("/").includes("..")
+  ) {
+    throw new Error("Remote managed runtime cwd must be an absolute path without traversal");
+  }
+  // Canonicalize lexical aliases (notably `/app/`) before the first remote
+  // mutation. Every derived path and cleanup guard uses this exact root.
+  const baseWorkspaceRemoteDir = path.posix.normalize(rawBaseWorkspaceRemoteDir);
+  if (baseWorkspaceRemoteDir === "/") {
+    throw new Error("Remote managed runtime cwd cannot be the filesystem root");
+  }
   const syncWorkspace = input.syncWorkspace !== false;
   const workspaceRemoteDir = syncWorkspace
     ? path.posix.join(
@@ -125,23 +205,61 @@ export async function prepareRemoteManagedRuntime(input: {
         "workspace",
       )
     : baseWorkspaceRemoteDir;
-  const runtimeRootDir = path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
+  const runtimeRootDir = path.posix.join(
+    workspaceRemoteDir,
+    ".paperclip-runtime",
+    adapterKey,
+    "runs",
+    input.runId,
+  );
 
-  const preparedWorkspace = syncWorkspace
-    ? await prepareWorkspaceForSshExecution({
-        spec: input.spec,
-        localDir: input.workspaceLocalDir,
-        remoteDir: workspaceRemoteDir,
-        onProgress: input.onProgress,
-      })
-    : null;
-  const baselineSnapshot = preparedWorkspace
-    ? await captureDirectorySnapshot(input.workspaceLocalDir, {
-        exclude: preparedWorkspace.gitBacked
-          ? [...GIT_ARCHIVE_EXCLUDES, ".paperclip-runtime"]
-          : [".paperclip-runtime"],
-      })
-    : null;
+  let preparedWorkspace: Awaited<ReturnType<typeof prepareWorkspaceForSshExecution>> | null = null;
+  try {
+    preparedWorkspace = syncWorkspace
+      ? await prepareWorkspaceForSshExecution({
+          spec: input.spec,
+          localDir: input.workspaceLocalDir,
+          remoteDir: workspaceRemoteDir,
+          onProgress: input.onProgress,
+        })
+      : null;
+  } catch (error) {
+    await cleanupRemoteRun({
+      spec: input.spec,
+      baseWorkspaceRemoteDir,
+      workspaceRemoteDir,
+      runtimeRootDir,
+      adapterKey,
+      runId: input.runId,
+      syncWorkspace,
+    }).catch((cleanupError) => {
+      console.warn(`[paperclip] Remote run cleanup also failed after workspace preparation failure: ${String(cleanupError)}`);
+    });
+    throw error;
+  }
+  let baselineSnapshot: Awaited<ReturnType<typeof captureDirectorySnapshot>> | null = null;
+  try {
+    baselineSnapshot = preparedWorkspace
+      ? await (input._captureDirectorySnapshot ?? captureDirectorySnapshot)(input.workspaceLocalDir, {
+          exclude: preparedWorkspace.gitBacked
+            ? [...GIT_ARCHIVE_EXCLUDES, ".paperclip-runtime"]
+            : [".paperclip-runtime"],
+        })
+      : null;
+  } catch (error) {
+    await cleanupRemoteRun({
+      spec: input.spec,
+      baseWorkspaceRemoteDir,
+      workspaceRemoteDir,
+      runtimeRootDir,
+      adapterKey,
+      runId: input.runId,
+      syncWorkspace,
+    }).catch((cleanupError) => {
+      console.warn(`[paperclip] Remote run cleanup also failed after snapshot failure: ${String(cleanupError)}`);
+    });
+    throw error;
+  }
 
   const assetDirs: Record<string, string> = {};
   try {
@@ -159,14 +277,28 @@ export async function prepareRemoteManagedRuntime(input: {
       });
     }
   } catch (error) {
-    if (preparedWorkspace && baselineSnapshot) {
-      await restoreWorkspaceFromSshExecution({
+    try {
+      if (preparedWorkspace && baselineSnapshot) {
+        await restoreWorkspaceFromSshExecution({
+          spec: input.spec,
+          localDir: input.workspaceLocalDir,
+          remoteDir: workspaceRemoteDir,
+          baselineSnapshot,
+          restoreGitHistory: preparedWorkspace.gitBacked,
+          onProgress: input.onProgress,
+        });
+      }
+    } finally {
+      await cleanupRemoteRun({
         spec: input.spec,
-        localDir: input.workspaceLocalDir,
-        remoteDir: workspaceRemoteDir,
-        baselineSnapshot,
-        restoreGitHistory: preparedWorkspace.gitBacked,
-        onProgress: input.onProgress,
+        baseWorkspaceRemoteDir,
+        workspaceRemoteDir,
+        runtimeRootDir,
+        adapterKey,
+        runId: input.runId,
+        syncWorkspace,
+      }).catch((cleanupError) => {
+        console.warn(`[paperclip] Remote run cleanup also failed after asset transfer failure: ${String(cleanupError)}`);
       });
     }
     throw error;
@@ -217,22 +349,43 @@ export async function prepareRemoteManagedRuntime(input: {
     assetDirs,
     additionalSourceDirs,
     restoreWorkspace: async (onProgress?: RuntimeProgressSink) => {
-      if (preparedWorkspace && baselineSnapshot) {
-        await restoreWorkspaceFromSshExecution({
-          spec: input.spec,
-          localDir: input.workspaceLocalDir,
-          remoteDir: workspaceRemoteDir,
-          baselineSnapshot,
-          restoreGitHistory: preparedWorkspace.gitBacked,
-          onProgress,
-        });
-      }
-      for (const asset of input.assets ?? []) {
-        if (!asset.restore) continue;
-        await asset.restore({
-          assetDir: path.posix.join(runtimeRootDir, asset.key),
-          readFile: (remotePath) => readRemoteFile(input.spec, remotePath),
-        });
+      let restoreError: unknown = null;
+      try {
+        if (preparedWorkspace && baselineSnapshot) {
+          await restoreWorkspaceFromSshExecution({
+            spec: input.spec,
+            localDir: input.workspaceLocalDir,
+            remoteDir: workspaceRemoteDir,
+            baselineSnapshot,
+            restoreGitHistory: preparedWorkspace.gitBacked,
+            onProgress,
+          });
+        }
+        for (const asset of input.assets ?? []) {
+          if (!asset.restore) continue;
+          await asset.restore({
+            assetDir: path.posix.join(runtimeRootDir, asset.key),
+            readFile: (remotePath) => readRemoteFile(input.spec, remotePath),
+          });
+        }
+      } catch (error) {
+        restoreError = error;
+        throw error;
+      } finally {
+        try {
+          await cleanupRemoteRun({
+            spec: input.spec,
+            baseWorkspaceRemoteDir,
+            workspaceRemoteDir,
+            runtimeRootDir,
+            adapterKey,
+            runId: input.runId,
+            syncWorkspace,
+          });
+        } catch (cleanupError) {
+          if (restoreError === null) throw cleanupError;
+          console.warn(`[paperclip] Remote run cleanup also failed after restore failure: ${String(cleanupError)}`);
+        }
       }
     },
   };

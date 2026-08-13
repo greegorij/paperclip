@@ -266,8 +266,27 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       .then((rows) => rows[0] ?? null);
 
     if (!key) {
-      const claims = verifyLocalAgentJwt(token);
+      // A run may intentionally be unbounded. Verify the signed identity even
+      // after its short wall-clock expiry, then renew authority only while the
+      // exact signed run is still active. This is not a long-lived agent key:
+      // finishing/cancelling the run revokes it at the database boundary.
+      const claims = verifyLocalAgentJwt(token, { allowExpired: true });
       if (!claims) {
+        next();
+        return;
+      }
+
+      const activeRun = await db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(and(
+          eq(heartbeatRuns.id, claims.run_id),
+          eq(heartbeatRuns.companyId, claims.company_id),
+          eq(heartbeatRuns.agentId, claims.sub),
+          eq(heartbeatRuns.status, "running"),
+        ))
+        .then((rows) => rows[0] ?? null);
+      if (!activeRun) {
         next();
         return;
       }

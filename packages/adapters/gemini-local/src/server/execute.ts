@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { buildAgentProcessEnv } from "@paperclipai/adapter-utils/server-utils";
 import type { Dirent } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -94,7 +95,7 @@ function buildGeminiHeadlessEnv(env: Record<string, string>): Record<string, str
 
 function buildGeminiRuntimeEnv(env: Record<string, string>): Record<string, string> {
   return Object.fromEntries(
-    Object.entries(ensurePathInEnv({ ...process.env, ...buildGeminiHeadlessEnv(env) })).filter(
+    Object.entries(ensurePathInEnv(buildAgentProcessEnv(buildGeminiHeadlessEnv(env)))).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
@@ -347,8 +348,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let remoteRuntimeRootDir: string | null = null;
   let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
 
+  try {
   if (executionTargetIsRemote) {
-    try {
       localSkillsDir = await buildGeminiSkillsDir(config);
       await onLog(
         "stdout",
@@ -424,14 +425,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       // Only the managed HOME (the per-run runtime root) is touched: on
       // non-managed remote targets remoteHomeDir is the user's real home, where
       // creating files is out of scope and existing settings remain visible.
-      // Key presence check spans the run env AND the host process env: in the
-      // managed sandbox path the key never enters the adapter's run env -- it
-      // reaches the agent pod via the provider's per-run secret (envKeys
-      // passthrough from the host env), so the host env is the signal here.
-      const hasGeminiApiKey = Boolean(
-        env.GEMINI_API_KEY || env.GOOGLE_API_KEY ||
-        process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
-      );
+      // Authentication must be explicitly resolved into this adapter run.
+      // Host process credentials are intentionally outside the agent boundary.
+      const hasGeminiApiKey = Boolean(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
       if (managedRemoteHomeDir && hasGeminiApiKey) {
         const remoteSettingsPath = path.posix.join(managedRemoteHomeDir, ".gemini", "settings.json");
         const authSettingsJson = JSON.stringify({
@@ -445,30 +441,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           { cwd, env, timeoutSec, graceSec, onLog },
         );
       }
-    } catch (error) {
-      await Promise.allSettled([
-        restoreRemoteWorkspace?.(),
-        localSkillsDir ? fs.rm(path.dirname(localSkillsDir), { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
-      ]);
-      throw error;
-    }
   }
   const runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
-  if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(executionTarget)) {
-    paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
-      runId,
-      target: runtimeExecutionTarget,
-      runtimeRootDir: remoteRuntimeRootDir,
-      adapterKey: "gemini",
-      timeoutSec,
-      hostApiToken: env.PAPERCLIP_API_KEY,
-      onLog,
-    });
-    if (paperclipBridge) {
-      Object.assign(env, paperclipBridge.env);
-    }
-  }
-
   const runtimeSessionParams = parseObject(runtime.sessionParams);
   const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
   const runtimeSessionCwd = asString(runtimeSessionParams.cwd, "");
@@ -732,7 +706,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
-  try {
+    if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(executionTarget)) {
+      paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+        runId, target: runtimeExecutionTarget, runtimeRootDir: remoteRuntimeRootDir,
+        adapterKey: "gemini", timeoutSec, hostApiToken: env.PAPERCLIP_API_KEY, onLog,
+      });
+      if (paperclipBridge) Object.assign(env, paperclipBridge.env);
+    }
     const initial = await runAttempt(sessionId);
     if (
       sessionId &&
@@ -750,10 +730,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     return toResult(initial);
   } finally {
-    await Promise.all([
-      paperclipBridge?.stop(),
-      restoreRemoteWorkspace?.(),
-      localSkillsDir ? fs.rm(path.dirname(localSkillsDir), { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
-    ]);
+    try {
+      await restoreRemoteWorkspace?.();
+    } finally {
+      try {
+        await paperclipBridge?.stop();
+      } finally {
+        if (localSkillsDir) await fs.rm(path.dirname(localSkillsDir), { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
   }
 }

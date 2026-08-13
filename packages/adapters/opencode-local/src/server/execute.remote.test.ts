@@ -12,6 +12,7 @@ const {
   runSshCommand,
   syncDirectoryToSsh,
   startAdapterExecutionTargetPaperclipBridge,
+  stopPaperclipBridge,
 } = vi.hoisted(() => ({
   runChildProcess: vi.fn(async (_runId: string, _command: string, args: string[]) => {
     if (args.includes("models")) {
@@ -53,13 +54,14 @@ const {
     exitCode: 0,
   })),
   syncDirectoryToSsh: vi.fn(async () => undefined),
+  stopPaperclipBridge: vi.fn(async () => undefined),
   startAdapterExecutionTargetPaperclipBridge: vi.fn(async () => ({
     env: {
       PAPERCLIP_API_URL: "http://127.0.0.1:4310",
       PAPERCLIP_API_KEY: "bridge-token",
       PAPERCLIP_API_BRIDGE_MODE: "queue_v1",
     },
-    stop: async () => {},
+    stop: stopPaperclipBridge,
   })),
 }));
 
@@ -122,7 +124,7 @@ describe("opencode remote execution", () => {
     }
   });
 
-  it("prepares the workspace, syncs OpenCode skills, and restores workspace changes for remote SSH execution", async () => {
+  it("stages runtime MCP config with permission overrides disabled and restores remote SSH workspace", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-remote-"));
     cleanupDirs.push(rootDir);
     const workspaceDir = path.join(rootDir, "workspace");
@@ -149,6 +151,15 @@ describe("opencode remote execution", () => {
       config: {
         command: "opencode",
         model: "opencode/gpt-5-nano",
+        dangerouslySkipPermissions: false,
+      },
+      runtimeMcp: {
+        getServers: () => [{
+          name: "Paperclip",
+          url: "http://127.0.0.1:3100/api/mcp",
+          token: "run-jwt",
+          connectionId: "paperclip-control-plane",
+        }],
       },
       context: {
         paperclipWorkspace: {
@@ -199,10 +210,10 @@ describe("opencode remote execution", () => {
     expect(prepareWorkspaceForSshExecution).toHaveBeenCalledTimes(1);
     expect(syncDirectoryToSsh).toHaveBeenCalledTimes(2);
     expect(syncDirectoryToSsh).toHaveBeenCalledWith(expect.objectContaining({
-      remoteDir: `${managedRemoteWorkspace}/.paperclip-runtime/opencode/xdgConfig`,
+      remoteDir: `${managedRemoteWorkspace}/.paperclip-runtime/opencode/runs/run-1/xdgConfig`,
     }));
     expect(syncDirectoryToSsh).toHaveBeenCalledWith(expect.objectContaining({
-      remoteDir: `${managedRemoteWorkspace}/.paperclip-runtime/opencode/skills`,
+      remoteDir: `${managedRemoteWorkspace}/.paperclip-runtime/opencode/runs/run-1/skills`,
       followSymlinks: true,
     }));
     expect(runSshCommand).toHaveBeenCalledWith(
@@ -222,7 +233,7 @@ describe("opencode remote execution", () => {
     // original target remoteCwd — the per-run subdirectory is layered
     // underneath via XDG/runtime config rather than by switching the cwd.
     expect(modelProbeCall?.[3].env.XDG_CONFIG_HOME).toBe(
-      `${managedRemoteWorkspace}/.paperclip-runtime/opencode/xdgConfig`,
+      `${managedRemoteWorkspace}/.paperclip-runtime/opencode/runs/run-1/xdgConfig`,
     );
     expect(modelProbeCall?.[3].remoteExecution?.remoteCwd).toBe("/remote/workspace");
     const call = runCall as
@@ -244,10 +255,25 @@ describe("opencode remote execution", () => {
     ]);
     expect(call?.[3].env.PAPERCLIP_API_URL).toBe("http://127.0.0.1:4310");
     expect(call?.[3].env.PAPERCLIP_API_BRIDGE_MODE).toBe("queue_v1");
-    expect(call?.[3].env.XDG_CONFIG_HOME).toBe(`${managedRemoteWorkspace}/.paperclip-runtime/opencode/xdgConfig`);
+    expect(call?.[3].env.XDG_CONFIG_HOME).toBe(`${managedRemoteWorkspace}/.paperclip-runtime/opencode/runs/run-1/xdgConfig`);
     expect(call?.[3].remoteExecution?.remoteCwd).toBe(managedRemoteWorkspace);
     expect(startAdapterExecutionTargetPaperclipBridge).toHaveBeenCalledTimes(1);
+    expect(startAdapterExecutionTargetPaperclipBridge).toHaveBeenCalledWith(expect.objectContaining({
+      upstreamMcpServers: [expect.objectContaining({ url: "http://127.0.0.1:3100/api/mcp", token: "run-jwt" })],
+    }));
     expect(restoreWorkspaceFromSshExecution).toHaveBeenCalledTimes(1);
+    expect(stopPaperclipBridge).toHaveBeenCalledTimes(1);
+    expect(restoreWorkspaceFromSshExecution.mock.invocationCallOrder[0]).toBeLessThan(
+      stopPaperclipBridge.mock.invocationCallOrder[0]!,
+    );
+    const sshCommands = (runSshCommand.mock.calls as unknown as Array<[unknown, string, unknown]>)
+      .map(([, command]) => command);
+    expect(sshCommands.some((command) =>
+      command.includes("chmod 600 --") && command.includes("opencode.json")
+    )).toBe(true);
+    expect(sshCommands.some((command) =>
+      command.includes("rm -rf --") && command.includes("/runs/run-1")
+    )).toBe(true);
   });
 
   it("fails before the remote run when the configured model is unavailable on the SSH target", async () => {
@@ -310,7 +336,8 @@ describe("opencode remote execution", () => {
 
     expect(runChildProcess).toHaveBeenCalledTimes(1);
     expect((runChildProcess.mock.calls[0]?.[2] as string[] | undefined) ?? []).toEqual(["models"]);
-    expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
+    expect(startAdapterExecutionTargetPaperclipBridge).toHaveBeenCalledTimes(1);
+    expect(stopPaperclipBridge).toHaveBeenCalledTimes(1);
   });
 
   it("resumes saved OpenCode sessions for remote SSH execution only when the identity matches", async () => {

@@ -135,6 +135,7 @@ export interface PreparedAdapterExecutionTargetRuntime {
    */
   additionalSourceFailures: AdditionalSourceStagingFailure[];
   restoreWorkspace(onProgress?: RuntimeProgressSink): Promise<void>;
+  disposeRuntime(): Promise<void>;
 }
 
 export interface AdapterExecutionTargetProcessOptions {
@@ -181,6 +182,76 @@ export interface AdapterExecutionTargetPaperclipBridgeHandle {
    */
   runLogTail?: SandboxRunLogTailFactory | null;
   stop(): Promise<void>;
+}
+
+export function rewritePaperclipRuntimeMcpServersForBridge<T extends { url: string; token: string }>(
+  servers: T[],
+  bridge: AdapterExecutionTargetPaperclipBridgeHandle | null,
+): T[] {
+  const bridgeApiUrl = bridge?.env.PAPERCLIP_API_URL?.trim();
+  const bridgeToken = bridge?.env.PAPERCLIP_API_KEY?.trim();
+  if (!bridgeApiUrl || !bridgeToken) return servers;
+  const base = bridgeApiUrl.replace(/\/+$/, "");
+  return servers.map((server) => {
+    const parsed = new URL(server.url);
+    return {
+      ...server,
+      url: `${base}${parsed.pathname}${parsed.search}`,
+      token: bridgeToken,
+    };
+  });
+}
+
+export function resolvePaperclipBridgeUpstreamToken(
+  requestPathAndQuery: string,
+  servers: Array<{ url: string; token: string }>,
+  fallbackToken: string,
+): string {
+  for (const server of servers) {
+    const parsed = new URL(server.url);
+    if (`${parsed.pathname}${parsed.search}` === requestPathAndQuery) return server.token;
+  }
+  return fallbackToken;
+}
+
+export function resolvePaperclipBridgeRuntimeDir(input: {
+  remoteCwd: string;
+  adapterKey: string;
+  runId: string;
+  runtimeRootDir?: string | null;
+}): string {
+  const run = input.runId.trim();
+  const adapter = input.adapterKey.trim();
+  if (!/^[A-Za-z0-9_-]+$/.test(run) || !/^[A-Za-z0-9_-]+$/.test(adapter)) {
+    throw new Error("Paperclip bridge adapterKey and runId must be safe path segments.");
+  }
+  const base = input.runtimeRootDir?.trim() || path.posix.join(input.remoteCwd, ".paperclip-runtime", adapter);
+  if (!base || base.includes("\0")) throw new Error("Refusing unsafe Paperclip bridge runtime directory.");
+  const normalizedBase = path.posix.normalize(base);
+  const runRoot = normalizedBase.endsWith(`/runs/${run}`)
+    ? normalizedBase
+    : path.posix.join(normalizedBase, "runs", run);
+  return path.posix.join(runRoot, "paperclip-bridge");
+}
+
+export function buildPaperclipBridgeCleanupCommand(
+  bridgeRuntimeDir: string,
+  options: { removeOwnedRunRoot?: boolean } = {},
+): string {
+  const normalized = path.posix.normalize(bridgeRuntimeDir);
+  const match = normalized.match(/^(.*\/\.paperclip-runtime\/[A-Za-z0-9_-]+\/runs\/[A-Za-z0-9_-]+)\/paperclip-bridge$/);
+  if (!match || normalized !== bridgeRuntimeDir) {
+    throw new Error("Refusing broad Paperclip bridge cleanup target.");
+  }
+  if (!options.removeOwnedRunRoot) return `rm -rf -- ${shellQuote(normalized)}`;
+  const runRoot = match[1]!;
+  const managedRoot = runRoot.slice(0, runRoot.indexOf("/.paperclip-runtime/") + "/.paperclip-runtime".length);
+  const components = [managedRoot, path.posix.dirname(path.posix.dirname(runRoot)), path.posix.dirname(runRoot), runRoot];
+  const guards = components.map((component) =>
+    `if [ -L ${shellQuote(component)} ] || { [ -e ${shellQuote(component)} ] && [ ! -d ${shellQuote(component)} ]; }; then ` +
+      `echo ${shellQuote(`Refusing unsafe managed path: ${component}`)} >&2; exit 73; fi`,
+  );
+  return `${guards.join(" && ")} && rm -rf -- ${shellQuote(runRoot)}`;
 }
 
 export interface AdapterExecutionTargetProcessSessionBridgeHandle {
@@ -1197,6 +1268,8 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
   syncWorkspace?: boolean;
   workspaceExclude?: string[];
   preserveAbsentOnRestore?: string[];
+  /** ACP warm-resume owns disposal separately from per-run restore. */
+  retainRuntimeAfterRestore?: boolean;
   assets?: AdapterManagedRuntimeAsset[];
   /** Referenced (additional) projects to stage into the sandbox as plain, read-only trees. */
   additionalSources?: SandboxAdditionalSource[];
@@ -1220,6 +1293,7 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
       additionalSourceDirs: {},
       additionalSourceFailures: [],
       restoreWorkspace: async () => {},
+      disposeRuntime: async () => {},
     };
   }
 
@@ -1245,11 +1319,13 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
       // reports a per-project staging failure.
       additionalSourceFailures: [],
       restoreWorkspace: prepared.restoreWorkspace,
+      disposeRuntime: async () => {},
     };
   }
 
   const prepared = await prepareCommandManagedRuntime({
     runner: requireSandboxRunner(target),
+    runId: input.runId,
     spec: {
       providerKey: target.providerKey,
       shellCommand: target.shellCommand,
@@ -1280,7 +1356,25 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
     assetDirs: prepared.assetDirs,
     additionalSourceDirs: prepared.additionalSourceDirs,
     additionalSourceFailures: prepared.additionalSourceFailures,
-    restoreWorkspace: prepared.restoreWorkspace,
+    restoreWorkspace: input.retainRuntimeAfterRestore
+      ? prepared.restoreWorkspace
+      : async (onProgress) => {
+          let primaryError: unknown = null;
+          try {
+            await prepared.restoreWorkspace(onProgress);
+          } catch (error) {
+            primaryError = error;
+            throw error;
+          } finally {
+            try {
+              await prepared.disposeRuntime();
+            } catch (cleanupError) {
+              if (primaryError === null) throw cleanupError;
+              console.warn(`[paperclip] Sandbox runtime cleanup also failed after restore failure: ${String(cleanupError)}`);
+            }
+          }
+        },
+    disposeRuntime: prepared.disposeRuntime,
   };
 }
 
@@ -1749,9 +1843,11 @@ function writeEvent(event) {
   return write;
 }
 
+const inheritedKeys = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "TMPDIR", "TMP", "TEMP", "LANG", "LANGUAGE", "TERM", "COLORTERM", "NO_COLOR", "FORCE_COLOR", "CI", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR"]);
+const inheritedEnv = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => typeof value === "string" && (inheritedKeys.has(key.toUpperCase()) || key.toUpperCase().startsWith("LC_"))));
 const child = spawn(config.command, Array.isArray(config.args) ? config.args : [], {
   cwd: config.cwd || process.cwd(),
-  env: { ...process.env, ...(config.env || {}) },
+  env: { ...inheritedEnv, ...(config.env || {}) },
   stdio: ["pipe", "pipe", "pipe"],
 });
 
@@ -1795,6 +1891,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
   timeoutSec?: number | null;
   hostApiToken: string | null | undefined;
   hostApiUrl?: string | null;
+  upstreamMcpServers?: Array<{ url: string; token: string }>;
   onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
   maxBodyBytes?: number | null;
 }): Promise<AdapterExecutionTargetPaperclipBridgeHandle | null> {
@@ -1811,12 +1908,13 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
   if (hostApiToken.length === 0) {
     throw new Error("Sandbox bridge mode requires a host-side Paperclip API token.");
   }
-
-  const runtimeRootDir =
-    input.runtimeRootDir?.trim().length
-      ? input.runtimeRootDir.trim()
-      : path.posix.join(target.remoteCwd, ".paperclip-runtime", input.adapterKey);
-  const bridgeRuntimeDir = path.posix.join(runtimeRootDir, "paperclip-bridge");
+  const bridgeRuntimeDir = resolvePaperclipBridgeRuntimeDir({
+    remoteCwd: target.remoteCwd,
+    adapterKey: input.adapterKey,
+    runId: input.runId,
+    runtimeRootDir: input.runtimeRootDir,
+  });
+  const bridgeOwnsRunRoot = !input.runtimeRootDir?.trim();
   const queueDir = path.posix.join(bridgeRuntimeDir, "queue");
   const assetRemoteDir = path.posix.join(bridgeRuntimeDir, "server");
   const bridgeToken = createSandboxCallbackBridgeToken();
@@ -1875,7 +1973,14 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
           if (value.trim().length === 0) continue;
           headers.set(key, value);
         }
-        headers.set("authorization", `Bearer ${hostApiToken}`);
+        headers.set(
+          "authorization",
+          `Bearer ${resolvePaperclipBridgeUpstreamToken(
+            `${request.path}${request.query ? `?${request.query}` : ""}`,
+            input.upstreamMcpServers ?? [],
+            hostApiToken,
+          )}`,
+        );
         headers.set("x-paperclip-run-id", input.runId);
         const response = await fetch(buildBridgeForwardUrl(hostApiUrl, request), {
           method,
@@ -1913,6 +2018,12 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       worker?.stop(),
       bridgeAsset.cleanup(),
     ]);
+    await runner.execute({
+      command: "sh",
+      args: ["-lc", buildPaperclipBridgeCleanupCommand(bridgeRuntimeDir, { removeOwnedRunRoot: bridgeOwnsRunRoot })],
+      cwd: target.remoteCwd,
+      timeoutMs: bridgeTimeoutMs ?? undefined,
+    }).catch(() => undefined);
     throw error;
   }
 
@@ -1943,6 +2054,12 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
         worker?.stop(),
         bridgeAsset.cleanup(),
       ]);
+      await runner.execute({
+        command: "sh",
+        args: ["-lc", buildPaperclipBridgeCleanupCommand(bridgeRuntimeDir, { removeOwnedRunRoot: bridgeOwnsRunRoot })],
+        cwd: target.remoteCwd,
+        timeoutMs: bridgeTimeoutMs ?? undefined,
+      }).catch(() => undefined);
     },
   };
 }

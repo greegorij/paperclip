@@ -1,8 +1,10 @@
 import fs from "node:fs/promises";
+import { buildAgentProcessEnv } from "@paperclipai/adapter-utils/server-utils";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
+import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 import {
   adapterExecutionTargetIsRemote,
   adapterExecutionTargetRemoteCwd,
@@ -21,6 +23,7 @@ import {
   resolveAdapterExecutionTargetCommandForLogs,
   runAdapterExecutionTargetProcess,
   runAdapterExecutionTargetShellCommand,
+  rewritePaperclipRuntimeMcpServersForBridge,
   startAdapterExecutionTargetPaperclipBridge,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
@@ -307,15 +310,45 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }
-  const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({ env, config });
+  let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
+  let runtimeMcpServers = ctx.runtimeMcp?.getServers() ?? [];
+  if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(executionTarget)) {
+    paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+      runId,
+      target: executionTarget,
+      runtimeRootDir: null,
+      adapterKey: "opencode",
+      timeoutSec: asNumber(config.timeoutSec, 0),
+      hostApiToken: env.PAPERCLIP_API_KEY,
+      upstreamMcpServers: runtimeMcpServers,
+      onLog,
+    });
+    runtimeMcpServers = rewritePaperclipRuntimeMcpServersForBridge(runtimeMcpServers, paperclipBridge);
+    if (paperclipBridge) Object.assign(env, paperclipBridge.env);
+  }
+  let preparedRuntimeConfig: Awaited<ReturnType<typeof prepareOpenCodeRuntimeConfig>>;
+  try {
+    preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({
+      env,
+      config,
+      runtimeMcpServers,
+    });
+  } catch (error) {
+    await paperclipBridge?.stop();
+    throw error;
+  }
   if (!executionTargetIsRemote) {
     preparedRuntimeConfig.env.HOME = localSkillHome.homeDir;
   }
-  const localRuntimeConfigHome =
-    preparedRuntimeConfig.notes.length > 0 ? preparedRuntimeConfig.env.XDG_CONFIG_HOME : "";
+  const localRuntimeConfigHome = preparedRuntimeConfig.createdRuntimeConfig
+    ? preparedRuntimeConfig.env.XDG_CONFIG_HOME
+    : "";
+  let restoreRemoteWorkspace: (() => Promise<void>) | null = null;
+  let localSkillsDir: string | null = null;
+  let remoteRuntimeRootDir: string | null = null;
   try {
     const runtimeEnv = Object.fromEntries(
-      Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
+      Object.entries(ensurePathInEnv(buildAgentProcessEnv(preparedRuntimeConfig.env))).filter(
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
@@ -359,11 +392,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       if (fromExtraArgs.length > 0) return fromExtraArgs;
       return asStringArray(config.args);
     })();
-    let restoreRemoteWorkspace: (() => Promise<void>) | null = null;
-    let localSkillsDir: string | null = null;
-    let remoteRuntimeRootDir: string | null = null;
-    let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
-
     if (executionTarget?.kind === "remote") {
       localSkillsDir = await buildOpenCodeSkillsDir(config);
       await onLog(
@@ -417,6 +445,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
       if (localRuntimeConfigHome && preparedExecutionTargetRuntime.assetDirs.xdgConfig) {
         preparedRuntimeConfig.env.XDG_CONFIG_HOME = preparedExecutionTargetRuntime.assetDirs.xdgConfig;
+        const remoteConfigPath = path.posix.join(
+          preparedExecutionTargetRuntime.assetDirs.xdgConfig,
+          "opencode",
+          "opencode.json",
+        );
+        await runAdapterExecutionTargetShellCommand(
+          runId,
+          executionTarget,
+          `chmod 600 -- ${shellQuote(remoteConfigPath)}`,
+          { cwd, env: preparedRuntimeConfig.env, timeoutSec, graceSec, onLog },
+        );
       }
       const remoteHomeDir = managedHome && preparedExecutionTargetRuntime.runtimeRootDir
         ? preparedExecutionTargetRuntime.runtimeRootDir
@@ -449,20 +488,21 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     const runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
     if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
-      paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+      paperclipBridge ??= await startAdapterExecutionTargetPaperclipBridge({
         runId,
         target: runtimeExecutionTarget,
         runtimeRootDir: remoteRuntimeRootDir,
         adapterKey: "opencode",
         timeoutSec,
         hostApiToken: preparedRuntimeConfig.env.PAPERCLIP_API_KEY,
+        upstreamMcpServers: ctx.runtimeMcp?.getServers() ?? [],
         onLog,
       });
       if (paperclipBridge) {
         Object.assign(preparedRuntimeConfig.env, paperclipBridge.env);
         loggedEnv = buildInvocationEnvForLogs(preparedRuntimeConfig.env, {
           runtimeEnv: Object.fromEntries(
-            Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
+            Object.entries(ensurePathInEnv(buildAgentProcessEnv(preparedRuntimeConfig.env))).filter(
               (entry): entry is [string, string] => typeof entry[1] === "string",
             ),
           ),
@@ -691,8 +731,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       };
     };
 
-    try {
-      const initial = await runAttempt(sessionId);
+    const initial = await runAttempt(sessionId);
       const initialFailed =
         !initial.proc.timedOut && ((initial.proc.exitCode ?? 0) !== 0 || Boolean(initial.parsed.errorMessage));
       if (
@@ -708,15 +747,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         return toResult(retry, true);
       }
 
-      return toResult(initial);
-    } finally {
-      await Promise.all([
-        paperclipBridge?.stop(),
-        restoreRemoteWorkspace?.(),
-        localSkillsDir ? fs.rm(path.dirname(localSkillsDir), { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
-      ]);
-    }
+    return toResult(initial);
   } finally {
-    await preparedRuntimeConfig.cleanup();
+    try {
+      await restoreRemoteWorkspace?.();
+    } finally {
+      try {
+        await paperclipBridge?.stop();
+      } finally {
+        await Promise.all([
+          localSkillsDir ? fs.rm(path.dirname(localSkillsDir), { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
+          preparedRuntimeConfig.cleanup(),
+        ]);
+      }
+    }
   }
 }

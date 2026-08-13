@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
+import { buildRemotePrivateStoreProvision } from "@paperclipai/adapter-utils/remote-private-store";
 import type { SandboxManagedRuntimeAssetProvision } from "@paperclipai/adapter-utils/sandbox-managed-runtime";
 
 // Codex-specific inbound auth-merge assets. These live alongside the Codex
@@ -36,14 +37,33 @@ const CODEX_AUTH_MERGE_DECISION_SCRIPT_BYTES = readFileSync(
  * interpolated into the shell (C5). This is behaviour-identical to the extraction
  * the sandbox core previously drove through the custom-provision tar path.
  */
-export function buildCodexAuthInboundProvision(): SandboxManagedRuntimeAssetProvision {
+export function buildCodexAuthInboundProvision(
+  persistentSessionsDir?: string,
+  persistentSessionsRemoteCwd?: string,
+): SandboxManagedRuntimeAssetProvision {
   return {
     stageFiles: [
       { name: CODEX_AUTH_MERGE_EXTRACT_SCRIPT_NAME, contents: CODEX_AUTH_MERGE_EXTRACT_SCRIPT_BYTES },
       { name: CODEX_AUTH_MERGE_DECISION_SCRIPT_NAME, contents: CODEX_AUTH_MERGE_DECISION_SCRIPT_BYTES },
     ],
-    postUploadCommand: ({ assetTarPath, assetDir, runtimeRootDir }) =>
-      `sh ${shellQuote(path.posix.join(runtimeRootDir, CODEX_AUTH_MERGE_EXTRACT_SCRIPT_NAME))} ` +
-      `${shellQuote(assetDir)} ${shellQuote(assetTarPath)}`,
+    postUploadCommand: ({ assetTarPath, assetDir, runtimeRootDir }) => {
+      const mergeAuth =
+        `sh ${shellQuote(path.posix.join(runtimeRootDir, CODEX_AUTH_MERGE_EXTRACT_SCRIPT_NAME))} ` +
+        `${shellQuote(assetDir)} ${shellQuote(assetTarPath)}`;
+      if (!persistentSessionsDir) return mergeAuth;
+      if (!persistentSessionsRemoteCwd) throw new Error("Codex persistent session store requires its remote cwd anchor");
+      const stagedSessions = path.posix.join(assetDir, "sessions");
+      return [
+        mergeAuth,
+        buildRemotePrivateStoreProvision({
+          remoteCwd: persistentSessionsRemoteCwd,
+          adapterKey: "codex",
+          storeDir: persistentSessionsDir,
+        }),
+        `if [ -d ${shellQuote(stagedSessions)} ] && [ ! -L ${shellQuote(stagedSessions)} ]; then cp -R ${shellQuote(`${stagedSessions}/.`)} ${shellQuote(persistentSessionsDir)}; fi`,
+        `rm -rf -- ${shellQuote(stagedSessions)}`,
+        `ln -s ${shellQuote(persistentSessionsDir)} ${shellQuote(stagedSessions)}`,
+      ].join(" && ");
+    },
   };
 }

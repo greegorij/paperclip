@@ -2,12 +2,61 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { asBoolean } from "@paperclipai/adapter-utils/server-utils";
+import type { AdapterRuntimeMcpServer } from "@paperclipai/adapter-utils";
 
 type PreparedOpenCodeRuntimeConfig = {
   env: Record<string, string>;
   notes: string[];
+  createdRuntimeConfig: boolean;
   cleanup: () => Promise<void>;
 };
+const OPENCODE_CONFIG_PREFIX = "paperclip-opencode-config-";
+const OPENCODE_OWNER_MARKER = ".paperclip-opencode-runtime";
+let opencodeSweepCursor = 0;
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+export async function sweepAbandonedOpenCodeRuntimeConfigs(input: {
+  tmpDir?: string;
+  onWarning?: (message: string) => void;
+} = {}): Promise<void> {
+  const tmpDir = input.tmpDir ?? os.tmpdir();
+  let names: string[];
+  try {
+    names = (await fs.readdir(tmpDir)).filter((name) => name.startsWith(OPENCODE_CONFIG_PREFIX)).sort();
+  } catch (error) {
+    input.onWarning?.(`Could not scan abandoned OpenCode runtime configs: ${String(error)}`);
+    return;
+  }
+  if (!names.length) return;
+  const start = opencodeSweepCursor % names.length;
+  const batch = Array.from({ length: Math.min(128, names.length) }, (_, i) => names[(start + i) % names.length]!);
+  opencodeSweepCursor = (start + batch.length) % names.length;
+  for (const name of batch) {
+    const dir = path.join(tmpDir, name);
+    try {
+      const stat = await fs.lstat(dir);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
+      const markerPath = path.join(dir, OPENCODE_OWNER_MARKER);
+      const markerStat = await fs.lstat(markerPath);
+      if (!markerStat.isFile() || markerStat.isSymbolicLink()) continue;
+      const marker = JSON.parse(await fs.readFile(markerPath, "utf8")) as { owner?: unknown; pid?: unknown };
+      if (marker.owner !== "paperclip-opencode-runtime" || typeof marker.pid !== "number") continue;
+      if (processIsAlive(marker.pid)) continue;
+      await fs.rm(dir, { recursive: true, force: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      input.onWarning?.(`Could not remove abandoned OpenCode runtime config ${dir}: ${String(error)}`);
+    }
+  }
+}
 
 function resolveXdgConfigHome(env: Record<string, string>): string {
   return (
@@ -106,12 +155,14 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   env: Record<string, string>;
   config: Record<string, unknown>;
   targetIsRemote?: boolean;
+  runtimeMcpServers?: AdapterRuntimeMcpServer[];
 }): Promise<PreparedOpenCodeRuntimeConfig> {
   const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
-  if (!skipPermissions) {
+  if (!skipPermissions && !input.runtimeMcpServers?.length) {
     return {
       env: input.env,
       notes: [],
+      createdRuntimeConfig: false,
       cleanup: async () => {},
     };
   }
@@ -125,12 +176,20 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     return {
       env: input.env,
       notes: [],
+      createdRuntimeConfig: false,
       cleanup: async () => {},
     };
   }
 
   const sourceConfigDir = path.join(resolveXdgConfigHome(input.env), "opencode");
-  const runtimeConfigHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-config-"));
+  await sweepAbandonedOpenCodeRuntimeConfigs();
+  const runtimeConfigHome = await fs.mkdtemp(path.join(os.tmpdir(), OPENCODE_CONFIG_PREFIX));
+  try {
+  await fs.writeFile(path.join(runtimeConfigHome, OPENCODE_OWNER_MARKER), JSON.stringify({
+    owner: "paperclip-opencode-runtime",
+    pid: process.pid,
+    createdAt: new Date().toISOString(),
+  }), { mode: 0o600 });
   const runtimeConfigDir = path.join(runtimeConfigHome, "opencode");
   const runtimeConfigPath = path.join(runtimeConfigDir, "opencode.json");
 
@@ -152,9 +211,9 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   const existingPermission = isPlainObject(existingConfig.permission)
     ? existingConfig.permission
     : {};
-  const notes = [
-    "Injected runtime OpenCode config with permission.external_directory=allow to avoid headless approval prompts.",
-  ];
+  const notes = skipPermissions
+    ? ["Injected runtime OpenCode config with permission.external_directory=allow to avoid headless approval prompts."]
+    : [];
 
   // Merge gateway/custom provider definitions supplied via PAPERCLIP_OPENCODE_PROVIDERS
   // (a JSON object in OpenCode's `provider` shape). OpenCode resolves a `--model
@@ -163,9 +222,9 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   // gateway model (e.g. an EU LLM gateway exposing OpenAI-compatible /v1) requires a
   // custom provider with an explicit models map. We accept it as config (not
   // hard-coded) so the gateway URL, key env, and model list stay declarative.
-  const resolveEnv = (name: string): string | undefined => input.env[name] ?? process.env[name];
+  const resolveEnv = (name: string): string | undefined => input.env[name];
   const gatewayProviders = parseProviderConfig(
-    input.env.PAPERCLIP_OPENCODE_PROVIDERS ?? process.env.PAPERCLIP_OPENCODE_PROVIDERS,
+    input.env.PAPERCLIP_OPENCODE_PROVIDERS,
     resolveEnv,
     notes,
   );
@@ -207,10 +266,22 @@ export async function prepareOpenCodeRuntimeConfig(input: {
 
   const nextConfig: Record<string, unknown> = {
     ...existingConfig,
-    permission: {
-      ...existingPermission,
-      external_directory: "allow",
-    },
+    ...(input.runtimeMcpServers?.length ? {
+      mcp: {
+        ...(isPlainObject(existingConfig.mcp) ? existingConfig.mcp : {}),
+        ...Object.fromEntries(input.runtimeMcpServers.map((server) => [server.name, {
+          type: "remote",
+          url: server.url,
+          headers: { Authorization: `Bearer ${server.token}` },
+        }])),
+      },
+    } : {}),
+    ...(skipPermissions ? {
+      permission: {
+        ...existingPermission,
+        external_directory: "allow",
+      },
+    } : {}),
   };
   if (Object.keys(nextProvider).length > 0) {
     nextConfig.provider = nextProvider;
@@ -222,12 +293,13 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   // for the anthropic provider); when that provider is repointed at a gateway that
   // does not serve that exact model, the title-gen call fails and aborts the run.
   // Setting small_model to a gateway-served model keeps every call on supported models.
-  const smallModel = (input.env.PAPERCLIP_OPENCODE_SMALL_MODEL ?? process.env.PAPERCLIP_OPENCODE_SMALL_MODEL)?.trim();
+  const smallModel = input.env.PAPERCLIP_OPENCODE_SMALL_MODEL?.trim();
   if (smallModel) {
     nextConfig.small_model = smallModel;
     notes.push(`Pinned OpenCode small_model to ${smallModel}.`);
   }
-  await fs.writeFile(runtimeConfigPath, `${JSON.stringify(nextConfig, null, 2)}\n`, "utf8");
+  await fs.writeFile(runtimeConfigPath, `${JSON.stringify(nextConfig, null, 2)}\n`, { mode: 0o600 });
+  await fs.chmod(runtimeConfigPath, 0o600);
 
   return {
     env: {
@@ -235,8 +307,13 @@ export async function prepareOpenCodeRuntimeConfig(input: {
       XDG_CONFIG_HOME: runtimeConfigHome,
     },
     notes,
+    createdRuntimeConfig: true,
     cleanup: async () => {
       await fs.rm(runtimeConfigHome, { recursive: true, force: true });
     },
   };
+  } catch (error) {
+    await fs.rm(runtimeConfigHome, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
 }

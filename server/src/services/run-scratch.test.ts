@@ -150,7 +150,7 @@ describe("heartbeat run browser runtime env", () => {
     const env = buildHeartbeatRunScratchEnv({}, scratch).env;
     expect(env.XDG_RUNTIME_DIR).toBe(scratch.runtimeDir);
     expect(env.AGENT_BROWSER_SESSION).toBe(buildHeartbeatRunBrowserSession("run-abc-123"));
-    expect(env.AGENT_BROWSER_SESSION).toBe("paperclip-run-abc-123");
+    expect(env.AGENT_BROWSER_SESSION).toBe("pc-run-abc-123");
   });
 
   it("keeps XDG_RUNTIME_DIR and AGENT_BROWSER_SESSION identical across two child processes of one run", async () => {
@@ -181,7 +181,7 @@ describe("heartbeat run browser runtime env", () => {
     expect(JSON.parse(first.stdout)).toEqual(JSON.parse(second.stdout));
     expect(JSON.parse(first.stdout)).toEqual({
       xdg: scratch.runtimeDir,
-      session: "paperclip-run-shared-session",
+      session: "pc-run-shared-sessio",
       scratch: scratch.dir,
     });
   });
@@ -224,7 +224,7 @@ describe("heartbeat run browser runtime env", () => {
     );
 
     expect(result.env.XDG_RUNTIME_DIR).toBe(scratch.runtimeDir);
-    expect(result.env.AGENT_BROWSER_SESSION).toBe("paperclip-run-override");
+    expect(result.env.AGENT_BROWSER_SESSION).toBe("pc-run-override");
   });
 
   it("fails closed before returning env when local scratch cannot be prepared", async () => {

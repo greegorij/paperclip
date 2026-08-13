@@ -18,6 +18,7 @@ import { promisify } from "node:util";
 import { HERMES_CLI, DEFAULT_MODEL, ADAPTER_TYPE, VALID_PROVIDERS } from "../shared/constants.js";
 import { detectModel, resolveProvider, inferProviderFromModel } from "./detect-model.js";
 import { resolveHermesCommand } from "./execute.js";
+import { buildAgentProcessEnv } from "@paperclipai/adapter-utils/server-utils";
 
 const execFileAsync = promisify(execFile);
 
@@ -34,7 +35,7 @@ async function checkCliInstalled(
 ): Promise<AdapterEnvironmentCheck | null> {
   try {
     // Try to run the command to see if it exists
-    await execFileAsync(command, ["--version"], { timeout: 10_000 });
+    await execFileAsync(command, ["--version"], { timeout: 10_000, env: buildAgentProcessEnv() });
     return null; // OK — it ran successfully
   } catch (err: unknown) {
     const e = err as NodeJS.ErrnoException;
@@ -58,6 +59,7 @@ async function checkCliVersion(
   try {
     const { stdout } = await execFileAsync(command, ["--version"], {
       timeout: 10_000,
+      env: buildAgentProcessEnv(),
     });
     const version = stdout.trim();
     if (version) {
@@ -87,6 +89,7 @@ async function checkPython(): Promise<AdapterEnvironmentCheck | null> {
   try {
     const { stdout } = await execFileAsync("python3", ["--version"], {
       timeout: 5_000,
+      env: buildAgentProcessEnv(),
     });
     const version = stdout.trim();
     const match = version.match(/(\d+)\.(\d+)/);
@@ -137,8 +140,9 @@ async function checkApiKeys(
   detectedConfig: Awaited<ReturnType<typeof detectModel>> | null,
 ): Promise<AdapterEnvironmentCheck | null> {
   // The server resolves secret refs into config.env before calling testEnvironment,
-  // so we check config.env first (adapter-configured secrets), then fall back to
-  // process.env (server/host environment), then ~/.hermes/.env (Hermes local config).
+  // so we check config.env first (adapter-configured secrets), then
+  // ~/.hermes/.env (Hermes-owned local config). Server process credentials are
+  // intentionally excluded because execute() does not inherit them.
   const envConfig = (config.env ?? {}) as Record<string, unknown>;
   const resolvedEnv: Record<string, string> = {};
   for (const [key, value] of Object.entries(envConfig)) {
@@ -168,8 +172,7 @@ async function checkApiKeys(
     // ~/.hermes/.env may not exist — that's fine
   }
 
-  const has = (key: string): boolean =>
-    !!(resolvedEnv[key] ?? process.env[key] ?? hermesEnvKeys[key]);
+  const has = (key: string): boolean => !!(resolvedEnv[key] ?? hermesEnvKeys[key]);
 
   const hasAnthropic = has("ANTHROPIC_API_KEY");
   const hasOpenRouter = has("OPENROUTER_API_KEY");

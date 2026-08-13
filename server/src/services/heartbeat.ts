@@ -185,7 +185,11 @@ import {
   prepareRemoteHeartbeatBrowserRuntimeEnv,
   type HeartbeatRunScratch,
 } from "./run-scratch.js";
-import { ensureAdapterExecutionTargetXdgRuntimeDir } from "@paperclipai/adapter-utils/execution-target";
+import {
+  ensureAdapterExecutionTargetXdgRuntimeDir,
+  resolveAdapterExecutionTargetTimeoutSec,
+  type AdapterExecutionTarget,
+} from "@paperclipai/adapter-utils/execution-target";
 import {
   buildExecutionWorkspaceAdapterConfig,
   gateProjectExecutionWorkspacePolicy,
@@ -2913,6 +2917,31 @@ function paperclipApiBaseUrl(): string {
   return configured.replace(/\/+$/, "").replace(/\/api$/, "");
 }
 
+const HEARTBEAT_RUN_CREDENTIAL_BUFFER_SECONDS = 60 * 60;
+const UNBOUNDED_LOCAL_RUN_CREDENTIAL_MAX_SECONDS = 24 * 60 * 60;
+
+/** Keep credentials only as long as the run can legitimately execute, plus
+ * one hour for startup/teardown skew. Unbounded local defaults use the
+ * platform's four-hour run backstop instead of silently falling back to the
+ * historical one-hour credential lifetime. Local runs configured without a
+ * wall-clock timeout receive a conservative 24-hour ceiling; route authorization
+ * still requires the matching run to remain active. Explicit longer timeouts extend
+ * only that run's credentials. Route authorization still requires a matching,
+ * active run, so completion revokes effective access before `exp`.
+ */
+export function resolveHeartbeatRunCredentialTtlSeconds(input: {
+  config: Record<string, unknown>;
+  executionTarget: AdapterExecutionTarget | null | undefined;
+}): number {
+  const configuredTimeoutSec = asNumber(input.config.timeoutSec, 0);
+  const effectiveTimeoutSec = resolveAdapterExecutionTargetTimeoutSec(
+    input.executionTarget,
+    configuredTimeoutSec,
+  );
+  if (effectiveTimeoutSec <= 0) return UNBOUNDED_LOCAL_RUN_CREDENTIAL_MAX_SECONDS;
+  return Math.max(60 * 60, Math.ceil(effectiveTimeoutSec) + HEARTBEAT_RUN_CREDENTIAL_BUFFER_SECONDS);
+}
+
 export async function revokeHeartbeatRunGatewayTokens(input: {
   db: Db;
   companyId: string;
@@ -2934,6 +2963,7 @@ export async function buildPaperclipRuntimeMcpServers(input: {
   db: Db;
   agent: Pick<typeof agents.$inferSelect, "id" | "companyId" | "name">;
   runId: string;
+  credentialExpiresAt?: Date;
 }): Promise<AdapterRuntimeMcpServer[]> {
   const effective = await toolAccessService(input.db).getEffectiveProfilesForAgent(
     input.agent.companyId,
@@ -3039,7 +3069,7 @@ export async function buildPaperclipRuntimeMcpServers(input: {
         clientLabel: `${input.agent.name} heartbeat run`,
         ownerNote: `Short-lived runtime MCP token for heartbeat run ${input.runId}.`,
         allowedActions: ["tools/list", "tools/call"],
-        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+        expiresAt: input.credentialExpiresAt ?? new Date(Date.now() + 60 * 60 * 1000),
       },
       actor: { agentId: input.agent.id },
     });
@@ -3061,20 +3091,25 @@ export async function buildPaperclipRuntimeMcpServers(input: {
   return servers;
 }
 
-function createAdapterRuntimeMcpAccess(
+export function createAdapterRuntimeMcpAccess(
   servers: AdapterRuntimeMcpServer[],
 ): AdapterRuntimeMcpAccess | undefined {
   if (servers.length === 0) return undefined;
-  const snapshot = servers.map((server) => Object.freeze({ ...server }));
+  const usedNames = new Set<string>();
+  const snapshot = servers.map((server) => {
+    const baseName = server.name.trim() || "paperclip";
+    let name = baseName;
+    let suffix = 2;
+    while (usedNames.has(name)) {
+      name = `${baseName}-${suffix}`;
+      suffix += 1;
+    }
+    usedNames.add(name);
+    return Object.freeze({ ...server, name });
+  });
   return Object.freeze({
     getServers: () => snapshot.map((server) => ({ ...server })),
   });
-}
-
-const MANAGED_MCP_LOCAL_ADAPTERS = new Set(["codex_local"]);
-
-function adapterSupportsManagedMcpConfig(adapterType: string): boolean {
-  return MANAGED_MCP_LOCAL_ADAPTERS.has(adapterType);
 }
 
 function gatewayAppliesToRun(input: {
@@ -3100,8 +3135,8 @@ async function createManagedMcpRunConfig(input: {
   config: Record<string, unknown>;
   projectId: string | null;
   issueId: string | null;
+  credentialExpiresAt: Date;
 }): Promise<ManagedMcpGatewayRunConfig | null> {
-  if (!adapterSupportsManagedMcpConfig(input.agent.adapterType)) return null;
   if (input.config.managedMcpOnly === false) return null;
 
   const rows = await input.db
@@ -3114,16 +3149,19 @@ async function createManagedMcpRunConfig(input: {
     ))
     .orderBy(asc(toolMcpGateways.name));
 
-  const gateways = rows.filter((gateway) => gatewayAppliesToRun({
-    gateway,
-    agentId: input.agent.id,
-    projectId: input.projectId,
-    issueId: input.issueId,
-  }));
+  const gateways = rows.filter((gateway) => (
+    !gateway.metadata?.managedRuntimeConnectionId
+    && gatewayAppliesToRun({
+      gateway,
+      agentId: input.agent.id,
+      projectId: input.projectId,
+      issueId: input.issueId,
+    })
+  ));
   if (gateways.length === 0) return null;
 
   const service = createToolGatewayService(input.db);
-  const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+  const expiresAt = input.credentialExpiresAt;
   const managedGateways: ManagedMcpGatewayRunConfig["gateways"] = [];
   for (const gateway of gateways) {
     const token = await service.createNamedGatewayToken({
@@ -14909,6 +14947,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         issueRef?.workMode === "skill_test"
           ? { kind: "skill_test" as const, issueId: issueRef.id }
           : { kind: "standard" as const };
+      const credentialTtlSeconds = resolveHeartbeatRunCredentialTtlSeconds({
+        config: runtimeConfig,
+        executionTarget,
+      });
+      const credentialExpiresAt = new Date(Date.now() + credentialTtlSeconds * 1000);
       const authToken = adapter.supportsLocalAgentJwt
         ? createLocalAgentJwt(
           agent.id,
@@ -14917,6 +14960,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           run.id,
           run.responsibleUserId,
           localAgentJwtScope,
+          credentialTtlSeconds,
         )
         : null;
       if (adapter.supportsLocalAgentJwt && !authToken) {
@@ -15110,30 +15154,48 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       let adapterResult: Awaited<ReturnType<typeof adapter.execute>>;
       try {
-        const adapterContext = { ...context };
-        const runtimeMcpServers = await buildPaperclipRuntimeMcpServers({
-          db,
-          agent,
-          runId: run.id,
-        });
-        const runtimeMcp = createAdapterRuntimeMcpAccess(runtimeMcpServers);
-        const managedMcpConfig = await createManagedMcpRunConfig({
-          db,
-          agent,
-          runId: run.id,
-          config: runtimeConfig,
-          projectId: issueRef?.projectId ?? null,
-          issueId: issueRef?.id ?? null,
-        });
-        if (managedMcpConfig) {
-          adapterContext.paperclipManagedMcp = managedMcpConfig;
+        const runtimeMcpServers = adapter.supportsRuntimeMcp
+          ? await buildPaperclipRuntimeMcpServers({ db, agent, runId: run.id, credentialExpiresAt })
+          : [];
+        const managedMcpConfig = adapter.supportsRuntimeMcp
+          ? await createManagedMcpRunConfig({
+              db,
+              agent,
+              runId: run.id,
+              config: runtimeConfig,
+              projectId: issueRef?.projectId ?? null,
+              issueId: issueRef?.id ?? null,
+              credentialExpiresAt,
+            })
+          : null;
+        const managedMcpServers: AdapterRuntimeMcpServer[] = (managedMcpConfig?.gateways ?? []).map(
+          (gateway) => ({
+            name: gateway.name,
+            url: new URL(gateway.endpointPath, paperclipApiBaseUrl()).toString(),
+            token: gateway.bearerToken,
+            connectionId: `managed:${gateway.id}`,
+          }),
+        );
+        if (adapter.supportsRuntimeMcp && !authToken) {
+          throw new Error(`Adapter ${agent.adapterType} cannot receive mandatory Paperclip control-plane MCP without run authentication`);
         }
+        const controlPlaneMcpServers: AdapterRuntimeMcpServer[] = adapter.supportsRuntimeMcp && authToken ? [{
+          name: "Paperclip",
+          url: `${paperclipApiBaseUrl()}/api/mcp`,
+          token: authToken,
+          connectionId: "paperclip-control-plane",
+        }] : [];
+        const runtimeMcp = createAdapterRuntimeMcpAccess([
+          ...controlPlaneMcpServers,
+          ...managedMcpServers,
+          ...runtimeMcpServers,
+        ]);
         adapterResult = await adapter.execute({
           runId: run.id,
           agent,
           runtime: runtimeForAdapter,
           config: runtimeConfig,
-          context: adapterContext,
+          context,
           runtimeCommandSpec: adapter.getRuntimeCommandSpec?.(runtimeConfig) ?? null,
           executionTarget,
           executionTransport: remoteExecution

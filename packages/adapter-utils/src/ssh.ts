@@ -35,6 +35,44 @@ export interface SshRemoteExecutionSpec extends SshConnectionConfig {
   remoteCwd: string;
 }
 
+const SSH_PROFILE_RUNTIME_ENV_ARGS = [
+  'PATH="$paperclip_profile_PATH"',
+  'HOME="$paperclip_profile_HOME"',
+  'USER="$paperclip_profile_USER"',
+  'LOGNAME="$paperclip_profile_LOGNAME"',
+  'SHELL="$paperclip_profile_SHELL"',
+  'TMPDIR="$paperclip_profile_TMPDIR"',
+  'LANG="$paperclip_profile_LANG"',
+  'LANGUAGE="$paperclip_profile_LANGUAGE"',
+  'LC_ALL="$paperclip_profile_LC_ALL"',
+  'LC_CTYPE="$paperclip_profile_LC_CTYPE"',
+  'XDG_CONFIG_HOME="$paperclip_profile_XDG_CONFIG_HOME"',
+  'XDG_CACHE_HOME="$paperclip_profile_XDG_CACHE_HOME"',
+  'XDG_DATA_HOME="$paperclip_profile_XDG_DATA_HOME"',
+  'NODE_EXTRA_CA_CERTS="$paperclip_profile_NODE_EXTRA_CA_CERTS"',
+  'SSL_CERT_FILE="$paperclip_profile_SSL_CERT_FILE"',
+  'SSL_CERT_DIR="$paperclip_profile_SSL_CERT_DIR"',
+] as const;
+
+const SSH_PROFILE_RUNTIME_ENV_CAPTURE = [
+  'paperclip_profile_PATH="${PATH-}"',
+  'paperclip_profile_HOME="${HOME-}"',
+  'paperclip_profile_USER="${USER-}"',
+  'paperclip_profile_LOGNAME="${LOGNAME-}"',
+  'paperclip_profile_SHELL="${SHELL-}"',
+  'paperclip_profile_TMPDIR="${TMPDIR-}"',
+  'paperclip_profile_LANG="${LANG-}"',
+  'paperclip_profile_LANGUAGE="${LANGUAGE-}"',
+  'paperclip_profile_LC_ALL="${LC_ALL-}"',
+  'paperclip_profile_LC_CTYPE="${LC_CTYPE-}"',
+  'paperclip_profile_XDG_CONFIG_HOME="${XDG_CONFIG_HOME-}"',
+  'paperclip_profile_XDG_CACHE_HOME="${XDG_CACHE_HOME-}"',
+  'paperclip_profile_XDG_DATA_HOME="${XDG_DATA_HOME-}"',
+  'paperclip_profile_NODE_EXTRA_CA_CERTS="${NODE_EXTRA_CA_CERTS-}"',
+  'paperclip_profile_SSL_CERT_FILE="${SSL_CERT_FILE-}"',
+  'paperclip_profile_SSL_CERT_DIR="${SSL_CERT_DIR-}"',
+] as const;
+
 export function createSshCommandManagedRuntimeRunner(input: {
   spec: SshRemoteExecutionSpec;
   defaultCwd?: string | null;
@@ -1183,9 +1221,8 @@ export async function runSshCommand(
       'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" >/dev/null 2>&1 || true; fi',
       'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" >/dev/null 2>&1 || true; elif [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc" >/dev/null 2>&1 || true; fi',
       'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" >/dev/null 2>&1 || true; fi',
-      envArgs.length > 0
-        ? `exec env ${envArgs.join(" ")} sh -c ${shellQuote(remoteCommand)}`
-        : `exec sh -c ${shellQuote(remoteCommand)}`,
+      ...SSH_PROFILE_RUNTIME_ENV_CAPTURE,
+      `exec env -i ${[...SSH_PROFILE_RUNTIME_ENV_ARGS, ...envArgs].join(" ")} sh -c ${shellQuote(remoteCommand)}`,
     ].join(" && ");
 
     sshArgs.push(
@@ -1247,10 +1284,9 @@ export async function buildSshSpawnTarget(input: {
     'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" >/dev/null 2>&1 || true; fi',
     'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" >/dev/null 2>&1 || true; elif [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc" >/dev/null 2>&1 || true; fi',
     'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" >/dev/null 2>&1 || true; fi',
+    ...SSH_PROFILE_RUNTIME_ENV_CAPTURE,
     `cd ${shellQuote(input.spec.remoteCwd)}`,
-    envArgs.length > 0
-      ? `exec env ${envArgs.join(" ")} ${remoteCommandParts}`
-      : `exec ${remoteCommandParts}`,
+    `exec env -i ${[...SSH_PROFILE_RUNTIME_ENV_ARGS, ...envArgs].join(" ")} ${remoteCommandParts}`,
   ].join(" && ");
 
   sshArgs.push(

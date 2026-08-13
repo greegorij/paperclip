@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { buildAgentProcessEnv } from "@paperclipai/adapter-utils/server-utils";
 import os from "node:os";
 import path from "node:path";
 import type {
@@ -161,18 +162,18 @@ export async function testEnvironment(
   });
   if (installCheck) checks.push(installCheck);
   const hasExplicitClaudeConfigDir = isNonEmpty(env.CLAUDE_CONFIG_DIR);
+  let probeTempWorkspaceDir: string | null = null;
+  let probePreparedRuntime: Awaited<ReturnType<typeof prepareAdapterExecutionTargetRuntime>> | null = null;
   if (targetIsRemote && adapterExecutionTargetUsesManagedHome(target) && !hasExplicitClaudeConfigDir) {
-    let tempWorkspaceDir: string | null = null;
-    let preparedRuntime: Awaited<ReturnType<typeof prepareAdapterExecutionTargetRuntime>> | null = null;
     try {
       const seedDir = await prepareClaudeConfigSeed(process.env, async () => {}, ctx.companyId);
       const managedRemoteCwd = target?.kind === "remote" ? target.remoteCwd : cwd;
-      tempWorkspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-envtest-workspace-"));
-      preparedRuntime = await prepareAdapterExecutionTargetRuntime({
+      probeTempWorkspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-envtest-workspace-"));
+      probePreparedRuntime = await prepareAdapterExecutionTargetRuntime({
         runId,
         target,
         adapterKey: "claude",
-        workspaceLocalDir: tempWorkspaceDir,
+        workspaceLocalDir: probeTempWorkspaceDir,
         workspaceRemoteDir: managedRemoteCwd,
         timeoutSec: Math.max(1, asNumber(config.helloProbeTimeoutSec, targetIsSandbox ? 90 : 45)),
         assets: [
@@ -184,9 +185,9 @@ export async function testEnvironment(
         ],
       });
       const runtimeRootDir =
-        preparedRuntime.runtimeRootDir ?? path.posix.join(managedRemoteCwd, ".paperclip-runtime", "claude");
+        probePreparedRuntime.runtimeRootDir ?? path.posix.join(managedRemoteCwd, ".paperclip-runtime", "claude");
       const remoteClaudeConfigSeedDir =
-        preparedRuntime.assetDirs["config-seed"] ?? path.posix.join(runtimeRootDir, "config-seed");
+        probePreparedRuntime.assetDirs["config-seed"] ?? path.posix.join(runtimeRootDir, "config-seed");
       const remoteClaudeConfigDir = path.posix.join(runtimeRootDir, "config");
       env.CLAUDE_CONFIG_DIR = remoteClaudeConfigDir;
       await materializeRemoteClaudeConfig({
@@ -215,14 +216,10 @@ export async function testEnvironment(
         message: "Could not materialize Paperclip-managed Claude config for the sandbox probe.",
         detail: err instanceof Error ? err.message : String(err),
       });
-    } finally {
-      await preparedRuntime?.restoreWorkspace().catch(() => undefined);
-      if (tempWorkspaceDir) {
-        await fs.rm(tempWorkspaceDir, { recursive: true, force: true }).catch(() => undefined);
-      }
     }
   }
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  try {
+    const runtimeEnv = ensurePathInEnv(buildAgentProcessEnv(env));
   try {
     await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, runtimeEnv);
     checks.push({
@@ -239,28 +236,19 @@ export async function testEnvironment(
     });
   }
 
-  // When probing a remote target, the Paperclip host's process.env does not
-  // reflect what the agent will actually see at runtime. Only consider env
-  // vars from the adapter config in that case; the probe itself will surface
-  // any auth issues on the remote box.
-  const considerHostEnv = !targetIsRemote;
   const hasBedrock =
     env.CLAUDE_CODE_USE_BEDROCK === "1" ||
     env.CLAUDE_CODE_USE_BEDROCK === "true" ||
-    (considerHostEnv && process.env.CLAUDE_CODE_USE_BEDROCK === "1") ||
-    (considerHostEnv && process.env.CLAUDE_CODE_USE_BEDROCK === "true") ||
-    isNonEmpty(env.ANTHROPIC_BEDROCK_BASE_URL) ||
-    (considerHostEnv && isNonEmpty(process.env.ANTHROPIC_BEDROCK_BASE_URL));
+    isNonEmpty(env.ANTHROPIC_BEDROCK_BASE_URL);
 
   const configApiKey = env.ANTHROPIC_API_KEY;
-  const hostApiKey = considerHostEnv ? process.env.ANTHROPIC_API_KEY : undefined;
   if (hasBedrock) {
     const source =
       env.CLAUDE_CODE_USE_BEDROCK === "1" ||
       env.CLAUDE_CODE_USE_BEDROCK === "true" ||
       isNonEmpty(env.ANTHROPIC_BEDROCK_BASE_URL)
         ? "adapter config env"
-        : "server environment";
+        : "adapter config env";
     checks.push({
       code: "claude_bedrock_auth",
       level: "info",
@@ -268,8 +256,8 @@ export async function testEnvironment(
       detail: `Detected in ${source}.`,
       hint: "Ensure AWS credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or AWS_PROFILE) and AWS_REGION are configured.",
     });
-  } else if (isNonEmpty(configApiKey) || isNonEmpty(hostApiKey)) {
-    const source = isNonEmpty(configApiKey) ? "adapter config env" : "server environment";
+  } else if (isNonEmpty(configApiKey)) {
+    const source = "adapter config env";
     checks.push({
       code: "claude_anthropic_api_key_overrides_subscription",
       level: "warn",
@@ -454,10 +442,16 @@ export async function testEnvironment(
     }
   }
 
-  return {
-    adapterType: ctx.adapterType,
-    status: summarizeStatus(checks),
-    checks,
-    testedAt: new Date().toISOString(),
-  };
+    return {
+      adapterType: ctx.adapterType,
+      status: summarizeStatus(checks),
+      checks,
+      testedAt: new Date().toISOString(),
+    };
+  } finally {
+    await probePreparedRuntime?.restoreWorkspace().catch(() => undefined);
+    if (probeTempWorkspaceDir) {
+      await fs.rm(probeTempWorkspaceDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
 }

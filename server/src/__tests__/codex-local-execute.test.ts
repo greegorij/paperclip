@@ -17,6 +17,9 @@ const payload = {
   codexConfigContents: process.env.CODEX_HOME && fs.existsSync(process.env.CODEX_HOME + "/config.toml")
     ? fs.readFileSync(process.env.CODEX_HOME + "/config.toml", "utf8")
     : null,
+  codexSkillEntries: process.env.CODEX_HOME && fs.existsSync(process.env.CODEX_HOME + "/skills")
+    ? fs.readdirSync(process.env.CODEX_HOME + "/skills").sort()
+    : [],
   paperclipWakePayloadJson: process.env.PAPERCLIP_WAKE_PAYLOAD_JSON || null,
   paperclipApiUrl: process.env.PAPERCLIP_API_URL || null,
   paperclipApiKey: process.env.PAPERCLIP_API_KEY || null,
@@ -50,6 +53,7 @@ type CapturePayload = {
   prompt: string;
   codexHome: string | null;
   codexConfigContents?: string | null;
+  codexSkillEntries?: string[];
   paperclipWakePayloadJson: string | null;
   paperclipApiUrl?: string | null;
   paperclipApiKey?: string | null;
@@ -189,7 +193,8 @@ describe("codex execute", () => {
       expect(result.costUsd).toBeNull();
 
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
-      expect(capture.codexHome).toBe(managedCodexHome);
+      expect(capture.codexHome).not.toBe(managedCodexHome);
+      expect(path.basename(capture.codexHome)).toMatch(/^paperclip-codex-home-sync-run-default-/);
 
       const managedAuth = path.join(managedCodexHome, "auth.json");
       const managedConfig = path.join(managedCodexHome, "config.toml");
@@ -312,7 +317,8 @@ describe("codex execute", () => {
       expect(configText).not.toContain("paperclip-github");
       expect(configText).not.toContain("https://raw.example/mcp");
       expect(configText).toContain('url = "http://paperclip.local:3100/api/tool-gateway/gateways/gateway-1/mcp"');
-      expect(configText).toContain('http_headers = { Authorization = "Bearer pcgw_secret-managed-token" }');
+      expect(configText).toMatch(/bearer_token_env_var = "PAPERCLIP_CODEX_MCP_BEARER_TOKEN_[A-F0-9]+"/);
+      expect(configText).not.toContain("pcgw_secret-managed-token");
       expect(configText).not.toMatch(/^\s*headers\s*=/m);
       expect(logs).toEqual(
         expect.arrayContaining([
@@ -525,7 +531,7 @@ describe("codex execute", () => {
       expect(result.errorMessage).toBeNull();
 
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
-      expect(capture.codexHome).toBe(path.join(remoteWorkspace, ".paperclip-runtime", "codex", "home"));
+      expect(capture.codexHome).toBe(path.join(remoteWorkspace, ".paperclip-runtime", "codex", "runs", "run-sandbox-auth", "home"));
       expect(capture.paperclipApiUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
       expect(capture.paperclipApiKey).not.toBe("run-jwt-token");
       expect(capture.paperclipApiBridgeMode).toBe("queue_v1");
@@ -1397,7 +1403,8 @@ process.exit(1);
       expect(result.errorMessage).toBeNull();
 
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
-      expect(capture.codexHome).toBe(isolatedCodexHome);
+      expect(capture.codexHome).not.toBe(isolatedCodexHome);
+      expect(path.basename(capture.codexHome)).toMatch(/^paperclip-codex-home-sync-run-1-/);
       expect(capture.argv).toEqual(expect.arrayContaining(["exec", "--json", "-"]));
       expect(capture.prompt).toContain("Follow the paperclip heartbeat.");
       expect(capture.paperclipEnvKeys).toEqual(
@@ -1417,7 +1424,8 @@ process.exit(1);
       expect(await fs.realpath(isolatedAuth)).toBe(await fs.realpath(path.join(sharedCodexHome, "auth.json")));
       expect((await fs.lstat(isolatedConfig)).isFile()).toBe(true);
       expect(await fs.readFile(isolatedConfig, "utf8")).toBe('model = "codex-mini-latest"\n');
-      expect((await fs.lstat(homeSkill)).isSymbolicLink()).toBe(true);
+      expect(capture.codexSkillEntries).toContain("paperclip");
+      await expect(fs.lstat(homeSkill)).rejects.toThrow();
       expect(logs).toContainEqual(
         expect.objectContaining({
           stream: "stdout",
@@ -1507,8 +1515,10 @@ process.exit(1);
       expect(result.errorMessage).toBeNull();
 
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
-      expect(capture.codexHome).toBe(explicitCodexHome);
-      expect((await fs.lstat(path.join(explicitCodexHome, "skills", "paperclip"))).isSymbolicLink()).toBe(true);
+      expect(capture.codexHome).not.toBe(explicitCodexHome);
+      expect(path.basename(capture.codexHome)).toMatch(/^paperclip-codex-home-sync-run-2-/);
+      expect(capture.codexSkillEntries).toContain("paperclip");
+      await expect(fs.lstat(path.join(explicitCodexHome, "skills", "paperclip"))).rejects.toThrow();
       await expect(fs.lstat(path.join(paperclipHome, "instances", "worktree-1", "codex-home"))).rejects.toThrow();
     } finally {
       if (previousHome === undefined) delete process.env.HOME;

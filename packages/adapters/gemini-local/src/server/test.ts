@@ -1,4 +1,5 @@
 import path from "node:path";
+import { buildAgentProcessEnv } from "@paperclipai/adapter-utils/server-utils";
 import type {
   AdapterEnvironmentCheck,
   AdapterEnvironmentTestContext,
@@ -118,7 +119,7 @@ export async function testEnvironment(
   if (targetIsRemote && typeof env.GEMINI_CLI_TRUST_WORKSPACE !== "string") {
     env.GEMINI_CLI_TRUST_WORKSPACE = "true";
   }
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  const runtimeEnv = ensurePathInEnv(buildAgentProcessEnv(env));
   const installCheck = await maybeRunSandboxInstallCommand({
     runId,
     target,
@@ -145,22 +146,18 @@ export async function testEnvironment(
   }
 
   const configGeminiApiKey = env.GEMINI_API_KEY;
-  const hostGeminiApiKey = targetIsRemote ? undefined : process.env.GEMINI_API_KEY;
   const configGoogleApiKey = env.GOOGLE_API_KEY;
-  const hostGoogleApiKey = targetIsRemote ? undefined : process.env.GOOGLE_API_KEY;
-  const hasGca = env.GOOGLE_GENAI_USE_GCA === "true" || (!targetIsRemote && process.env.GOOGLE_GENAI_USE_GCA === "true");
+  const hasGca = env.GOOGLE_GENAI_USE_GCA === "true";
   if (
     isNonEmpty(configGeminiApiKey) ||
-    isNonEmpty(hostGeminiApiKey) ||
     isNonEmpty(configGoogleApiKey) ||
-    isNonEmpty(hostGoogleApiKey) ||
     hasGca
   ) {
     const source = hasGca
       ? "Google account login (GCA)"
       : isNonEmpty(configGeminiApiKey) || isNonEmpty(configGoogleApiKey)
         ? "adapter config env"
-        : "server environment";
+        : "adapter config env";
     checks.push({
       code: "gemini_api_key_present",
       level: "info",

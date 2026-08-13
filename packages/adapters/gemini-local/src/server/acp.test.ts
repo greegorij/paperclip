@@ -643,7 +643,7 @@ describe("gemini_local ACP lane", () => {
     await fs.mkdir(bin, { recursive: true });
     await fs.writeFile(path.join(bin, "gemini"), "#!/usr/bin/env sh\n", "utf8");
     process.env.PATH = `${bin}${path.delimiter}${process.env.PATH ?? ""}`;
-    process.env.GEMINI_API_KEY = "test-key";
+    process.env.GEMINI_API_KEY = "host-canary-must-not-count";
     setNodeVersion("v20.0.0");
 
     const result = await testGeminiAcpEnvironment({
@@ -652,6 +652,7 @@ describe("gemini_local ACP lane", () => {
       config: {
         engine: "acp",
         cwd: root,
+        env: { GEMINI_API_KEY: "explicit-test-key" },
       },
     });
 
@@ -662,6 +663,15 @@ describe("gemini_local ACP lane", () => {
         expect.objectContaining({ code: "gemini_acp_command_resolvable" }),
         expect.objectContaining({ code: "gemini_acp_credentials_detected" }),
       ]),
+    );
+
+    const hostOnly = await testGeminiAcpEnvironment({
+      adapterType: "gemini_local",
+      companyId: "company-1",
+      config: { engine: "acp", cwd: root },
+    });
+    expect(hostOnly.checks).toContainEqual(
+      expect.objectContaining({ code: "gemini_acp_credentials_not_detected" }),
     );
   });
 });

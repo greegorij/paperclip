@@ -45,7 +45,10 @@ async function waitForRunToFinish(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const run = await heartbeat.getRun(runId);
-    if (run && !["queued", "running"].includes(run.status)) return run;
+    if (run && !["queued", "running"].includes(run.status)) {
+      await heartbeat.waitForRunExecutionDrain(runId);
+      return run;
+    }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   return await heartbeat.getRun(runId);
@@ -56,6 +59,7 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   let oldPaperclipHome: string | undefined;
   let oldPaperclipApiUrl: string | undefined;
+  let oldAgentJwtSecret: string | undefined;
   let paperclipHome: string | null = null;
   const capturedRuns: Array<{
     agentId: string;
@@ -77,8 +81,12 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
     // a deterministic value for tests that never boot the full server.
     oldPaperclipApiUrl = process.env.PAPERCLIP_API_URL;
     process.env.PAPERCLIP_API_URL = "http://127.0.0.1:3100/api";
+    oldAgentJwtSecret = process.env.PAPERCLIP_AGENT_JWT_SECRET;
+    process.env.PAPERCLIP_AGENT_JWT_SECRET = "heartbeat-runtime-mcp-test-secret";
     registerServerAdapter({
       type: TEST_ADAPTER_TYPE,
+      supportsLocalAgentJwt: true,
+      supportsRuntimeMcp: true,
       execute: async (ctx) => {
         const serializedRuntimeInput = JSON.stringify({
           config: ctx.config,
@@ -138,6 +146,8 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
     else process.env.PAPERCLIP_HOME = oldPaperclipHome;
     if (oldPaperclipApiUrl === undefined) delete process.env.PAPERCLIP_API_URL;
     else process.env.PAPERCLIP_API_URL = oldPaperclipApiUrl;
+    if (oldAgentJwtSecret === undefined) delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
+    else process.env.PAPERCLIP_AGENT_JWT_SECRET = oldAgentJwtSecret;
     if (paperclipHome) {
       await fs.rm(paperclipHome, { recursive: true, force: true });
     }
@@ -324,9 +334,47 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
     });
     await expect(fs.readFile(path.join(restoredSkill!.source, "SKILL.md"), "utf8"))
       .resolves.toContain("Version one.");
-  });
+  }, 30_000);
 
-  it("delivers installed connections without exposing gateway bearers in adapter config or logs", async () => {
+  it("always delivers the real Paperclip control plane when gateway tables are empty", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Mandatory Runtime MCP",
+      issuePrefix: `C${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Runtime MCP Capture",
+      role: "engineer",
+      status: "idle",
+      adapterType: TEST_ADAPTER_TYPE,
+      adapterConfig: { managedMcpOnly: false },
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(agentId, "on_demand", {}, "manual");
+    expect(run).not.toBeNull();
+    expect((await waitForRunToFinish(heartbeat, run!.id))?.status).toBe("succeeded");
+
+    const captured = capturedRuns.find((entry) => entry.agentId === agentId);
+    expect(captured?.mcpServers).toHaveLength(1);
+    expect(captured?.mcpServers[0]).toMatchObject({
+      connectionId: "paperclip-control-plane",
+      name: "Paperclip",
+      url: "http://127.0.0.1:3100/api/mcp",
+      token: expect.stringMatching(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/),
+    });
+    expect(captured?.serializedRuntimeInput).not.toContain(captured?.mcpServers[0]?.token);
+  }, 20_000);
+
+  it("delivers installed connections in addition to mandatory control without exposing bearers", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     await db.insert(companies).values({
@@ -409,15 +457,20 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
     expect((await waitForRunToFinish(heartbeat, run!.id))?.status).toBe("succeeded");
 
     const captured = capturedRuns.find((entry) => entry.agentId === agentId);
-    expect(captured?.mcpServers).toHaveLength(1);
+    expect(captured?.mcpServers).toHaveLength(2);
     expect(captured?.mcpServers[0]).toMatchObject({
+      connectionId: "paperclip-control-plane",
+      url: "http://127.0.0.1:3100/api/mcp",
+    });
+    const installedServer = captured?.mcpServers.find((server) => server.connectionId === installed!.id);
+    expect(installedServer).toMatchObject({
       connectionId: installed!.id,
       name: installed!.name,
       token: expect.stringMatching(/^pcgw_/),
       url: expect.stringContaining("/api/tool-gateway/gateways/"),
     });
     expect(captured?.mcpServers.some((server) => server.connectionId === uninstalled!.id)).toBe(false);
-    const bearer = captured?.mcpServers[0]?.token;
+    const bearer = installedServer?.token;
     expect(bearer).toMatch(/^pcgw_/);
     if (!bearer) throw new Error("Expected runtime MCP bearer");
     expect(captured?.config).not.toHaveProperty("paperclipRuntimeMcpServers");
@@ -426,5 +479,5 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
     const log = await heartbeat.readLog(run!.id);
     expect(log.content).not.toContain(bearer);
     expect(log.content).not.toContain("pcgw_");
-  });
+  }, 20_000);
 });

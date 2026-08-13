@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { buildAgentProcessEnv } from "@paperclipai/adapter-utils/server-utils";
 import os from "node:os";
 import type { AdapterModel } from "@paperclipai/adapter-utils";
 import {
@@ -130,7 +131,7 @@ export async function discoverOpenCodeModels(input: {
     // image). Fall back to process.env.HOME.
   }
   // Prevent OpenCode from writing an opencode.json into the working directory.
-  const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...process.env, ...env, ...(resolvedHome ? { HOME: resolvedHome } : {}), OPENCODE_DISABLE_PROJECT_CONFIG: "true" }));
+  const runtimeEnv = normalizeEnv(ensurePathInEnv(buildAgentProcessEnv({ ...env, ...(resolvedHome ? { HOME: resolvedHome } : {}), OPENCODE_DISABLE_PROJECT_CONFIG: "true" })));
 
   const result = await runChildProcess(
     `opencode-models-${Date.now()}-${Math.random().toString(16).slice(2)}`,

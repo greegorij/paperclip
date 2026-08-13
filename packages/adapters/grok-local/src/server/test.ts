@@ -1,3 +1,4 @@
+import { buildAgentProcessEnv } from "@paperclipai/adapter-utils/server-utils";
 import type {
   AdapterEnvironmentCheck,
   AdapterEnvironmentTestContext,
@@ -143,7 +144,7 @@ export async function testEnvironment(
   }
 
   const env = normalizeEnv(config.env);
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  const runtimeEnv = ensurePathInEnv(buildAgentProcessEnv(env));
 
   try {
     await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, runtimeEnv);

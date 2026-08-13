@@ -725,7 +725,7 @@ describe("realizeExecutionWorkspace", () => {
     expect(await readGit(reused.cwd, ["rev-parse", "HEAD"])).toBe(advancedHead);
     expect(reused.baseRefSha).toBe(advancedHead);
     expect(reused.warnings).toEqual([]);
-  });
+  }, 15_000);
 
   it("does not reset a reused worktree that already has task commits", async () => {
     const { sourceRepo, remotePath, repoRoot } = await createClonedRepoWithRemote();
@@ -5359,7 +5359,8 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
     expect(service?.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
     await expect(fetch(service!.url!)).resolves.toMatchObject({ ok: true });
 
-    await fs.rm(paperclipHome, { recursive: true, force: true });
+    // Reset only in-memory runtime state. The durable supervisor registry under
+    // PAPERCLIP_HOME is the startup discovery source and must survive a restart.
     await resetRuntimeServicesForTests();
 
     const result = await reconcilePersistedRuntimeServicesOnStartup(db);

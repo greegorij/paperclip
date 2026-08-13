@@ -31,6 +31,11 @@ export interface SandboxCallbackBridgeRouteRule {
 // reverse bridge. Keep this in sync with the Paperclip skill in
 // `skills/paperclip/SKILL.md` and `references/api-reference.md`.
 export const DEFAULT_SANDBOX_CALLBACK_BRIDGE_ROUTE_ALLOWLIST: readonly SandboxCallbackBridgeRouteRule[] = [
+  // Run-scoped MCP transports. Keep these exact: MCP uses POST for JSON-RPC,
+  // and optional gateway ids occupy one path segment only.
+  { method: "POST", path: /^\/api\/mcp$/ },
+  { method: "POST", path: /^\/api\/tool-gateway\/gateways\/[^/]+\/mcp$/ },
+
   // Identity, inbox, agent self-management
   { method: "GET", path: /^\/api\/agents\/me$/ },
   { method: "GET", path: /^\/api\/agents\/me\/inbox-lite$/ },

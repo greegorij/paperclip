@@ -11,6 +11,7 @@ import {
   budgetIncidents,
   budgetPolicies,
   companies,
+  costEvents,
   createDb,
   documents,
   heartbeatRunEvents,
@@ -65,6 +66,7 @@ describeEmbeddedPostgres("attention service", () => {
     await db.delete(heartbeatRuns);
     await db.delete(budgetIncidents);
     await db.delete(budgetPolicies);
+    await db.delete(costEvents);
     await db.delete(joinRequests);
     await db.delete(invites);
     await db.delete(issueRecoveryActions);
@@ -509,7 +511,7 @@ describeEmbeddedPostgres("attention service", () => {
         thresholdType: "soft",
         amountLimit: 100,
         amountObserved: 85,
-        status: "open",
+        status: "resolved",
         createdAt: new Date("2026-07-09T12:10:00.000Z"),
         updatedAt: new Date("2026-07-09T12:10:00.000Z"),
       },
@@ -546,10 +548,25 @@ describeEmbeddedPostgres("attention service", () => {
         updatedAt: new Date("2026-07-09T12:11:00.000Z"),
       },
     ]);
+    await db.insert(costEvents).values({
+      companyId,
+      agentId: workerId,
+      provider: "test",
+      biller: "test",
+      billingType: "metered_api",
+      model: "attention-hard-budget-fixture",
+      inputTokens: 100,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      costCents: 0,
+      occurredAt: now,
+    });
 
     const feed = await attentionService(db).list(companyId, { userId: "board-user" });
 
-    expect(feed.totalCount).toBe(11);
+    // The 84% soft incident is intentionally below the live attention threshold;
+    // the active hard incident remains represented by the single budget alert.
+    expect(feed.totalCount).toBe(10);
     expect(feed.countsBySourceKind).toMatchObject({
       approval: 1,
       issue_thread_interaction: 1,
@@ -559,7 +576,7 @@ describeEmbeddedPostgres("attention service", () => {
       blocker_attention: 1,
       review: 1,
       failed_run: 1,
-      budget_alert: 2,
+      budget_alert: 1,
       agent_error_alert: 1,
     });
     expect(feed.items.map((item) => item.sourceKind)).toEqual(expect.arrayContaining([

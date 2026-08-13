@@ -5,6 +5,34 @@ summary: What adapters are and how they connect agents to Paperclip
 
 Adapters are the bridge between Paperclip's orchestration layer and agent runtimes. Each adapter knows how to invoke a specific type of AI agent and capture its results.
 
+## Agent control plane and environment boundary
+
+Authenticated local heartbeat execution lanes receive `PAPERCLIP_API_URL` and a
+run-scoped `PAPERCLIP_API_KEY` as explicit runtime values. Claude, Codex, their
+ACP engines, Gemini through the shared ACP engine, and OpenCode additionally
+render the neutral
+`runtimeMcp` set. Its mandatory `Paperclip` entry points to `/api/mcp` and does
+not depend on configured tool gateways or optional connections. Pi, generic
+process, Grok, and Cursor use the explicit REST channel; this documentation
+does not claim a native MCP renderer for those adapters.
+
+Run credentials are scoped to the heartbeat run. Their initial expiry covers the
+effective adapter timeout plus one hour of startup/teardown slack (five hours
+for the default four-hour remote backstop). Local runs with no wall-clock
+timeout receive a conservative 24-hour initial window; explicit longer timeouts
+extend only that run. After the initial window, the authenticated API renews a
+valid signed identity only while the exact company, agent and run tuple remains
+`running`. A completed or cancelled run is rejected even if its original token
+is presented, so an unbounded local run does not lose MCP or REST access merely
+because it crosses an arbitrary wall-clock threshold.
+
+Child CLIs and their probes do not inherit the server environment wholesale.
+The common boundary permits only operating-system/runtime values such as
+`PATH`, `HOME`, locale and certificate locations, then applies the adapter's
+explicitly resolved `env`. Provider keys, database URLs, signing/encryption
+keys and `SSH_AUTH_SOCK` are therefore unavailable unless the adapter
+configuration deliberately supplies them.
+
 ## How Adapters Work
 
 When a heartbeat fires, Paperclip:

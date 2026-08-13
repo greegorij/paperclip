@@ -1,9 +1,20 @@
 import * as fs from "node:fs/promises";
+import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { prepareClaudeConfigSeed, writePaperclipClaudeMcpConfig, createDisposableClaudeConfigDir } from "./claude-config.js";
+import {
+  cleanupPaperclipClaudeMcpRun,
+  buildRemoteClaudeConfigMaterializationCommand,
+  createDisposableClaudeConfigDir,
+  prepareClaudeConfigSeed,
+  sweepAbandonedPaperclipClaudeMcpRuns,
+  writePaperclipClaudeMcpConfig,
+} from "./claude-config.js";
+
+const execFileAsync = promisify(execFile);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -23,6 +34,53 @@ describe("writePaperclipClaudeMcpConfig", () => {
     cleanupDirs.push(root);
     return root;
   }
+
+  it("keeps remote project transcripts visible across two private config roots", async () => {
+    const root = await makeStateDir();
+    const seed = path.join(root, "seed");
+    const persistentProjects = path.join(root, ".paperclip-runtime", "claude", "session-stores", "agent", "projects");
+    const firstConfig = path.join(root, "runs", "run-one", "config");
+    const secondConfig = path.join(root, "runs", "run-two", "config");
+    await fs.mkdir(seed, { recursive: true });
+
+    for (const privateConfig of [firstConfig, secondConfig]) {
+      await execFileAsync("sh", ["-c", buildRemoteClaudeConfigMaterializationCommand({
+        remoteClaudeConfigDir: privateConfig,
+        remoteClaudeConfigSeedDir: seed,
+        persistentProjectsDir: persistentProjects,
+        persistentProjectsRemoteCwd: root,
+      })]);
+      expect((await fs.lstat(path.join(privateConfig, "projects"))).isSymbolicLink()).toBe(true);
+      if (privateConfig === firstConfig) {
+        const transcript = path.join(privateConfig, "projects", "workspace", "session.jsonl");
+        await fs.mkdir(path.dirname(transcript), { recursive: true });
+        await fs.writeFile(transcript, '{"type":"assistant"}\n');
+        await fs.rm(firstConfig, { recursive: true, force: true });
+      }
+    }
+
+    await expect(fs.readFile(
+      path.join(secondConfig, "projects", "workspace", "session.jsonl"),
+      "utf8",
+    )).resolves.toBe('{"type":"assistant"}\n');
+    expect((await fs.stat(persistentProjects)).mode & 0o777).toBe(0o700);
+  });
+
+  it("refuses an intermediate symlink in the persistent remote projects store", async () => {
+    const root = await makeStateDir();
+    const outside = path.join(root, "outside");
+    const persistentProjects = path.join(root, ".paperclip-runtime", "claude", "session-stores", "agent", "projects");
+    await fs.mkdir(path.join(root, ".paperclip-runtime"), { recursive: true });
+    await fs.mkdir(outside);
+    await fs.symlink(outside, path.join(root, ".paperclip-runtime", "claude"), "dir");
+
+    await expect(execFileAsync("sh", ["-c", buildRemoteClaudeConfigMaterializationCommand({
+      remoteClaudeConfigDir: path.join(root, "private-config"),
+      remoteClaudeConfigSeedDir: path.join(root, "seed"),
+      persistentProjectsDir: persistentProjects,
+      persistentProjectsRemoteCwd: root,
+    })])).rejects.toBeDefined();
+  });
 
   /** Default Claude Code layout: profile is sibling of CLAUDE_CONFIG_DIR. */
   async function makeClaudeHomeWithProfile(mcpServers: Record<string, unknown>): Promise<string> {
@@ -474,6 +532,103 @@ describe("writePaperclipClaudeMcpConfig", () => {
     });
     const stat = await fs.stat(configPath);
     expect(stat.mode & 0o777).toBe(0o600);
+    expect((await fs.stat(path.dirname(path.dirname(configPath)))).mode & 0o777).toBe(0o700);
+  });
+
+  it("removes only a run carrying its exact Paperclip owner marker", async () => {
+    const stateDir = await makeStateDir();
+    const ownedConfig = await writePaperclipClaudeMcpConfig({
+      stateDir,
+      runId: "owned-run",
+      servers: [gatewayServer],
+    });
+    const foreignRun = path.join(stateDir, "runs", "foreign-run");
+    await fs.mkdir(foreignRun, { recursive: true });
+    await fs.writeFile(path.join(foreignRun, ".paperclip-mcp-run"), "different-run\n");
+
+    await cleanupPaperclipClaudeMcpRun(stateDir, "owned-run");
+    await cleanupPaperclipClaudeMcpRun(stateDir, "foreign-run");
+
+    await expect(fs.stat(ownedConfig)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.stat(foreignRun)).resolves.toBeDefined();
+    await expect(cleanupPaperclipClaudeMcpRun(stateDir, "../broad")).rejects.toThrow(/safe path segment/);
+  });
+
+  it("sweeps only abandoned owned runs and preserves live, foreign, and symlink entries", async () => {
+    const stateDir = await makeStateDir();
+    const abandonedPath = await writePaperclipClaudeMcpConfig({
+      stateDir, runId: "abandoned-run", servers: [gatewayServer],
+    });
+    await fs.writeFile(path.join(stateDir, "runs", "abandoned-run", ".paperclip-mcp-run"), JSON.stringify({
+      owner: "paperclip-claude-mcp", runId: "abandoned-run", pid: 999_999, createdAt: new Date().toISOString(),
+    }));
+    const livePath = await writePaperclipClaudeMcpConfig({
+      stateDir, runId: "live-run", servers: [gatewayServer],
+    });
+    const foreignRun = path.join(stateDir, "runs", "foreign-run");
+    await fs.mkdir(foreignRun, { recursive: true });
+    await fs.writeFile(path.join(foreignRun, ".paperclip-mcp-run"), JSON.stringify({
+      owner: "someone-else", runId: "foreign-run", pid: 77, createdAt: new Date().toISOString(),
+    }));
+    const outside = path.join(stateDir, "outside");
+    await fs.mkdir(outside);
+    await fs.writeFile(path.join(outside, "sentinel"), "keep");
+    await fs.symlink(outside, path.join(stateDir, "runs", "symlink-run"), "dir");
+
+    await sweepAbandonedPaperclipClaudeMcpRuns(stateDir, {
+      isProcessAlive: (pid) => pid === process.pid,
+    });
+
+    await expect(fs.access(abandonedPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.access(livePath)).resolves.toBeUndefined();
+    await expect(fs.access(foreignRun)).resolves.toBeUndefined();
+    await expect(fs.readFile(path.join(outside, "sentinel"), "utf8")).resolves.toBe("keep");
+  });
+
+  it("reports a residue removal failure without blocking the next run", async () => {
+    const stateDir = await makeStateDir();
+    const configPath = await writePaperclipClaudeMcpConfig({
+      stateDir, runId: "undeletable-run", servers: [gatewayServer],
+    });
+    await fs.writeFile(path.join(stateDir, "runs", "undeletable-run", ".paperclip-mcp-run"), JSON.stringify({
+      owner: "paperclip-claude-mcp", runId: "undeletable-run", pid: 999_998, createdAt: new Date().toISOString(),
+    }));
+    const warnings: string[] = [];
+
+    await expect(sweepAbandonedPaperclipClaudeMcpRuns(stateDir, {
+      isProcessAlive: () => false,
+      removeRun: async () => { throw Object.assign(new Error("permission denied"), { code: "EACCES" }); },
+      onWarning: (message) => warnings.push(message),
+    })).resolves.toBeUndefined();
+
+    expect(warnings).toEqual([expect.stringContaining("permission denied")]);
+    await expect(fs.access(configPath)).resolves.toBeUndefined();
+    await expect(writePaperclipClaudeMcpConfig({
+      stateDir, runId: "next-run", servers: [gatewayServer],
+    })).resolves.toContain(path.join("next-run", "mcp", "mcp-config.json"));
+  });
+
+  it("advances the bounded residue cursor so entries beyond one batch are not starved", async () => {
+    const stateDir = await makeStateDir();
+    const runsDir = path.join(stateDir, "runs");
+    await fs.mkdir(runsDir, { recursive: true });
+    await Promise.all(Array.from({ length: 128 }, async (_, index) => {
+      const name = `foreign-${String(index).padStart(3, "0")}`;
+      const dir = path.join(runsDir, name);
+      await fs.mkdir(dir);
+      await fs.writeFile(path.join(dir, ".paperclip-mcp-run"), "foreign\n");
+    }));
+    const stalePath = await writePaperclipClaudeMcpConfig({
+      stateDir, runId: "zzz-stale", servers: [gatewayServer],
+    });
+    await fs.writeFile(path.join(runsDir, "zzz-stale", ".paperclip-mcp-run"), JSON.stringify({
+      owner: "paperclip-claude-mcp", runId: "zzz-stale", pid: 999_997, createdAt: new Date().toISOString(),
+    }));
+
+    await sweepAbandonedPaperclipClaudeMcpRuns(stateDir, { isProcessAlive: () => false });
+    await expect(fs.access(stalePath)).resolves.toBeUndefined();
+    await sweepAbandonedPaperclipClaudeMcpRuns(stateDir, { isProcessAlive: () => false });
+    await expect(fs.access(stalePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("wires MCP profile merge in execute.ts to effectiveEnv, not process.env", async () => {
@@ -484,9 +639,7 @@ describe("writePaperclipClaudeMcpConfig", () => {
     expect(source).not.toMatch(
       /const sharedClaudeConfigDir = resolveSharedClaudeConfigDir\(process\.env\);/,
     );
-    expect(source).toMatch(
-      /writePaperclipClaudeMcpConfig\(\{[\s\S]*?claudeConfigDir: executionTargetIsRemote \? undefined : sharedClaudeConfigDir/,
-    );
+    expect(source).toContain("cleanupPaperclipClaudeMcpRun(claudeRuntimeStateDir, runId)");
   });
 });
 

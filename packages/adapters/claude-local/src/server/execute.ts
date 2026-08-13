@@ -19,6 +19,7 @@ import {
   resolveAdapterExecutionTargetTimeoutSec,
   resolveAdapterExecutionTargetCommandForLogs,
   runAdapterExecutionTargetProcess,
+  rewritePaperclipRuntimeMcpServersForBridge,
   startAdapterExecutionTargetPaperclipBridge,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
@@ -34,6 +35,7 @@ import {
   readPaperclipIssueWorkModeFromContext,
   joinPromptSections,
   buildInvocationEnvForLogs,
+  buildAgentProcessEnv,
   ensureAbsoluteDirectory,
   ensurePathInEnv,
   isForbiddenConfigEnvKey,
@@ -54,7 +56,6 @@ import {
   parseLocalProcessNetworkAllowlist,
   parseLocalProcessNetworkScope,
   type LocalProcessSandboxOptions,
-  type LocalProcessSandboxPath,
 } from "@paperclipai/adapter-utils/local-process-sandbox";
 import {
   claudeModelUsageTotals,
@@ -79,6 +80,8 @@ import {
   resolveManagedClaudeRuntimeStateDir,
   resolveSharedClaudeConfigDir,
   writePaperclipClaudeMcpConfig,
+  cleanupPaperclipClaudeMcpRun,
+  sweepAbandonedPaperclipClaudeMcpRuns,
 } from "./claude-config.js";
 import { claudeCommandSupportsEffortFlag } from "./cli-capabilities.js";
 import { resolveClaudeDesiredSkillNames } from "./skills.js";
@@ -119,63 +122,6 @@ interface ClaudeRuntimeConfig {
   timeoutSec: number;
   graceSec: number;
   extraArgs: string[];
-}
-
-function profileMcpInstallRootFromAbsoluteArg(candidate: string): string | null {
-  const normalized = path.resolve(candidate);
-  const parts = normalized.split(path.sep);
-  for (let i = 0; i < parts.length - 1; i++) {
-    if (parts[i] === "packages" && parts[i + 1] === "mcp-server") {
-      const root = parts.slice(0, i).join(path.sep);
-      return root.length > 0 ? root : path.sep;
-    }
-  }
-  return null;
-}
-
-function profileMcpSandboxPathsFromConfig(value: unknown): LocalProcessSandboxPath[] {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-  const record = value as Record<string, unknown>;
-  const mcpServers = record.mcpServers;
-  if (!mcpServers || typeof mcpServers !== "object" || Array.isArray(mcpServers)) return [];
-
-  const mcpServersRecord = mcpServers as Record<string, unknown>;
-  const paths = new Set<string>();
-  const addAbsolutePath = (candidate: unknown) => {
-    if (typeof candidate !== "string" || !path.isAbsolute(candidate)) return;
-    paths.add(path.resolve(candidate));
-  };
-  // Intentionally hard-coded to the literal profile key "paperclip" only.
-  // Do not reuse PROFILE_MCP_SERVER_ALLOWLIST here — that list can grow and
-  // would silently broaden sandbox path mounts.
-  const entry = mcpServersRecord.paperclip;
-  if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-    const server = entry as Record<string, unknown>;
-    const type = typeof server.type === "string" ? server.type.trim().toLowerCase() : "";
-    if (!type || type === "stdio") {
-      addAbsolutePath(server.command);
-      if (Array.isArray(server.args)) {
-        for (const arg of server.args) {
-          addAbsolutePath(arg);
-          if (typeof arg === "string" && path.isAbsolute(arg)) {
-            const installRoot = profileMcpInstallRootFromAbsoluteArg(arg);
-            if (installRoot) paths.add(installRoot);
-          }
-        }
-      }
-      addAbsolutePath(server.cwd);
-    }
-  }
-
-  return Array.from(paths, (candidate) => ({ path: candidate, access: "ro" as const }));
-}
-
-async function readProfileMcpSandboxPaths(mcpConfigPath: string): Promise<LocalProcessSandboxPath[]> {
-  try {
-    return profileMcpSandboxPathsFromConfig(JSON.parse(await fs.readFile(mcpConfigPath, "utf8")));
-  } catch {
-    return [];
-  }
 }
 
 export function claudeSessionCwdMatchesExecutionTarget(input: {
@@ -392,7 +338,7 @@ async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<Cl
   }
 
   const runtimeEnv = Object.fromEntries(
-    Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
+    Object.entries(ensurePathInEnv(buildAgentProcessEnv(env))).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
@@ -590,7 +536,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     asNumber(config.terminalResultCleanupGraceMs, 5_000),
   );
   const effectiveEnv = Object.fromEntries(
-    Object.entries({ ...process.env, ...env }).filter(
+    Object.entries(buildAgentProcessEnv(env)).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
@@ -624,8 +570,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     instructionsContents: combinedInstructionsContents,
     onLog,
   });
-  const runtimeMcpServers = shadowReadOnly ? [] : (ctx.runtimeMcp?.getServers() ?? []);
-  const runtimeMcpIdentity = JSON.stringify(
+  let runtimeMcpServers = shadowReadOnly ? [] : (ctx.runtimeMcp?.getServers() ?? []);
+  let runtimeMcpIdentity = JSON.stringify(
     runtimeMcpServers.map(({ name, url, connectionId }) => ({ name, url, connectionId })),
   );
   const claudeRuntimeStateDir = resolveManagedClaudeRuntimeStateDir(
@@ -638,23 +584,36 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
   let restoreRemoteWorkspace: (() => Promise<unknown>) | null = null;
   try {
+  await sweepAbandonedPaperclipClaudeMcpRuns(claudeRuntimeStateDir, {
+    onWarning: (message) => { void onLog("stderr", `[paperclip] ${message}\n`).catch(() => undefined); },
+  });
+  if (!shadowReadOnly && executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(executionTarget)) {
+    paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+      runId,
+      target: executionTarget,
+      runtimeRootDir: null,
+      adapterKey: "claude",
+      timeoutSec,
+      hostApiToken: env.PAPERCLIP_API_KEY,
+      upstreamMcpServers: runtimeMcpServers,
+      onLog,
+    });
+    runtimeMcpServers = rewritePaperclipRuntimeMcpServersForBridge(runtimeMcpServers, paperclipBridge);
+    if (paperclipBridge) Object.assign(env, paperclipBridge.env);
+  }
   if (shadowReadOnly) {
     disposableClaudeConfigDir = await createDisposableClaudeConfigDir(sharedClaudeConfigDir);
   }
   const effectiveClaudeConfigDir = disposableClaudeConfigDir ?? sharedClaudeConfigDir;
   let localMcpConfigPath = "";
   let localMcpConfigDir = "";
-  let profileMcpSandboxPaths: LocalProcessSandboxPath[] = [];
   if (!shadowReadOnly) {
     localMcpConfigPath = await writePaperclipClaudeMcpConfig({
       stateDir: claudeRuntimeStateDir,
       runId,
       servers: runtimeMcpServers,
-      // Profile paths/secrets are host-local; do not merge into remote-bound mcp-config.
-      claudeConfigDir: executionTargetIsRemote ? undefined : sharedClaudeConfigDir,
     });
     localMcpConfigDir = path.dirname(localMcpConfigPath);
-    profileMcpSandboxPaths = await readProfileMcpSandboxPaths(localMcpConfigPath);
   }
   const networkScope = parseLocalProcessNetworkScope(config.networkScope);
   const filesystemScope = shadowReadOnly
@@ -676,7 +635,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 { path: path.join(path.dirname(sharedClaudeConfigDir), ".claude.json"), access: "rw" as const },
                 { path: promptBundle.addDir, access: "ro" as const },
                 { path: localMcpConfigDir, access: "ro" as const },
-                ...profileMcpSandboxPaths,
               ],
           extraPaths: shadowReadOnly ? [] : parseLocalProcessSandboxExtraPaths(config.filesystemExtraPaths),
           homeDir: filesystemScope ? path.dirname(effectiveClaudeConfigDir) : null,
@@ -815,6 +773,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       target: executionTarget,
       remoteClaudeConfigDir,
       remoteClaudeConfigSeedDir,
+      persistentProjectsDir: executionTarget?.kind === "remote"
+        ? path.posix.join(
+            executionTarget.remoteCwd,
+            ".paperclip-runtime",
+            "claude",
+            "session-stores",
+            agent.companyId,
+            agent.id,
+            "projects",
+          )
+        : undefined,
+      persistentProjectsRemoteCwd: executionTarget?.kind === "remote" ? executionTarget.remoteCwd : undefined,
       options: {
         cwd,
         env,
@@ -829,18 +799,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     executionTargetIsRemote &&
     adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)
   ) {
-    paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+    paperclipBridge ??= await startAdapterExecutionTargetPaperclipBridge({
       runId,
       target: runtimeExecutionTarget,
       runtimeRootDir: preparedExecutionTargetRuntime?.runtimeRootDir,
       adapterKey: "claude",
       timeoutSec,
       hostApiToken: env.PAPERCLIP_API_KEY,
+      upstreamMcpServers: runtimeMcpServers,
       onLog,
     });
     if (paperclipBridge) {
       Object.assign(env, paperclipBridge.env);
-      const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+      const runtimeEnv = ensurePathInEnv(buildAgentProcessEnv(env));
       loggedEnv = buildInvocationEnvForLogs(env, {
         runtimeEnv,
         includeRuntimeKeys: ["HOME", "CLAUDE_CONFIG_DIR"],
@@ -1072,7 +1043,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
 
     const preparedRuntimeEnv = Object.fromEntries(
-      Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
+      Object.entries(ensurePathInEnv(buildAgentProcessEnv(env))).filter(
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
@@ -1483,18 +1454,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     return toAdapterResult(initial, { fallbackSessionId: runtimeSessionId || runtime.sessionId });
   } finally {
-    if (paperclipBridge) {
-      await paperclipBridge.stop();
-    }
-    if (restoreRemoteWorkspace) {
-      await onLog(
-        "stdout",
-        `[paperclip] Restoring workspace changes from ${describeAdapterExecutionTarget(executionTarget)}.\n`,
-      );
-      await restoreRemoteWorkspace();
-    }
-    if (disposableClaudeConfigDir) {
-      await fs.rm(disposableClaudeConfigDir, { recursive: true, force: true }).catch(() => undefined);
+    await cleanupPaperclipClaudeMcpRun(claudeRuntimeStateDir, runId).catch(() => undefined);
+    try {
+      if (restoreRemoteWorkspace) {
+        await onLog("stdout", `[paperclip] Restoring workspace changes from ${describeAdapterExecutionTarget(executionTarget)}.\n`);
+        await restoreRemoteWorkspace();
+      }
+    } finally {
+      try {
+        await paperclipBridge?.stop();
+      } finally {
+        if (disposableClaudeConfigDir) await fs.rm(disposableClaudeConfigDir, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
   }
 }

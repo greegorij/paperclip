@@ -412,6 +412,7 @@ describe("claude_local ACP lane", () => {
     await fs.mkdir(path.dirname(commandPath), { recursive: true });
     await fs.writeFile(commandPath, "#!/usr/bin/env sh\n", "utf8");
     setNodeVersion("v22.12.0");
+    process.env.ANTHROPIC_API_KEY = "host-canary-must-not-count";
 
     const result = await testClaudeAcpEnvironment({
       adapterType: "claude_local",
@@ -429,6 +430,9 @@ describe("claude_local ACP lane", () => {
         code: "claude_engine_selected",
         level: "info",
       }),
+    );
+    expect(result.checks).not.toContainEqual(
+      expect.objectContaining({ code: "claude_acp_anthropic_api_key_detected" }),
     );
     expect(result.checks).toContainEqual(
       expect.objectContaining({
@@ -910,13 +914,8 @@ describe("resolveClaudeAcpBillingIdentity", () => {
     });
   });
 
-  it("ignores host env for remote execution targets", () => {
+  it("ignores host provider env even for local execution", () => {
     process.env.ANTHROPIC_API_KEY = "sk-ant-host-only";
-    expect(
-      resolveClaudeAcpBillingIdentity({
-        config: {},
-        executionTarget: { kind: "remote", transport: "sandbox", remoteCwd: "/work" },
-      } as never).billingType,
-    ).toBe("subscription");
+    expect(resolveClaudeAcpBillingIdentity({ config: {} }).billingType).toBe("subscription");
   });
 });

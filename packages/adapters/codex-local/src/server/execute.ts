@@ -20,6 +20,7 @@ import {
   resolveAdapterExecutionTargetCommandForLogs,
   runAdapterExecutionTargetProcess,
   runAdapterExecutionTargetShellCommand,
+  rewritePaperclipRuntimeMcpServersForBridge,
   startAdapterExecutionTargetPaperclipBridge,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
@@ -29,6 +30,7 @@ import {
   parseJson,
   buildPaperclipEnv,
   buildInvocationEnvForLogs,
+  buildAgentProcessEnv,
   ensureAbsoluteDirectory,
   ensurePaperclipSkillSymlink,
   ensurePathInEnv,
@@ -70,10 +72,9 @@ import {
   resolveSharedCodexHomeDir,
   seedManagedCodexHome,
   stageCodexHomeForSync,
-  mergeManagedCodexMcpGateways,
   writeApiKeyAuthJson,
   writeManagedCodexMcpConfig,
-  type ManagedCodexMcpGateway,
+  codexMcpBearerEnvVar,
 } from "./codex-home.js";
 import {
   CODEX_SANDBOX_AUTH_EXISTS_COMMAND,
@@ -296,22 +297,6 @@ function fallbackModeUsesSaferInvocation(mode: CodexTransientFallbackMode | null
 
 function fallbackModeUsesFreshSession(mode: CodexTransientFallbackMode | null): boolean {
   return mode === "fresh_session" || mode === "fresh_session_safer_invocation";
-}
-
-function managedMcpGatewaysFromContext(context: Record<string, unknown>): ManagedCodexMcpGateway[] {
-  const managedMcp = parseObject(context.paperclipManagedMcp);
-  if (managedMcp.managedMcpOnly !== true) return [];
-  const gateways = Array.isArray(managedMcp.gateways) ? managedMcp.gateways : [];
-  return gateways
-    .map((raw): ManagedCodexMcpGateway | null => {
-      const gateway = parseObject(raw);
-      const name = asString(gateway.name, "").trim();
-      const endpointPath = asString(gateway.endpointPath, "").trim();
-      const bearerToken = asString(gateway.bearerToken, "").trim();
-      if (!name || !endpointPath || !bearerToken) return null;
-      return { name, endpointPath, bearerToken };
-    })
-    .filter((gateway): gateway is ManagedCodexMcpGateway => Boolean(gateway));
 }
 
 const MANAGED_MCP_BLOCK_START = "# BEGIN PAPERCLIP MANAGED MCP";
@@ -699,9 +684,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // here so the outer `finally` can remove it on every exit path (teardown and
   // error), never only the happy path.
   let stagedCodexHomeDir: string | null = null;
-  let stagedCodexHomePurpose: "remote-runtime" | "local-filesystem-sandbox" | null = null;
+  let stagedCodexHomePurpose: "shadow" | "per-run" | null = null;
   let effectiveCodexHome = "";
+  let persistentCodexSessionsDir = "";
   let codexAuthCopyBackHostPath = "";
+  let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
   let preparedRuntimeConfig: Awaited<ReturnType<typeof prepareCodexRuntimeConfig>> = {
     notes: [],
     cleanup: async () => {},
@@ -712,8 +699,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       // home. Build their complete per-run state in a private staged home from
       // the outset, then remove any persisted Paperclip MCP bearer configuration.
       const shadowSourceCodexHome = configuredCodexHome ?? resolveSharedCodexHomeDir(process.env);
-      stagedCodexHomeDir = await stageCodexHomeForSync(shadowSourceCodexHome, { runId });
-      stagedCodexHomePurpose = "local-filesystem-sandbox";
+      stagedCodexHomeDir = await stageCodexHomeForSync(shadowSourceCodexHome, {
+        runId,
+        includePersistentSessions: false,
+      });
+      stagedCodexHomePurpose = "shadow";
       await removeManagedMcpConfigFromStagedCodexHome(stagedCodexHomeDir);
       if (configuredOpenAiApiKey) {
         await writeApiKeyAuthJson(stagedCodexHomeDir, configuredOpenAiApiKey);
@@ -763,10 +753,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             `OPENAI_API_KEY.`,
         );
       }
-      // Merge custom model providers (PAPERCLIP_CODEX_PROVIDERS) into the managed
-      // CODEX_HOME's config.toml BEFORE the home is shipped to a remote execution
-      // target, so both local and sandboxed Codex processes pick up the routing.
-      // An explicit env.CODEX_HOME override is treated as user-managed and skipped.
+      // Every normal run receives a private CODEX_HOME overlay. Runtime MCP entries
+      // and their environment-variable references therefore never mutate shared
+      // config.toml and concurrent runs cannot overwrite each other's gateway set.
+      persistentCodexSessionsDir = path.join(effectiveCodexHome, "sessions");
+      stagedCodexHomeDir = await stageCodexHomeForSync(effectiveCodexHome, {
+        runId,
+        persistentSessionsDir: persistentCodexSessionsDir,
+      });
+      effectiveCodexHome = stagedCodexHomeDir;
+      stagedCodexHomePurpose = "per-run";
+
+      // Merge custom model providers into that private overlay. An explicit
+      // env.CODEX_HOME override remains user-managed and skips provider rewriting.
       preparedRuntimeConfig = await prepareCodexRuntimeConfig({
         env: envConfigStrings,
         codexHome: configuredCodexHome ? null : effectiveCodexHome,
@@ -776,18 +775,35 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       await onLog("stdout", `[paperclip] ${note}\n`);
     }
     const paperclipBaseEnv = buildPaperclipEnv(agent);
-    const runtimeMcpGateways = shadowReadOnly
+    let runtimeMcpGateways = shadowReadOnly
       ? []
       : (ctx.runtimeMcp?.getServers() ?? []).map((server) => ({
           name: server.name,
           endpointPath: server.url,
           bearerToken: server.token,
+          bearerTokenEnvVar: codexMcpBearerEnvVar({ name: server.name, endpointPath: server.url }),
         }));
+    if (!shadowReadOnly && executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(executionTarget)) {
+      paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+        runId,
+        target: executionTarget,
+        runtimeRootDir: null,
+        adapterKey: "codex",
+        timeoutSec: asNumber(config.timeoutSec, 0),
+        hostApiToken: authToken,
+        upstreamMcpServers: runtimeMcpGateways.map((gateway) => ({
+          url: gateway.endpointPath,
+          token: gateway.bearerToken,
+        })),
+        onLog,
+      });
+      runtimeMcpGateways = rewritePaperclipRuntimeMcpServersForBridge(
+        runtimeMcpGateways.map((gateway) => ({ ...gateway, url: gateway.endpointPath, token: gateway.bearerToken })),
+        paperclipBridge,
+      ).map(({ url, token, ...gateway }) => ({ ...gateway, endpointPath: url, bearerToken: token }));
+    }
     if (!shadowReadOnly) {
-      const managedMcpGateways = mergeManagedCodexMcpGateways(
-        runtimeMcpGateways,
-        managedMcpGatewaysFromContext(context),
-      );
+      const managedMcpGateways = runtimeMcpGateways;
       const managedMcp = await writeManagedCodexMcpConfig({
         codexHome: effectiveCodexHome,
         apiBaseUrl: paperclipBaseEnv.PAPERCLIP_API_URL,
@@ -834,17 +850,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             "stdout",
             `[paperclip] Syncing ${targetWorkspaceRealization?.mode === "in_place" ? "CODEX_HOME" : "workspace and CODEX_HOME"} to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
           );
-          // Stage only the files Codex actually needs into a curated temp dir and
-          // ship THAT as the `home` asset, instead of the whole managed
-          // CODEX_HOME + a name denylist. Staged AFTER the config.toml rewrites
-          // (provider merge + MCP block splice above) and skills injection, so the
-          // staged config.toml/skills reflect their final state. Symlinks (incl.
-          // the single-use `auth.json`) are dereferenced to bytes. This drops the
-          // large runtime state (`sessions/`, `*.sqlite`, `plugins/`, …) that the
-          // 4-name denylist missed and that a sandbox run never needs.
-          stagedCodexHomeDir = await stageCodexHomeForSync(effectiveCodexHome, { runId });
-          const stagedCodexHomeDirForRuntime = stagedCodexHomeDir;
-          stagedCodexHomePurpose = "remote-runtime";
+          // The private per-run overlay is already the curated allowlisted home;
+          // ship it directly after runtime config and skills have been materialized.
+          const stagedCodexHomeDirForRuntime = effectiveCodexHome;
           return await prepareAdapterExecutionTargetRuntime({
             runId,
             target: executionTarget,
@@ -865,12 +873,20 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 key: "home",
                 localDir: stagedCodexHomeDirForRuntime,
                 followSymlinks: true,
+                exclude: [".paperclip-codex-staged-home"],
                 // Inbound (host→sandbox) auth-merge contribution: stages the two
                 // merge scripts and runs the merge-extract command so a sandbox
                 // that already carries a Codex `auth.json` keeps whichever
                 // credential is newer. The sandbox runtime core stays adapter-
                 // agnostic — it just invokes this generic `provision` seam.
-                provision: buildCodexAuthInboundProvision(),
+                provision: buildCodexAuthInboundProvision(path.posix.join(
+                  effectiveExecutionCwd,
+                  ".paperclip-runtime",
+                  "codex",
+                  "session-stores",
+                  agent.companyId,
+                  agent.id,
+                ), effectiveExecutionCwd),
                 // Outbound (sandbox→host) auth copy-back contribution: at
                 // teardown, read the sandbox's `auth.json` and — guarded by the
                 // same direction-agnostic decision predicate under a directory
@@ -906,19 +922,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const filesystemScope = shadowReadOnly ? "workspace" : configuredFilesystemScope;
     const filesystemWorkspaceAccess = shadowReadOnly ? "ro" : configuredFilesystemWorkspaceAccess;
     const localFilesystemSandboxEnabled = filesystemScope === "workspace" && !executionTargetIsRemote;
-    let localFilesystemSandboxCodexHome = effectiveCodexHome;
-    if (localFilesystemSandboxEnabled && !shadowReadOnly) {
-      // Bubblewrap mounts only explicit managed paths. Stage a curated CODEX_HOME
-      // with dereferenced auth/config/skills so auth.json is a real readable file
-      // inside tmpfs root (never a dangling host-relative symlink).
-      stagedCodexHomeDir = await stageCodexHomeForSync(effectiveCodexHome, { runId });
-      stagedCodexHomePurpose = "local-filesystem-sandbox";
-      localFilesystemSandboxCodexHome = stagedCodexHomeDir;
-    }
+    // The per-run overlay contains dereferenced auth/config/skills and is safe to
+    // mount directly in the local filesystem sandbox.
+    const localFilesystemSandboxCodexHome = effectiveCodexHome;
     const restoreRemoteWorkspace = preparedExecutionTargetRuntime
       ? () => preparedExecutionTargetRuntime.restoreWorkspace((line) => onLog("stdout", line))
       : null;
-    let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
     const remoteCodexHome = executionTargetIsRemote
       ? preparedExecutionTargetRuntime?.assetDirs.home ??
         path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "codex", "home")
@@ -933,6 +942,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       onEvent,
     });
     const env: Record<string, string> = { ...paperclipBaseEnv };
+    for (const gateway of runtimeMcpGateways) {
+      env[gateway.bearerTokenEnvVar] = gateway.bearerToken;
+    }
     env.PAPERCLIP_RUN_ID = runId;
     const wakeTaskId =
       (typeof context.taskId === "string" && context.taskId.trim().length > 0 && context.taskId.trim()) ||
@@ -1021,13 +1033,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       executionTargetIsRemote &&
       adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)
     ) {
-      paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+      paperclipBridge ??= await startAdapterExecutionTargetPaperclipBridge({
         runId,
         target: runtimeExecutionTarget,
         runtimeRootDir: preparedExecutionTargetRuntime?.runtimeRootDir,
         adapterKey: "codex",
         timeoutSec,
         hostApiToken: env.PAPERCLIP_API_KEY,
+        upstreamMcpServers: runtimeMcpGateways.map((gateway) => ({
+          url: gateway.endpointPath,
+          token: gateway.bearerToken,
+        })),
         onLog,
       });
       if (paperclipBridge) {
@@ -1035,7 +1051,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
     }
     const effectiveEnv = Object.fromEntries(
-      Object.entries({ ...process.env, ...env }).filter(
+      Object.entries(buildAgentProcessEnv(env)).filter(
         (entry): entry is [string, string] =>
           typeof entry[1] === "string" && (!shadowReadOnly || entry[0] !== "PAPERCLIP_API_KEY"),
       ),
@@ -1044,6 +1060,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const localProcessSandboxManagedPaths: LocalProcessSandboxOptions["managedPaths"] = [
       { path: localFilesystemSandboxCodexHome, access: "rw" },
     ];
+    if (!shadowReadOnly && persistentCodexSessionsDir) {
+      localProcessSandboxManagedPaths.push({ path: persistentCodexSessionsDir, access: "rw" });
+    }
     const runScratchDir = resolveSafeAbsoluteRunScratchDirFromEnv(env);
     if (
       !shadowReadOnly &&
@@ -1656,9 +1675,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       return toResult(initial, false, false);
     } finally {
-      if (paperclipBridge) {
-        await paperclipBridge.stop();
-      }
       if (restoreRemoteWorkspace) {
         await onLog(
           "stdout",
@@ -1668,11 +1684,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
     }
   } finally {
+    await paperclipBridge?.stop();
     try {
       if (
         !shadowReadOnly &&
         stagedCodexHomeDir &&
-        stagedCodexHomePurpose === "local-filesystem-sandbox"
+        stagedCodexHomePurpose === "per-run" &&
+        !executionTargetIsRemote
       ) {
         const stagedCodexHomeDirForCopyBack = stagedCodexHomeDir;
         await copyBackCodexAuth({
@@ -1682,28 +1700,25 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         });
       }
     } finally {
-      // Remove the staged CODEX_HOME allowlist temp dir on every exit path
-      // (teardown AND error), never only the happy path. Cleanup failure is
-      // logged, not fatal — a leaked temp dir must not crash the run.
-      if (stagedCodexHomeDir) {
-        await fs.rm(stagedCodexHomeDir, { recursive: true, force: true }).catch(async (error) => {
-          await onLog(
-            "stderr",
-            `[paperclip] Failed to remove staged Codex home "${stagedCodexHomeDir}": ${
-              error instanceof Error ? error.message : String(error)
-            }\n`,
-          );
-        });
+      // Restore any temporary provider rewrite while the per-run home still
+      // exists. The cleanup may write the original config.toml.
+      try {
+        await preparedRuntimeConfig.cleanup();
+      } finally {
+        // Remove the staged CODEX_HOME allowlist temp dir on every exit path
+        // (teardown AND error), never only the happy path. Cleanup failure is
+        // logged, not fatal — a leaked temp dir must not crash the run.
+        if (stagedCodexHomeDir) {
+          await fs.rm(stagedCodexHomeDir, { recursive: true, force: true }).catch(async (error) => {
+            await onLog(
+              "stderr",
+              `[paperclip] Failed to remove staged Codex home "${stagedCodexHomeDir}": ${
+                error instanceof Error ? error.message : String(error)
+              }\n`,
+            );
+          });
+        }
       }
-      // Restore the managed config.toml so PAPERCLIP_CODEX_PROVIDERS changes
-      // (or removal) between runs never leave stale provider routing behind. This
-      // finally starts the moment prepareCodexRuntimeConfig returns, so a throw
-      // anywhere in the remaining setup (skill injection, remote runtime
-      // preparation, command building) restores the original config.toml too.
-      // If the process dies before reaching this, the next
-      // prepareCodexRuntimeConfig restores the original from the pre-run backup
-      // written at prepare time.
-      await preparedRuntimeConfig.cleanup();
     }
   }
 }

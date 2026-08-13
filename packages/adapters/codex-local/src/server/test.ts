@@ -1,3 +1,4 @@
+import { buildAgentProcessEnv } from "@paperclipai/adapter-utils/server-utils";
 import type {
   AdapterEnvironmentCheck,
   AdapterEnvironmentTestContext,
@@ -257,7 +258,7 @@ export async function testEnvironment(
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
   }
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  const runtimeEnv = ensurePathInEnv(buildAgentProcessEnv(env));
   const installCheck = await maybeRunSandboxInstallCommand({
     runId,
     target,
@@ -284,9 +285,8 @@ export async function testEnvironment(
   }
 
   const configOpenAiKey = env.OPENAI_API_KEY;
-  const hostOpenAiKey = targetIsRemote ? undefined : process.env.OPENAI_API_KEY;
-  if (isNonEmpty(configOpenAiKey) || isNonEmpty(hostOpenAiKey)) {
-    const source = isNonEmpty(configOpenAiKey) ? "adapter config env" : "server environment";
+  if (isNonEmpty(configOpenAiKey)) {
+    const source = "adapter config env";
     checks.push({
       code: "codex_openai_api_key_present",
       level: "info",
@@ -356,9 +356,7 @@ export async function testEnvironment(
       // the command line) to avoid leaking it into process listings.
       const probeApiKey = isNonEmpty(configOpenAiKey)
         ? configOpenAiKey
-        : isNonEmpty(hostOpenAiKey)
-          ? hostOpenAiKey
-          : null;
+        : null;
       const preparedProbe = await prepareCodexHelloProbe({
         runId,
         companyId: ctx.companyId,

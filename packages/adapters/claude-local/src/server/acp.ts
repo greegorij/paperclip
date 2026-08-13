@@ -141,24 +141,17 @@ export function buildClaudeAcpConfig(config: Record<string, unknown>): Record<st
 /**
  * Classify billing the same way the Claude CLI lane does so ACP runs land in
  * the cost ledger with a real provider/billingType instead of acpx/unknown.
- * Host env only counts for local execution targets; remote targets see just
- * the adapter-config env.
+ * Only the explicitly resolved adapter env counts. Host provider credentials
+ * are outside the child-process boundary for both local and remote runs.
  */
 export function resolveClaudeAcpBillingIdentity(
   ctx: Pick<AdapterExecutionContext, "config"> &
     Partial<Pick<AdapterExecutionContext, "executionTarget" | "executionTransport">>,
 ): { provider: string; biller: string; billingType: AdapterBillingType } {
   const envConfig = parseObject(parseObject(ctx.config).env);
-  const target = readAdapterExecutionTarget({
-    executionTarget: ctx.executionTarget,
-    legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
-  });
-  const considerHostEnv = target?.kind !== "remote";
   const readEnvValue = (key: string): string => {
     const fromConfig = envConfig[key];
-    if (typeof fromConfig === "string" && fromConfig.trim()) return fromConfig.trim();
-    const fromHost = considerHostEnv ? process.env[key] : undefined;
-    return typeof fromHost === "string" ? fromHost.trim() : "";
+    return typeof fromConfig === "string" ? fromConfig.trim() : "";
   };
   const bedrockFlag = readEnvValue("CLAUDE_CODE_USE_BEDROCK");
   const bedrock = bedrockFlag === "1" || bedrockFlag === "true" || Boolean(readEnvValue("ANTHROPIC_BEDROCK_BASE_URL"));
@@ -249,13 +242,26 @@ async function prepareClaudeRemoteManagedHome(
   const remoteClaudeConfigSeedDir =
     stagedRuntime.assetDirs["config-seed"] ?? path.posix.join(remoteClaudeRuntimeRoot, "config-seed");
   const remoteClaudeConfigDir = path.posix.join(remoteClaudeRuntimeRoot, "config");
+  const persistentProjectsDir = path.posix.join(
+    executionTarget.kind === "remote" ? executionTarget.remoteCwd : "/tmp",
+    ".paperclip-runtime",
+    "claude",
+    "session-stores",
+    input.companyId,
+    input.agentId,
+    "projects",
+  );
 
+  try {
   await onLog("stdout", `[paperclip] Materializing Claude auth/config into ${remoteClaudeConfigDir}.\n`);
   await materializeRemoteClaudeConfig({
     runId,
     target: executionTarget,
     remoteClaudeConfigDir,
     remoteClaudeConfigSeedDir,
+    persistentProjectsDir,
+    persistentProjectsRemoteCwd:
+      executionTarget.kind === "remote" ? executionTarget.remoteCwd : undefined,
     options: {
       cwd: stagedRuntime.workspaceRemoteDir ?? input.workspaceLocalDir,
       env,
@@ -264,6 +270,12 @@ async function prepareClaudeRemoteManagedHome(
       onLog,
     },
   });
+  } catch (error) {
+    await stagedRuntime.disposeRuntime().catch(async (cleanupError) => {
+      await onLog("stderr", `[paperclip] Claude ACP cleanup also failed after materialization failure: ${String(cleanupError)}\n`);
+    });
+    throw error;
+  }
   // Repoint CLAUDE_CONFIG_DIR onto the in-sandbox config dir.
   env.CLAUDE_CONFIG_DIR = remoteClaudeConfigDir;
   return { stagedRuntime };
@@ -499,16 +511,11 @@ export async function testClaudeAcpEnvironment(
   });
 
   const envConfig = parseObject(config.env);
-  const considerHostEnv = !targetIsRemote;
   const hasBedrock =
     envConfig.CLAUDE_CODE_USE_BEDROCK === "1" ||
     envConfig.CLAUDE_CODE_USE_BEDROCK === "true" ||
-    (considerHostEnv && process.env.CLAUDE_CODE_USE_BEDROCK === "1") ||
-    (considerHostEnv && process.env.CLAUDE_CODE_USE_BEDROCK === "true") ||
-    isNonEmpty(envConfig.ANTHROPIC_BEDROCK_BASE_URL) ||
-    (considerHostEnv && isNonEmpty(process.env.ANTHROPIC_BEDROCK_BASE_URL));
+    isNonEmpty(envConfig.ANTHROPIC_BEDROCK_BASE_URL);
   const configApiKey = envConfig.ANTHROPIC_API_KEY;
-  const hostApiKey = considerHostEnv ? process.env.ANTHROPIC_API_KEY : undefined;
   if (hasBedrock) {
     checks.push({
       code: "claude_acp_bedrock_auth",
@@ -516,13 +523,12 @@ export async function testClaudeAcpEnvironment(
       message: "AWS Bedrock auth detected. Claude ACP will use Bedrock for inference.",
       hint: "Ensure AWS credentials and AWS_REGION are configured in this environment.",
     });
-  } else if (isNonEmpty(configApiKey) || isNonEmpty(hostApiKey)) {
-    const source = isNonEmpty(configApiKey) ? "adapter config env" : "server environment";
+  } else if (isNonEmpty(configApiKey)) {
     checks.push({
       code: "claude_acp_anthropic_api_key_detected",
       level: "warn",
       message: "ANTHROPIC_API_KEY is set. Claude ACP will use API-key auth instead of subscription credentials.",
-      detail: `Detected in ${source}.`,
+      detail: "Detected in adapter config env.",
       hint: "Unset ANTHROPIC_API_KEY if you want subscription-based Claude login behavior.",
     });
   } else if (!targetIsRemote) {

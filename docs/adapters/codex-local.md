@@ -32,6 +32,26 @@ The `codex_local` adapter runs OpenAI's Codex CLI locally. It supports session p
 | `fastMode` | boolean | No | Enables Codex Fast mode. Currently supported on `gpt-5.4` only and burns credits faster |
 | `dangerouslyBypassApprovalsAndSandbox` | boolean | No | Skip safety checks (dev only) |
 
+## Paperclip control plane and process environment
+
+Normal CLI and ACP runs receive one adapter-neutral, run-scoped `runtimeMcp`
+set. Its first entry is the mandatory Paperclip control plane at `/api/mcp`,
+created for every authenticated run independently of gateway tables. Optional
+managed gateways and installed tool connections are appended as authenticated HTTP MCP
+endpoints. The Codex renderer writes only that set into the managed `CODEX_HOME`;
+there is no separate heartbeat-context channel, so switching between Claude and
+Codex preserves the same tool identity.
+
+The child process inherits only allowlisted operating-system identity/runtime
+values from the Paperclip server. Provider credentials are not inherited;
+authentication must come from the adapter's explicit `env` or its CLI-owned
+credential files. Database,
+migration, encryption, signing, backup, mail and infrastructure settings are
+server-only. Values declared explicitly in adapter `env` still pass through.
+`managedMcpOnly=false` disables only additional named managed gateways. It can
+never disable the mandatory Paperclip control plane; independently permitted
+optional connections remain available.
+
 ## Session Persistence
 
 Codex uses `previous_response_id` for session continuity. The adapter serializes and restores this across heartbeats, allowing the agent to maintain conversation context.

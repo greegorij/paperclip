@@ -10,6 +10,7 @@ import {
   listAdapterModelProfiles,
   registerServerAdapter,
   requireServerAdapter,
+  listServerAdapters,
   unregisterServerAdapter,
 } from "../adapters/index.js";
 import {
@@ -35,6 +36,29 @@ const externalAdapter: ServerAdapterModule = {
 };
 
 describe("server adapter registry", () => {
+  it("routes Gemini ACP through the same authenticated runtime MCP contract", () => {
+    const gemini = requireServerAdapter("gemini_local");
+    expect(gemini.acp).toMatchObject({ agentId: "gemini" });
+    expect(gemini.supportsRuntimeMcp).toBe(true);
+    expect(gemini.supportsLocalAgentJwt).toBe(true);
+  });
+
+  it("requires run-scoped local JWT support for every runtime MCP adapter", () => {
+    for (const adapter of listServerAdapters()) {
+      if (adapter.supportsRuntimeMcp) {
+        expect(adapter.supportsLocalAgentJwt, adapter.type).toBe(true);
+      }
+    }
+  });
+
+  it("rejects an external adapter that advertises runtime MCP without local JWT", () => {
+    expect(() => registerServerAdapter({
+      ...externalAdapter,
+      type: "invalid_runtime_mcp",
+      supportsRuntimeMcp: true,
+      supportsLocalAgentJwt: false,
+    })).toThrow(/cannot support runtime MCP without local agent JWT/);
+  });
   beforeEach(() => {
     unregisterServerAdapter("external_test");
     unregisterServerAdapter("hermes_local");

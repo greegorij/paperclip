@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { buildAgentProcessEnv } from "@paperclipai/adapter-utils/server-utils";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,6 +48,7 @@ import {
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
+import { buildRemotePrivateStoreProvision } from "@paperclipai/adapter-utils/remote-private-store";
 import { isPiUnknownSessionError, parsePiJsonl } from "./parse.js";
 import { ensurePiModelConfiguredAndAvailable } from "./models.js";
 import { preparePiRuntimeConfig } from "./runtime-config.js";
@@ -146,9 +148,9 @@ function buildSessionPath(agentId: string, timestamp: string): string {
   return path.join(PAPERCLIP_SESSIONS_DIR, `${safeTimestamp}-${agentId}.jsonl`);
 }
 
-function buildRemoteSessionPath(runtimeRootDir: string, agentId: string, timestamp: string): string {
+function buildRemoteSessionPath(sessionStoreDir: string, agentId: string, timestamp: string): string {
   const safeTimestamp = timestamp.replace(/[:.]/g, "-");
-  return path.posix.join(runtimeRootDir, "sessions", `${safeTimestamp}-${agentId}.jsonl`);
+  return path.posix.join(sessionStoreDir, `${safeTimestamp}-${agentId}.jsonl`);
 }
 
 function normalizeExecutionCwd(candidate: string, remote: boolean): string {
@@ -336,7 +338,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const skillBinDirs = piSkillEntries
       .filter((entry) => injectedSkillKeys.has(entry.key) && entry.source.length > 0)
       .map((entry) => path.join(entry.source, "bin"));
-    const mergedEnv = ensurePathInEnv({ ...process.env, ...env });
+    const mergedEnv = ensurePathInEnv(buildAgentProcessEnv(env));
     const pathKey =
       typeof mergedEnv.Path === "string" && mergedEnv.Path.length > 0 && !mergedEnv.PATH
         ? "Path"
@@ -397,12 +399,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     })();
     let restoreRemoteWorkspace: (() => Promise<void>) | null = null;
     let remoteRuntimeRootDir: string | null = null;
+    let remoteSessionStoreDir: string | null = null;
     let localSkillsDir: string | null = null;
     let remoteSkillsDir: string | null = null;
     let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
 
+    try {
     if (executionTargetIsRemote) {
-      try {
         localSkillsDir = await buildPiSkillsDir(config);
         await onLog(
           "stdout",
@@ -452,42 +455,33 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           env.HOME = preparedRemoteRuntime.runtimeRootDir;
         }
         remoteRuntimeRootDir = preparedRemoteRuntime.runtimeRootDir;
+        const targetRemoteCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
+        if (!targetRemoteCwd) throw new Error("Remote Pi execution requires a remote cwd");
+        remoteSessionStoreDir = path.posix.join(
+          targetRemoteCwd,
+          ".paperclip-runtime",
+          "pi",
+          "session-stores",
+          agent.companyId,
+          agent.id,
+          "sessions",
+        );
+        await runAdapterExecutionTargetShellCommand(
+          runId,
+          executionTarget,
+          buildRemotePrivateStoreProvision({
+            remoteCwd: targetRemoteCwd,
+            adapterKey: "pi",
+            storeDir: remoteSessionStoreDir,
+          }),
+          { cwd, env, timeoutSec, graceSec, onLog },
+        );
         remoteSkillsDir = preparedRemoteRuntime.assetDirs.skills ?? null;
         if (localAgentConfigDir && preparedRemoteRuntime.assetDirs.agentConfig) {
           env.PI_CODING_AGENT_DIR = preparedRemoteRuntime.assetDirs.agentConfig;
         }
-      } catch (error) {
-        await Promise.allSettled([
-          restoreRemoteWorkspace?.(),
-          localSkillsDir ? fs.rm(path.dirname(localSkillsDir), { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
-        ]);
-        throw error;
-      }
     }
     const runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
-    if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
-      paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
-        runId,
-        target: runtimeExecutionTarget,
-        runtimeRootDir: remoteRuntimeRootDir,
-        adapterKey: "pi",
-        timeoutSec,
-        hostApiToken: env.PAPERCLIP_API_KEY,
-        onLog,
-      });
-      if (paperclipBridge) {
-        Object.assign(env, paperclipBridge.env);
-        loggedEnv = buildInvocationEnvForLogs(env, {
-          runtimeEnv: Object.fromEntries(
-            Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
-              (entry): entry is [string, string] => typeof entry[1] === "string",
-            ),
-          ),
-          includeRuntimeKeys: ["HOME"],
-          resolvedCommand,
-        });
-      }
-    }
 
     const runtimeSessionParams = parseObject(runtime.sessionParams);
     const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
@@ -520,8 +514,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       sessionHeaderCwdMatches;
     const sessionPath = canResumeSession
       ? runtimeSessionId
-      : executionTargetIsRemote && remoteRuntimeRootDir
-        ? buildRemoteSessionPath(remoteRuntimeRootDir, agent.id, new Date().toISOString())
+      : executionTargetIsRemote && remoteSessionStoreDir
+        ? buildRemoteSessionPath(remoteSessionStoreDir, agent.id, new Date().toISOString())
         : buildSessionPath(agent.id, new Date().toISOString());
 
     if (runtimeSessionId && !canResumeSession) {
@@ -795,7 +789,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       };
     };
 
-    try {
+      if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
+        paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+          runId, target: runtimeExecutionTarget, runtimeRootDir: remoteRuntimeRootDir,
+          adapterKey: "pi", timeoutSec, hostApiToken: env.PAPERCLIP_API_KEY, onLog,
+        });
+        if (paperclipBridge) Object.assign(env, paperclipBridge.env);
+      }
       const initial = await runAttempt(sessionPath);
       const initialFailed =
         !initial.proc.timedOut && ((initial.proc.exitCode ?? 0) !== 0 || initial.parsed.errors.length > 0);
@@ -809,8 +809,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           "stdout",
           `[paperclip] Pi session "${runtimeSessionId}" is unavailable; retrying with a fresh session.\n`,
         );
-        const newSessionPath = executionTargetIsRemote && remoteRuntimeRootDir
-          ? buildRemoteSessionPath(remoteRuntimeRootDir, agent.id, new Date().toISOString())
+        const newSessionPath = executionTargetIsRemote && remoteSessionStoreDir
+          ? buildRemoteSessionPath(remoteSessionStoreDir, agent.id, new Date().toISOString())
           : buildSessionPath(agent.id, new Date().toISOString());
         if (executionTargetIsRemote) {
           await ensureAdapterExecutionTargetFile(runId, executionTarget, newSessionPath, {
@@ -835,11 +835,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       return toResult(initial);
     } finally {
-      await Promise.all([
-        paperclipBridge?.stop(),
-        restoreRemoteWorkspace?.(),
-        localSkillsDir ? fs.rm(path.dirname(localSkillsDir), { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
-      ]);
+      try {
+        await restoreRemoteWorkspace?.();
+      } finally {
+        try {
+          await paperclipBridge?.stop();
+        } finally {
+          if (localSkillsDir) await fs.rm(path.dirname(localSkillsDir), { recursive: true, force: true }).catch(() => undefined);
+        }
+      }
     }
   } finally {
     await preparedRuntimeConfig.cleanup();

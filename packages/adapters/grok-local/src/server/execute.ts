@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { buildAgentProcessEnv } from "@paperclipai/adapter-utils/server-utils";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
@@ -7,6 +8,7 @@ import {
   adapterExecutionTargetRemoteCwd,
   adapterExecutionTargetSessionIdentity,
   adapterExecutionTargetSessionMatches,
+  adapterExecutionTargetUsesPaperclipBridge,
   describeAdapterExecutionTarget,
   ensureAdapterExecutionTargetCommandResolvable,
   ensureAdapterExecutionTargetRuntimeCommandInstalled,
@@ -16,6 +18,7 @@ import {
   resolveAdapterExecutionTargetCommandForLogs,
   resolveAdapterExecutionTargetTimeoutSec,
   runAdapterExecutionTargetProcess,
+  startAdapterExecutionTargetPaperclipBridge,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
   asBoolean,
@@ -239,6 +242,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     onLog,
   });
   let restoreRemoteWorkspace: (() => Promise<void>) | null = null;
+  let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
 
   try {
     const envConfig = parseObject(config.env);
@@ -343,11 +347,27 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         executionTargetIsRemote,
         executionCwd: effectiveExecutionCwd,
       });
+      if (adapterExecutionTargetUsesPaperclipBridge(executionTarget)) {
+        paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+          runId,
+          target: executionTarget,
+          runtimeRootDir: preparedExecutionTargetRuntime.runtimeRootDir,
+          adapterKey: "grok",
+          timeoutSec,
+          hostApiToken: authToken,
+          upstreamMcpServers: [],
+          onLog,
+        });
+        if (!paperclipBridge) {
+          throw new Error("Remote Grok execution requires a Paperclip REST callback bridge");
+        }
+        Object.assign(env, paperclipBridge.env);
+      }
     }
 
     const runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
     const effectiveEnv = Object.fromEntries(
-      Object.entries({ ...process.env, ...env }).filter(
+      Object.entries(buildAgentProcessEnv(env)).filter(
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
@@ -580,9 +600,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     return toResult(initial);
   } finally {
-    await Promise.all([
-      restoreRemoteWorkspace?.(),
-      stagedAssets.cleanup(),
-    ]);
+    try {
+      await restoreRemoteWorkspace?.();
+    } finally {
+      try {
+        await paperclipBridge?.stop();
+      } finally {
+        await stagedAssets.cleanup();
+      }
+    }
   }
 }

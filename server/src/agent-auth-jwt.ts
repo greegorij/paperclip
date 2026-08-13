@@ -120,6 +120,7 @@ export function createLocalAgentJwt(
   runId: string,
   responsibleUserId?: string | null,
   keyScope: AgentApiKeyScope = { kind: "standard" },
+  ttlSecondsOverride?: number,
 ) {
   const config = jwtConfig();
   if (!config) return null;
@@ -133,7 +134,11 @@ export function createLocalAgentJwt(
     responsible_user_id: responsibleUserId?.trim() || null,
     ...(keyScope.kind === "standard" ? {} : { key_scope: keyScope }),
     iat: now,
-    exp: now + config.ttlSeconds,
+    exp: now + (
+      typeof ttlSecondsOverride === "number" && Number.isFinite(ttlSecondsOverride) && ttlSecondsOverride > 0
+        ? Math.floor(ttlSecondsOverride)
+        : config.ttlSeconds
+    ),
     iss: config.issuer,
     aud: config.audience,
     instance_id: config.instanceId,
@@ -154,7 +159,10 @@ export function createLocalAgentJwt(
   return `${signingInput}.${signature}`;
 }
 
-export function verifyLocalAgentJwt(token: string): LocalAgentJwtClaims | null {
+export function verifyLocalAgentJwt(
+  token: string,
+  options: { allowExpired?: boolean } = {},
+): LocalAgentJwtClaims | null {
   if (!token) return null;
   const config = jwtConfig();
   if (!config) return null;
@@ -216,7 +224,7 @@ export function verifyLocalAgentJwt(token: string): LocalAgentJwtClaims | null {
   const companyId = claimedCompanyId;
 
   const now = Math.floor(Date.now() / 1000);
-  if (exp < now) return null;
+  if (exp < now && !options.allowExpired) return null;
 
   const issuer = typeof claims.iss === "string" ? claims.iss : undefined;
   const audience = typeof claims.aud === "string" ? claims.aud : undefined;

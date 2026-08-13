@@ -111,6 +111,17 @@ describe("agent local JWT", () => {
     expect(verifyLocalAgentJwt(token!)).toBeNull();
   });
 
+  it("honors a run-bounded TTL override for active long executions", () => {
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const token = createLocalAgentJwt(
+      "agent-1", "company-1", "claude_local", "run-long", null, { kind: "standard" }, 5 * 60 * 60,
+    );
+    vi.setSystemTime(new Date("2026-01-01T02:00:00.000Z"));
+    expect(verifyLocalAgentJwt(token!)?.run_id).toBe("run-long");
+    vi.setSystemTime(new Date("2026-01-01T05:00:01.000Z"));
+    expect(verifyLocalAgentJwt(token!)).toBeNull();
+  });
+
   it("rejects issuer/audience mismatch", () => {
     process.env[issuerEnv] = "custom-issuer";
     process.env[audienceEnv] = "custom-audience";

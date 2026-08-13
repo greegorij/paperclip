@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CODEX_SYNC_ALLOWLIST,
+  codexMcpBearerEnvVar,
   codexHomeHasUsableAuth,
   ensureSymlink,
   evaluateCodexCredentialReadiness,
@@ -13,6 +14,7 @@ import {
   reconcileManagedCodexHome,
   seedManagedCodexHome,
   stageCodexHomeForSync,
+  sweepAbandonedCodexStagedHomes,
   removeCodexMcpServers,
   writeManagedCodexMcpConfig,
 } from "./codex-home.js";
@@ -713,7 +715,15 @@ describe("evaluateCodexCredentialReadiness", () => {
 });
 
 describe("writeManagedCodexMcpConfig", () => {
-  it("writes Authorization into Codex-supported http_headers and keeps mode 0600", async () => {
+  it("derives a stable safe variable name without incorporating the token", () => {
+    const gateway = { name: "Paperclip control", endpointPath: "/api/mcp" };
+    const first = codexMcpBearerEnvVar(gateway);
+    expect(first).toMatch(/^PAPERCLIP_CODEX_MCP_BEARER_TOKEN_[A-F0-9]{16}$/);
+    expect(codexMcpBearerEnvVar(gateway)).toBe(first);
+    expect(codexMcpBearerEnvVar({ ...gateway, endpointPath: "/api/other" })).not.toBe(first);
+  });
+
+  it("writes only a deterministic bearer env reference and keeps tokens out of config", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-mcp-headers-"));
     try {
       const result = await writeManagedCodexMcpConfig({
@@ -728,7 +738,8 @@ describe("writeManagedCodexMcpConfig", () => {
 
       const config = await fs.readFile(result.configPath, "utf8");
       expect(config).toContain('[mcp_servers."alpha"]');
-      expect(config).toContain('http_headers = { Authorization = "Bearer alpha-token" }');
+      expect(config).toMatch(/bearer_token_env_var = "PAPERCLIP_CODEX_MCP_BEARER_TOKEN_[A-F0-9]{16}"/);
+      expect(config).not.toContain("alpha-token");
       expect(config).not.toMatch(/^\s*headers\s*=/m);
       expect((await fs.stat(result.configPath)).mode & 0o777).toBe(0o600);
     } finally {
@@ -771,7 +782,8 @@ describe("writeManagedCodexMcpConfig", () => {
       const config = await fs.readFile(result.configPath, "utf8");
       expect(config).toContain('[mcp_servers."github"]');
       expect(config).toContain('url = "https://paperclip.example/api/tool-gateway/gateways/github/mcp"');
-      expect(config).toContain('http_headers = { Authorization = "Bearer managed-token" }');
+      expect(config).toContain("bearer_token_env_var");
+      expect(config).not.toContain("managed-token");
       expect(config).not.toContain("paperclip-github");
       expect(config).not.toContain("https://raw.example/mcp");
       expect(config).not.toContain('command = "bypass"');
@@ -818,7 +830,8 @@ describe("writeManagedCodexMcpConfig", () => {
       const alpha = await fs.readFile(path.join(alphaHome, "config.toml"), "utf8");
       const zero = await fs.readFile(path.join(zeroHome, "config.toml"), "utf8");
       expect(alpha).toContain('[mcp_servers."alpha"]');
-      expect(alpha).toContain('http_headers = { Authorization = "Bearer alpha-token" }');
+      expect(alpha).toContain("bearer_token_env_var");
+      expect(alpha).not.toContain("alpha-token");
       expect(zero).not.toContain("mcp_servers.");
       expect(zero).not.toContain("stale-token");
       expect(alphaHome).not.toBe(zeroHome);
@@ -871,6 +884,50 @@ describe("writeManagedCodexMcpConfig", () => {
 });
 
 describe("stageCodexHomeForSync", () => {
+  it("sweeps only abandoned owned staging homes and ignores foreign or symlink entries", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-sweep-test-"));
+    const make = async (name: string, marker: unknown) => {
+      const dir = path.join(root, `paperclip-codex-home-sync-${name}`);
+      await fs.mkdir(dir);
+      await fs.writeFile(path.join(dir, ".paperclip-codex-staged-home"), JSON.stringify(marker));
+      return dir;
+    };
+    const stale = await make("stale", { owner: "paperclip-codex-staged-home", pid: 99999999 });
+    const live = await make("live", { owner: "paperclip-codex-staged-home", pid: process.pid });
+    const foreign = await make("foreign", { owner: "someone-else", pid: 99999999 });
+    const target = await fs.mkdtemp(path.join(root, "target-"));
+    const linked = path.join(root, "paperclip-codex-home-sync-linked");
+    await fs.symlink(target, linked);
+
+    await sweepAbandonedCodexStagedHomes({ tmpDir: root });
+
+    await expect(fs.access(stale)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.access(live)).resolves.toBeUndefined();
+    await expect(fs.access(foreign)).resolves.toBeUndefined();
+    expect(await fs.lstat(linked)).toMatchObject({});
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("keeps session artifacts across private run-home cleanup", async () => {
+    const sourceHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-session-source-"));
+    const sessionsDir = path.join(sourceHome, "sessions");
+    const first = await stageCodexHomeForSync(sourceHome, { runId: "run-one", persistentSessionsDir: sessionsDir });
+    await fs.mkdir(path.join(first, "sessions", "2026", "08"), { recursive: true });
+    await fs.writeFile(path.join(first, "sessions", "2026", "08", "rollout-session.jsonl"), "session-one\n");
+    await fs.rm(first, { recursive: true, force: true });
+
+    const second = await stageCodexHomeForSync(sourceHome, { runId: "run-two", persistentSessionsDir: sessionsDir });
+    try {
+      expect(second).not.toBe(first);
+      expect(await fs.readFile(path.join(second, "sessions", "2026", "08", "rollout-session.jsonl"), "utf8"))
+        .toBe("session-one\n");
+      expect((await fs.lstat(path.join(second, "sessions"))).isSymbolicLink()).toBe(true);
+    } finally {
+      await fs.rm(second, { recursive: true, force: true });
+      await fs.rm(sourceHome, { recursive: true, force: true });
+    }
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -921,10 +978,10 @@ describe("stageCodexHomeForSync", () => {
       staged = await stageCodexHomeForSync(home, { runId: "run-1" });
 
       const entries = (await fs.readdir(staged)).sort();
-      expect(entries).toEqual([...CODEX_SYNC_ALLOWLIST].sort());
+      expect(entries).toEqual([...CODEX_SYNC_ALLOWLIST, "sessions", ".paperclip-codex-staged-home"].sort());
 
       // Decoys must be absent.
-      for (const decoy of ["logs_2.sqlite", "state_5.sqlite", "plugins", "sessions", "tmp"]) {
+      for (const decoy of ["logs_2.sqlite", "state_5.sqlite", "plugins", "tmp"]) {
         expect(entries).not.toContain(decoy);
       }
 
@@ -1029,7 +1086,7 @@ describe("stageCodexHomeForSync", () => {
 
       staged = await stageCodexHomeForSync(home, { runId: "run-absent" });
       const entries = await fs.readdir(staged);
-      expect(entries).toEqual(["config.toml"]);
+      expect(entries.sort()).toEqual(["config.toml", "sessions"]);
     } finally {
       if (staged) await fs.rm(staged, { recursive: true, force: true });
       await fs.rm(root, { recursive: true, force: true });
@@ -1046,7 +1103,7 @@ describe("stageCodexHomeForSync", () => {
       await fs.writeFile(path.join(home, "config.toml"), "x\n", "utf8");
 
       staged = await stageCodexHomeForSync(home, { runId: "run-dangling" });
-      expect(await fs.readdir(staged)).toEqual(["config.toml"]);
+      expect((await fs.readdir(staged)).sort()).toEqual(["config.toml", "sessions"]);
     } finally {
       if (staged) await fs.rm(staged, { recursive: true, force: true });
       await fs.rm(root, { recursive: true, force: true });

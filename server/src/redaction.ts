@@ -17,6 +17,7 @@ const ESCAPED_JSON_SECRET_FIELD_TEXT_RE = new RegExp(
   String.raw`((?:\\")?${SECRET_FIELD_NAME_PATTERN}(?:\\")?\s*:\s*(?:\\"))[^\\\r\n]+((?:\\"))`,
   "gi",
 );
+const POSTGRES_CONNECTION_URI_RE = /\bpostgres(?:ql)?:\/\/[^\s"'`<>]+/gi;
 const SECRET_TEXT_HINTS = [
   "api",
   "key",
@@ -30,6 +31,8 @@ const SECRET_TEXT_HINTS = [
   "private",
   "cookie",
   "connectionstring",
+  "postgres://",
+  "postgresql://",
   "sk-",
   "ghp_",
   "gho_",
@@ -137,6 +140,7 @@ export function redactSensitiveText(input: string): string {
   if (!maybeContainsSecretText(input)) return input;
   return redactCommandText(
     input
+      .replace(POSTGRES_CONNECTION_URI_RE, REDACTED_EVENT_VALUE)
       .replace(JSON_SECRET_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}$2`)
       .replace(ESCAPED_JSON_SECRET_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}$2`),
     REDACTED_EVENT_VALUE,

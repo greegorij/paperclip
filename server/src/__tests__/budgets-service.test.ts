@@ -325,6 +325,19 @@ describe("budgetService", () => {
   });
 
   it("surfaces a budget-owned company pause distinctly from a manual pause", async () => {
+    const companyPolicy = {
+      id: "policy-company-1",
+      companyId: "company-1",
+      scopeType: "company",
+      scopeId: "company-1",
+      metric: "billed_cents",
+      windowKind: "lifetime",
+      amount: 100,
+      warnPercent: 80,
+      hardStopEnabled: true,
+      notifyEnabled: true,
+      isActive: true,
+    };
     const dbStub = createDbStub([
       [{
         status: "idle",
@@ -332,6 +345,14 @@ describe("budgetService", () => {
         companyId: "company-1",
         name: "Budget Agent",
       }],
+      [{
+        status: "paused",
+        pauseReason: "budget",
+        name: "Paperclip",
+      }],
+      [],
+      [companyPolicy],
+      [{ total: 120 }],
       [{
         status: "paused",
         pauseReason: "budget",

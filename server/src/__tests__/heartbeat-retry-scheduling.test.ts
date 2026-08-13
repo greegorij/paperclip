@@ -7,6 +7,7 @@ import {
   agentWakeupRequests,
   activityLog,
   budgetPolicies,
+  costEvents,
   companies,
   companySkills,
   createDb,
@@ -139,6 +140,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
     await db.delete(budgetPolicies);
+    await db.delete(costEvents);
     await db.delete(agents);
     await db.delete(companySkills);
     await db.delete(companies);
@@ -1453,9 +1455,21 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       scopeId: budgetBlocked.agentId,
       windowKind: "monthly",
       metric: "billed_cents",
-      amount: 0,
+      amount: 1,
       hardStopEnabled: true,
       isActive: true,
+    });
+    await db.insert(costEvents).values({
+      companyId: budgetBlocked.companyId,
+      agentId: budgetBlocked.agentId,
+      provider: "test",
+      biller: "test",
+      billingType: "metered_api",
+      model: "budget-gate-fixture",
+      inputTokens: 1,
+      outputTokens: 0,
+      costCents: 1,
+      occurredAt: budgetBlocked.now,
     });
     await db
       .update(agents)

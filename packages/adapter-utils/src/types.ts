@@ -427,6 +427,8 @@ export interface ServerAdapterModule {
   sessionCodec?: AdapterSessionCodec;
   sessionManagement?: import("./session-compaction.js").AdapterSessionManagement;
   supportsLocalAgentJwt?: boolean;
+  /** Adapter has a native renderer for runtime HTTP MCP configuration. */
+  supportsRuntimeMcp?: boolean;
   models?: AdapterModel[];
   listModels?: () => Promise<AdapterModel[]>;
   modelProfiles?: AdapterModelProfileDefinition[];

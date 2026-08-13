@@ -21,7 +21,22 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { buildPaperclipRuntimeMcpServers } from "../services/heartbeat.js";
+import {
+  buildPaperclipRuntimeMcpServers,
+  resolveHeartbeatRunCredentialTtlSeconds,
+} from "../services/heartbeat.js";
+
+describe("heartbeat run credential lifetime", () => {
+  it("covers remote timeouts and gives unbounded local runs a conservative active-run-gated ceiling", () => {
+    expect(resolveHeartbeatRunCredentialTtlSeconds({ config: {}, executionTarget: null })).toBe(24 * 60 * 60);
+    expect(resolveHeartbeatRunCredentialTtlSeconds({
+      config: {}, executionTarget: { kind: "remote", transport: "sandbox", remoteCwd: "/app" } as never,
+    })).toBe(5 * 60 * 60);
+    expect(resolveHeartbeatRunCredentialTtlSeconds({
+      config: { timeoutSec: 8 * 60 * 60 }, executionTarget: null,
+    })).toBe(9 * 60 * 60);
+  });
+});
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;

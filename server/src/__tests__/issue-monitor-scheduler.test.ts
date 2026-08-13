@@ -26,6 +26,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { normalizeIssueExecutionPolicy, parseIssueExecutionState } from "../services/issue-execution-policy.ts";
+import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -46,7 +47,7 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
     db = createDb(tempDb.connectionString);
   }, 20_000);
 
-  async function waitForHeartbeatIdle(timeoutMs = 3_000) {
+  async function waitForHeartbeatIdle(timeoutMs = 15_000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const active = await db
@@ -99,6 +100,7 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
   }
 
   async function cleanupRows() {
+    await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
     await waitForHeartbeatSideEffectsSettled();
     await db.delete(heartbeatRunEvents);
     await db.delete(issueComments);

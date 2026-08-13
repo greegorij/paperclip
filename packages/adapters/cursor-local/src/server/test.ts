@@ -1,3 +1,4 @@
+import { buildAgentProcessEnv } from "@paperclipai/adapter-utils/server-utils";
 import type {
   AdapterEnvironmentCheck,
   AdapterEnvironmentTestContext,
@@ -171,7 +172,7 @@ export async function testEnvironment(
   });
   command = finalSandboxCommand.command;
   env = finalSandboxCommand.env;
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  const runtimeEnv = ensurePathInEnv(buildAgentProcessEnv(env));
   try {
     await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, runtimeEnv);
     checks.push({
@@ -189,9 +190,8 @@ export async function testEnvironment(
   }
 
   const configCursorApiKey = env.CURSOR_API_KEY;
-  const hostCursorApiKey = targetIsRemote ? undefined : process.env.CURSOR_API_KEY;
-  if (isNonEmpty(configCursorApiKey) || isNonEmpty(hostCursorApiKey)) {
-    const source = isNonEmpty(configCursorApiKey) ? "adapter config env" : "server environment";
+  if (isNonEmpty(configCursorApiKey)) {
+    const source = "adapter config env";
     checks.push({
       code: "cursor_api_key_present",
       level: "info",

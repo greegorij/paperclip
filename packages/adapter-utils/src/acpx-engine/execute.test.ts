@@ -378,6 +378,92 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(turnStartedBeforeProcessIdentity).toBe(false);
   });
 
+  it("rotates a warm ACP runtime to the new MCP JWT while resuming persistent history", async () => {
+    const root = await makeTempRoot();
+    const warmHandles = new Map();
+    const runtimeOptions: AcpRuntimeOptions[] = [];
+    const ensureInputs: Array<Record<string, unknown>> = [];
+    const closeInputs: Array<Record<string, unknown>> = [];
+    const execute = createAcpxEngineExecutor({
+      warmHandles,
+      createRuntime: (options) => {
+        const runtimeNumber = runtimeOptions.push(options) - 1;
+        return {
+          ensureSession: async (input: Record<string, unknown>) => {
+            ensureInputs.push(input);
+            return {
+              backendSessionId: `backend-session-${runtimeNumber + 1}`,
+              agentSessionId: `agent-session-${runtimeNumber + 1}`,
+              runtimeSessionName: `runtime-session-${runtimeNumber + 1}`,
+            };
+          },
+          startTurn: () => ({
+            events: (async function* () {})(),
+            result: Promise.resolve({ status: "completed" as const, stopReason: "end_turn" }),
+            cancel: async () => {},
+          }),
+          close: async (input: Record<string, unknown>) => {
+            closeInputs.push(input);
+          },
+        } as never;
+      },
+    });
+    const config = {
+      agent: "custom",
+      agentCommand: "node ./fake-acp.js",
+      cwd: root,
+      stateDir: path.join(root, "state"),
+      warmHandleIdleMs: 60_000,
+    };
+    const context = { taskId: "issue-mcp-jwt-rotation", paperclipWorkspace: { cwd: root } };
+    const mcpServer = {
+      name: "paperclip",
+      url: "https://paperclip.example/api/mcp",
+      connectionId: "paperclip-control-plane",
+    };
+    const run = (runId: string, token: string, sessionParams?: Record<string, unknown>) => execute({
+      runId,
+      agent: { id: "agent-1", companyId: "company-1" },
+      runtime: sessionParams ? { sessionParams } : {},
+      config,
+      context,
+      runtimeMcp: { getServers: () => [{ ...mcpServer, token }] },
+      onLog: async () => {},
+      onMeta: async () => {},
+    } as never);
+
+    const first = await run("run-mcp-jwt-1", "jwt-one");
+    const second = await run(
+      "run-mcp-jwt-2",
+      "jwt-two",
+      first.sessionParams as Record<string, unknown>,
+    );
+
+    expect(first.exitCode).toBe(0);
+    expect(second.exitCode).toBe(0);
+    expect(runtimeOptions).toHaveLength(2);
+    expect(runtimeOptions[0]?.mcpServers).toEqual([{
+      type: "http",
+      name: "paperclip",
+      url: mcpServer.url,
+      headers: [{ name: "Authorization", value: "Bearer jwt-one" }],
+    }]);
+    expect(runtimeOptions[1]?.mcpServers).toEqual([{
+      type: "http",
+      name: "paperclip",
+      url: mcpServer.url,
+      headers: [{ name: "Authorization", value: "Bearer jwt-two" }],
+    }]);
+    expect(ensureInputs[1]?.resumeSessionId).toBe("backend-session-1");
+    expect(closeInputs).toContainEqual({
+      handle: expect.objectContaining({ backendSessionId: "backend-session-1" }),
+      reason: "paperclip runtime MCP credentials rotated",
+      discardPersistentState: false,
+    });
+    expect(first.sessionParams?.configFingerprint).toBe(second.sessionParams?.configFingerprint);
+    expect(JSON.stringify(second.sessionParams)).not.toContain("jwt-two");
+  });
+
   it("sets Codex model, effort, and fast mode through CODEX_CONFIG without session config calls", async () => {
     const { configOptions, meta } = await runExecutor({
       agent: "codex",
@@ -2626,6 +2712,58 @@ describe("ACPX engine remote session-lifecycle re-staging (PR 3: stage once / re
     };
   }
 
+  it.each(["timeout-log", "create-runtime"] as const)(
+    "releases all post-build ownership when %s throws",
+    async (failurePoint) => {
+      const { stateDir, localCwd, executionTarget } = await setupRemoteSandbox();
+      const events: string[] = [];
+      const paperclipStop = vi.fn(async () => { events.push("paperclip-stop"); });
+      const processStop = vi.fn(async () => { events.push("process-stop"); });
+      vi.mocked(startAdapterExecutionTargetPaperclipBridge).mockImplementationOnce(async () => ({
+        env: {},
+        rewriteMcpServers: (servers: unknown) => servers,
+        stop: paperclipStop,
+      }) as never);
+      vi.mocked(startAdapterExecutionTargetProcessSessionBridge).mockImplementationOnce(async () => ({
+        agentCommand: null,
+        stop: processStop,
+      }) as never);
+      const stagingLocks = new Map<string, Promise<unknown>>();
+      const execute = createAcpxEngineExecutor({
+        warmHandles: new Map(),
+        stagedRuntimes: new Map(),
+        stagingLocks,
+        createRuntime: () => {
+          if (failurePoint === "create-runtime") throw new Error("create runtime boom");
+          return recordingRuntime({ ensureInputs: [] }) as never;
+        },
+        prepareRemoteManagedHome: async (input) => ({
+          stagedRuntime: await input.stage([]),
+          teardown: async () => { events.push("copy-back"); },
+          disposeStaged: async () => { events.push("dispose"); },
+        }),
+      });
+      const base = baseExecuteArgs({ stateDir, localCwd, executionTarget });
+
+      await expect(execute({
+        runId: `run-${failurePoint}`,
+        runtime: {},
+        ...base,
+        onLog: async (_stream: string, message: string) => {
+          if (failurePoint === "timeout-log" && message.includes("timeout")) {
+            throw new Error("timeout log boom");
+          }
+        },
+      } as never)).rejects.toThrow(failurePoint === "timeout-log" ? "timeout log boom" : "create runtime boom");
+
+      expect(paperclipStop).toHaveBeenCalledTimes(1);
+      expect(processStop).toHaveBeenCalledTimes(1);
+      expect(events.indexOf("copy-back")).toBeGreaterThanOrEqual(0);
+      expect(events.indexOf("dispose")).toBeGreaterThan(events.indexOf("copy-back"));
+      expect(stagingLocks.size).toBe(0);
+    },
+  );
+
   it("test_acp_resume_compatible_session_does_not_restage", async () => {
     const { stateDir, localCwd, remoteCwd, executionTarget } = await setupRemoteSandbox();
     const ensureInputs: Array<Record<string, unknown>> = [];
@@ -2887,6 +3025,55 @@ describe("ACPX engine remote session-lifecycle re-staging (PR 3: stage once / re
     // the per-run copy-back still fired.
     expect(teardownCalls).toBe(1);
     expect(disposeCalls).toBe(1);
+  });
+
+  it("tears down and copies back before disposing a failed staged runtime", async () => {
+    const { stateDir, localCwd, executionTarget } = await setupRemoteSandbox();
+    const events: string[] = [];
+    const execute = createAcpxEngineExecutor({
+      warmHandles: new Map(),
+      stagedRuntimes: new Map(),
+      createRuntime: () => recordingRuntime({ ensureInputs: [], terminalStatus: "failed" }) as never,
+      prepareRemoteManagedHome: async (input) => ({
+        stagedRuntime: await input.stage([]),
+        teardown: async () => { events.push("copy-back"); },
+        disposeStaged: async () => { events.push("dispose"); },
+      }),
+    });
+
+    await execute({
+      runId: "run-order",
+      runtime: {},
+      ...baseExecuteArgs({ stateDir, localCwd, executionTarget }),
+    } as never);
+
+    expect(events).toEqual(["copy-back", "dispose"]);
+  });
+
+  it("expires the last clean staged runtime without requiring another execute", async () => {
+    const { stateDir, localCwd, executionTarget } = await setupRemoteSandbox();
+    const dispose = vi.fn(async () => {});
+    const execute = createAcpxEngineExecutor({
+      warmHandles: new Map(),
+      stagedRuntimes: new Map(),
+      stagedRuntimeIdleMs: 5,
+      createRuntime: () => recordingRuntime({ ensureInputs: [] }) as never,
+      prepareRemoteManagedHome: async (input) => ({
+        stagedRuntime: await input.stage([]),
+        disposeStaged: dispose,
+      }),
+    });
+
+    const result = await execute({
+      runId: "run-expire",
+      runtime: {},
+      ...baseExecuteArgs({ stateDir, localCwd, executionTarget }),
+    } as never);
+    expect(result.exitCode).toBe(0);
+    expect(dispose).not.toHaveBeenCalled();
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(dispose).toHaveBeenCalledTimes(1);
   });
 
   it("test_idle_staged_runtime_cleanup_waits_for_active_turn_release", async () => {

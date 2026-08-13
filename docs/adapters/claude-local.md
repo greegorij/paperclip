@@ -8,7 +8,7 @@ The `claude_local` adapter runs Anthropic's Claude Code CLI locally. It supports
 ## Prerequisites
 
 - Claude Code CLI installed (`claude` command available)
-- Either `ANTHROPIC_API_KEY` in adapter env/host env, or a Claude Code
+- Either `ANTHROPIC_API_KEY` in the adapter's explicit `env`, or a Claude Code
   subscription login available to the execution target
 
 ## Configuration Fields
@@ -24,6 +24,25 @@ The `claude_local` adapter runs Anthropic's Claude Code CLI locally. It supports
 | `maxTurnsPerRun` | number | No | Max agentic turns per heartbeat (defaults to `300`) |
 | `dangerouslySkipPermissions` | boolean | No | Skip permission prompts (default: `true`); required for headless runs where interactive approval is impossible |
 | `shadowReadOnly` | boolean | No | Runs a local, disposable, read-only evaluation lane; rejects ACP, remote targets, empty network allowlists, and extra filesystem paths |
+
+## Paperclip control plane and process environment
+
+Normal CLI and ACP runs receive the same run-scoped `runtimeMcp` set. Its first
+entry is the mandatory Paperclip control plane at `/api/mcp`, created for every
+authenticated run independently of gateway tables. Optional managed gateways
+and installed tool connections are appended to that set. Claude
+does not discover or mount a host-profile `paperclip` stdio command, so workspace
+confinement and switching adapters do not change control-plane availability.
+
+The child process inherits only allowlisted operating-system identity/runtime
+values from the Paperclip server. Provider credentials are not inherited;
+authentication must come from the adapter's explicit `env` or its CLI-owned
+credential files. Database,
+migration, encryption, signing, backup, mail and infrastructure settings are
+server-only. Values declared explicitly in adapter `env` still pass through.
+`managedMcpOnly=false` disables only additional named managed gateways. It can
+never disable the mandatory Paperclip control plane; independently permitted
+optional connections remain available.
 
 ## Read-only shadow runs
 

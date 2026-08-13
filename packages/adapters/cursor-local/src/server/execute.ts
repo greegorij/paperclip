@@ -29,6 +29,7 @@ import {
   asStringArray,
   parseObject,
   buildPaperclipEnv,
+  buildAgentProcessEnv,
   buildInvocationEnvForLogs,
   ensureAbsoluteDirectory,
   ensurePaperclipSkillSymlink,
@@ -52,6 +53,7 @@ import { normalizeCursorStreamLine } from "../shared/stream.js";
 import { hasCursorTrustBypassArg } from "../shared/trust.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
+
 
 function firstNonEmptyLine(text: string): string {
   return (
@@ -348,8 +350,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let remoteRuntimeRootDir: string | null = null;
   let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
 
+  try {
   if (executionTargetIsRemote) {
-    try {
       localSkillsDir = await buildCursorSkillsDir(config);
       await onLog(
         "stdout",
@@ -410,13 +412,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           { cwd, env, timeoutSec, graceSec, onLog },
         );
       }
-    } catch (error) {
-      await Promise.allSettled([
-        restoreRemoteWorkspace?.(),
-        localSkillsDir ? fs.rm(localSkillsDir, { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
-      ]);
-      throw error;
-    }
   }
   const finalSandboxCommand = executionTarget?.kind === "remote" && executionTarget.transport === "sandbox"
     ? await prepareCursorSandboxCommand({
@@ -436,7 +431,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
   const runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
   const effectiveEnv = Object.fromEntries(
-    Object.entries({ ...process.env, ...env }).filter(
+    Object.entries(buildAgentProcessEnv(env)).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
@@ -452,25 +447,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     includeRuntimeKeys: ["HOME"],
     resolvedCommand,
   });
-  if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
-    paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
-      runId,
-      target: runtimeExecutionTarget,
-      runtimeRootDir: remoteRuntimeRootDir,
-      adapterKey: "cursor",
-      timeoutSec,
-      hostApiToken: env.PAPERCLIP_API_KEY,
-      onLog,
-    });
-    if (paperclipBridge) {
-      Object.assign(env, paperclipBridge.env);
-      loggedEnv = buildInvocationEnvForLogs(env, {
-        runtimeEnv: ensurePathInEnv({ ...process.env, ...env }),
-        includeRuntimeKeys: ["HOME"],
-        resolvedCommand,
-      });
-    }
-  }
 
   const runtimeSessionParams = parseObject(runtime.sessionParams);
   const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
@@ -742,7 +718,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
-  try {
+    if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
+      paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
+        runId, target: runtimeExecutionTarget, runtimeRootDir: remoteRuntimeRootDir,
+        adapterKey: "cursor", timeoutSec, hostApiToken: env.PAPERCLIP_API_KEY, onLog,
+      });
+      if (paperclipBridge) Object.assign(env, paperclipBridge.env);
+    }
     const initial = await runAttempt(sessionId);
     if (
       sessionId &&
@@ -759,18 +741,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     return toResult(initial);
   } finally {
-    if (paperclipBridge) {
-      await paperclipBridge.stop();
-    }
-    if (restoreRemoteWorkspace) {
-      await onLog(
-        "stdout",
-        `[paperclip] Restoring workspace changes from ${describeAdapterExecutionTarget(executionTarget)}.\n`,
-      );
-      await restoreRemoteWorkspace();
-    }
-    if (localSkillsDir) {
-      await fs.rm(localSkillsDir, { recursive: true, force: true }).catch(() => undefined);
+    try {
+      if (restoreRemoteWorkspace) {
+        await onLog("stdout", `[paperclip] Restoring workspace changes from ${describeAdapterExecutionTarget(executionTarget)}.\n`);
+        await restoreRemoteWorkspace();
+      }
+    } finally {
+      try {
+        await paperclipBridge?.stop();
+      } finally {
+        if (localSkillsDir) await fs.rm(localSkillsDir, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
   }
 }

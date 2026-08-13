@@ -138,6 +138,21 @@ test("testEnvironment does not warn about missing API keys when Hermes config pr
   });
 });
 
+test("testEnvironment ignores provider keys inherited only by the Paperclip server", async () => {
+  const previous = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "server-only-key";
+  try {
+    const result = await testEnvironment({
+      config: { command: process.execPath, model: "openai/gpt-4.1", env: {} },
+    } as any);
+    expect(result.checks.find((check) => check.code === "hermes_api_keys_found")).toBeUndefined();
+    expect(result.checks.find((check) => check.code === "hermes_no_api_keys")).toBeDefined();
+  } finally {
+    if (previous === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previous;
+  }
+});
+
 test("testEnvironment describes provider-omitted runtime config without inventing provider auto", async () => {
   await withHermesHomeConfig([
     "model:",

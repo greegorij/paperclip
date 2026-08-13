@@ -20,6 +20,7 @@ import {
   prepareAdapterExecutionTargetRuntime,
   readAdapterExecutionTarget,
   resolveAdapterExecutionTargetTimeout,
+  rewritePaperclipRuntimeMcpServersForBridge,
   startAdapterExecutionTargetPaperclipBridge,
   startAdapterExecutionTargetProcessSessionBridge,
   type AdapterExecutionTarget,
@@ -36,6 +37,7 @@ import {
   asNumber,
   asString,
   buildInvocationEnvForLogs,
+  buildAgentProcessEnv,
   buildPaperclipEnv,
   ensureAbsoluteDirectory,
   ensurePathInEnv,
@@ -94,10 +96,12 @@ import {
 } from "./startup-timing.js";
 import type { CommandManagedRuntimeRunner } from "../command-managed-runtime.js";
 import { classifyProviderQuotaFailure } from "../provider-quota.js";
+import { assertSafeManagedPathSegment } from "../safe-path-segment.js";
 
 const defaultModuleDir = path.dirname(fileURLToPath(import.meta.url));
 const PAPERCLIP_MANAGED_CODEX_SKILLS_MANIFEST = ".paperclip-managed-skills.json";
 const BENIGN_NES_CLOSE_STDERR = /method: ['"]nes\/close['"].*-32601/;
+const STAGED_RUNTIME_IDLE_MS = 5 * 60 * 1000;
 
 interface ChildStderrState {
   logPath: string | null;
@@ -150,6 +154,8 @@ export interface RuntimeCacheEntry {
   childStderrState: ChildStderrState;
   processIdentitySink: AcpxProcessIdentitySink;
   fingerprint: string;
+  /** In-memory only: detects rotated per-run MCP credentials without persisting them. */
+  mcpCredentialFingerprint: string;
   lastUsedAt: number;
   cleanupTimer?: NodeJS.Timeout;
 }
@@ -198,6 +204,7 @@ export interface StagedRuntimeCacheEntry {
    */
   dispose: (() => Promise<void>) | null;
   lastUsedAt: number;
+  cleanupTimer?: NodeJS.Timeout;
 }
 
 interface AcpxEngineSettings {
@@ -242,6 +249,7 @@ export interface AcpxEngineBillingIdentity {
 export interface AcpxRemoteManagedHomeContext {
   acpxAgent: string;
   companyId: string;
+  agentId: string;
   runId: string;
   config: Record<string, unknown>;
   /** The runner-backed remote sandbox target the workspace stages into. */
@@ -301,6 +309,8 @@ export interface AcpxRemoteManagedHomeResult {
 export interface AcpxEngineExecutorOptions {
   createRuntime?: AcpxRuntimeFactory;
   now?: () => number;
+  /** Test seam; production uses the bounded five-minute staged-runtime lease. */
+  stagedRuntimeIdleMs?: number;
   warmHandles?: Map<string, RuntimeCacheEntry>;
   /**
    * Per-session staged-runtime cache for the remote runner-backed lane (PR 3).
@@ -337,6 +347,23 @@ export interface AcpxEngineExecutorOptions {
   prepareRemoteManagedHome?: (
     input: AcpxRemoteManagedHomeContext,
   ) => Promise<AcpxRemoteManagedHomeResult>;
+}
+
+export function renderAcpRuntimeMcpServers(
+  servers: Array<{ name: string; url: string; token: string }>,
+): NonNullable<AcpRuntimeOptions["mcpServers"]> {
+  return servers.map((server) => ({
+    type: "http",
+    name: server.name,
+    url: server.url,
+    headers: [{ name: "Authorization", value: `Bearer ${server.token}` }],
+  }));
+}
+
+export function identifyAcpRuntimeMcpServers(
+  servers: Array<{ name: string; url: string; connectionId: string }>,
+) {
+  return servers.map(({ name, url, connectionId }) => ({ name, url, connectionId }));
 }
 
 interface AcpxPreparedRuntime {
@@ -418,8 +445,12 @@ const defaultStagingLocks = new Map<string, Promise<unknown>>();
 
 function resolveEngineSettings(options: AcpxEngineExecutorOptions): AcpxEngineSettings {
   const moduleDir = path.resolve(options.moduleDir ?? defaultModuleDir);
+  const adapterType = assertSafeManagedPathSegment(
+    options.adapterType?.trim() || "acp_engine",
+    "ACPX adapterType",
+  );
   return {
-    adapterType: options.adapterType?.trim() || "acp_engine",
+    adapterType,
     moduleDir,
     packageRootDir: path.resolve(options.packageRootDir ?? path.resolve(moduleDir, "../..")),
   };
@@ -1326,6 +1357,7 @@ async function stageAcpRemoteRuntime(input: {
     adapterKey: input.adapterKey,
     timeoutSec: input.timeoutSec,
     workspaceLocalDir: input.workspaceLocalDir,
+    retainRuntimeAfterRestore: true,
     ...(input.workspaceRemoteDir ? { workspaceRemoteDir: input.workspaceRemoteDir } : {}),
     ...(input.assets && input.assets.length > 0 ? { assets: input.assets } : {}),
     ...(input.additionalSources && input.additionalSources.length > 0
@@ -1482,17 +1514,8 @@ async function buildRuntime(input: {
   const requestedThinkingEffort = normalizeRequestedThinkingEffort(config);
   const fastMode = acpxAgent === "codex" && config.fastMode === true;
   const runtimeMcpServers = input.ctx.runtimeMcp?.getServers() ?? [];
-  const mcpIdentity = runtimeMcpServers.map(({ name, url, connectionId }) => ({
-    name,
-    url,
-    connectionId,
-  }));
-  const mcpServers: NonNullable<AcpRuntimeOptions["mcpServers"]> = runtimeMcpServers.map((server) => ({
-    type: "http",
-    name: server.name,
-    url: server.url,
-    headers: [{ name: "Authorization", value: `Bearer ${server.token}` }],
-  }));
+  const mcpIdentity = identifyAcpRuntimeMcpServers(runtimeMcpServers);
+  const mcpServers = renderAcpRuntimeMcpServers(runtimeMcpServers);
   // Resolve the wall-clock timeout through the shared execution-target
   // resolver so sandbox-backed runs pick up the 4h backstop default while
   // local/SSH runs keep the historical "0 = no adapter timeout" behavior.
@@ -1668,7 +1691,7 @@ async function buildRuntime(input: {
   if (acpxAgent === "gemini" && agentCommandShell) {
     const normalized = await normalizeGeminiAcpCommandShell(
       agentCommandShell,
-      ensurePathInEnv({ ...process.env, ...env }),
+      ensurePathInEnv(buildAgentProcessEnv(env)),
     );
     if (normalized !== agentCommandShell) {
       agentCommandShell = normalized;
@@ -1804,6 +1827,7 @@ async function buildRuntime(input: {
     }> => {
       const cachedStaged = isCompatibleResume ? stagedRuntimes.get(sessionKey) : undefined;
       if (cachedStaged) {
+        clearStagedRuntimeTimer(cachedStaged);
         // Reuse the already-staged in-sandbox workspace + managed home. Re-apply
         // the env keys the seam repointed onto the in-sandbox home (deterministic,
         // identical across the session's runs) and reuse the seam's per-run
@@ -1838,6 +1862,7 @@ async function buildRuntime(input: {
       const stale = stagedRuntimes.get(sessionKey);
       if (stale) {
         stagedRuntimes.delete(sessionKey);
+        clearStagedRuntimeTimer(stale);
         if (stale.dispose) await stale.dispose().catch(() => {});
       }
       const stage = (assets: AdapterManagedRuntimeAsset[]) =>
@@ -1876,6 +1901,7 @@ async function buildRuntime(input: {
           const seeded = await input.deps.prepareRemoteManagedHome({
             acpxAgent,
             companyId: agent.companyId,
+            agentId: agent.id,
             runId,
             config,
             executionTarget: remoteTarget,
@@ -1886,13 +1912,17 @@ async function buildRuntime(input: {
             onRuntimeProgress: input.ctx.onRuntimeProgress,
             stage,
           });
+          const disposeRuntime = async () => { await seeded.stagedRuntime.disposeRuntime(); };
           return {
             stagedRuntime: seeded.stagedRuntime,
             teardown: seeded.teardown ?? null,
-            dispose: seeded.disposeStaged ?? null,
+            dispose: seeded.disposeStaged
+              ? async () => { await seeded.disposeStaged!(); await disposeRuntime(); }
+              : disposeRuntime,
           };
         }
-        return { stagedRuntime: await stage([]), teardown: null, dispose: null };
+        const stagedRuntime = await stage([]);
+        return { stagedRuntime, teardown: null, dispose: stagedRuntime.disposeRuntime };
       }, stepMetrics);
       const delta: Record<string, string> = {};
       for (const [key, value] of Object.entries(env)) {
@@ -1965,6 +1995,7 @@ async function buildRuntime(input: {
           adapterKey: input.engine.adapterType,
           timeoutSec,
           hostApiToken: env.PAPERCLIP_API_KEY,
+          upstreamMcpServers: runtimeMcpServers,
           onLog: input.ctx.onLog,
         }),
         concurrentBridgeStepMetrics,
@@ -1978,6 +2009,8 @@ async function buildRuntime(input: {
           const paperclip = await paperclipStart;
           if (paperclip) {
             Object.assign(env, paperclip.env);
+            const bridged = rewritePaperclipRuntimeMcpServersForBridge(runtimeMcpServers, paperclip);
+            mcpServers.splice(0, mcpServers.length, ...renderAcpRuntimeMcpServers(bridged));
             await input.ctx.onLog("stdout", "[paperclip] Sandbox ACP API callback bridge enabled for this run.\n");
           }
           return (runtimeEnv = resolveRuntimeEnv(env));
@@ -2154,7 +2187,7 @@ async function applySessionConfigOptions(input: {
  */
 function resolveRuntimeEnv(env: Record<string, string>): Record<string, string> {
   return Object.fromEntries(
-    Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
+    Object.entries(ensurePathInEnv(buildAgentProcessEnv(env))).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
@@ -2762,6 +2795,7 @@ async function cleanupIdleStagedRuntimes(input: {
       if (current !== entry) return;
       if (input.now() - current.lastUsedAt < input.idleMs) return;
       input.handles.delete(key);
+      clearStagedRuntimeTimer(entry);
       if (entry.dispose) await entry.dispose().catch(() => {});
     });
     lease.release();
@@ -2772,19 +2806,66 @@ async function cleanupIdleStagedRuntimes(input: {
 // compatible resume. Called ONLY after a clean turn, so the cache never offers a
 // half-staged or failed session for reuse. Non-remote lanes carry a null
 // stagedRuntime / null envDelta and are skipped.
+function clearStagedRuntimeTimer(entry: StagedRuntimeCacheEntry) {
+  if (!entry.cleanupTimer) return;
+  clearTimeout(entry.cleanupTimer);
+  entry.cleanupTimer = undefined;
+}
+
+function scheduleStagedRuntimeCleanup(input: {
+  handles: Map<string, StagedRuntimeCacheEntry>;
+  locks: Map<string, Promise<unknown>>;
+  key: string;
+  entry: StagedRuntimeCacheEntry;
+  now: () => number;
+  idleMs: number;
+}) {
+  clearStagedRuntimeTimer(input.entry);
+  const delayMs = Math.max(1, input.entry.lastUsedAt + input.idleMs - input.now());
+  input.entry.cleanupTimer = setTimeout(() => {
+    void (async () => {
+      const lease = await withSessionStagingLease(input.locks, input.key, async () => {
+        const current = input.handles.get(input.key);
+        if (current !== input.entry) return;
+        const idleForMs = input.now() - current.lastUsedAt;
+        if (idleForMs < input.idleMs) {
+          scheduleStagedRuntimeCleanup(input);
+          return;
+        }
+        input.handles.delete(input.key);
+        clearStagedRuntimeTimer(current);
+        if (current.dispose) await current.dispose().catch(() => {});
+      });
+      lease.release();
+    })();
+  }, delayMs);
+  input.entry.cleanupTimer.unref?.();
+}
+
 function saveStagedRuntimeAfterCleanTurn(input: {
   handles: Map<string, StagedRuntimeCacheEntry>;
+  locks: Map<string, Promise<unknown>>;
   prepared: AcpxPreparedRuntime;
-  now: number;
+  now: () => number;
+  idleMs: number;
 }) {
   const { prepared } = input;
   if (!prepared.stagedRuntime || prepared.remoteStagingEnvDelta === null) return;
-  input.handles.set(prepared.sessionKey, {
+  const entry: StagedRuntimeCacheEntry = {
     stagedRuntime: prepared.stagedRuntime,
     envDelta: prepared.remoteStagingEnvDelta,
     teardown: prepared.remoteManagedHomeTeardown,
     dispose: prepared.remoteStagingDispose,
-    lastUsedAt: input.now,
+    lastUsedAt: input.now(),
+  };
+  input.handles.set(prepared.sessionKey, entry);
+  scheduleStagedRuntimeCleanup({
+    handles: input.handles,
+    locks: input.locks,
+    key: prepared.sessionKey,
+    entry,
+    now: input.now,
+    idleMs: input.idleMs,
   });
 }
 
@@ -2806,6 +2887,7 @@ async function discardStagedRuntime(input: {
   const existing = handles.get(prepared.sessionKey);
   if (existing && prepared.stagedRuntime && existing.stagedRuntime === prepared.stagedRuntime) {
     handles.delete(prepared.sessionKey);
+    clearStagedRuntimeTimer(existing);
   }
   if (prepared.remoteStagingDispose) await prepared.remoteStagingDispose().catch(() => {});
 }
@@ -2965,6 +3047,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
   const warmHandles = deps.warmHandles ?? defaultWarmHandles;
   const stagedRuntimes = deps.stagedRuntimes ?? defaultStagedRuntimes;
   const stagingLocks = deps.stagingLocks ?? defaultStagingLocks;
+  const stagedRuntimeIdleMs = deps.stagedRuntimeIdleMs ?? STAGED_RUNTIME_IDLE_MS;
   const engine = resolveEngineSettings(deps);
 
   return async function executeAcpxEngine(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
@@ -3022,6 +3105,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       rootSpan.end(true);
       throw err;
     }
+    const preflight = await (async () => {
     // Per-project staging outcomes for the referenced (mentioned) projects, surfaced back to the
     // server on the run result. A referenced project that failed to stage into the sandbox is a
     // first-class, counted failure in the requested-vs-synced observability, not only a warning. The
@@ -3046,7 +3130,25 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
     const previousParams = parseObject(ctx.runtime.sessionParams);
     const canResume = isCompatibleSession(previousParams, prepared);
     const resumeSessionId = canResume ? asString(previousParams.acpSessionId, "") || undefined : undefined;
-    const cached = canResume ? warmHandles.get(prepared.sessionKey) : undefined;
+    const mcpCredentialFingerprint = shortHash(prepared.mcpServers);
+    let cached = canResume ? warmHandles.get(prepared.sessionKey) : undefined;
+    if (cached && cached.mcpCredentialFingerprint !== mcpCredentialFingerprint) {
+      // ACPX binds MCP configuration when its runtime/agent process is created
+      // and exposes no safe way to replace headers on a live handle. Rotate the
+      // process, but retain persistent ACP state: ensureSession below resumes
+      // the same backend session with the current run's MCP bearer.
+      if (warmHandles.get(prepared.sessionKey) === cached) {
+        warmHandles.delete(prepared.sessionKey);
+      }
+      clearWarmHandleTimer(cached);
+      await cached.runtime.close({
+        handle: cached.handle,
+        reason: "paperclip runtime MCP credentials rotated",
+        discardPersistentState: false,
+      });
+      flushChildStderr(cached.childStderrState);
+      cached = undefined;
+    }
     const childStderrState = cached?.childStderrState ?? { logPath: null, pendingLiveLine: "" };
     const processIdentitySink = cached?.processIdentitySink ?? {
       current: ctx.onSpawn,
@@ -3112,6 +3214,41 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         `[paperclip] ACPX session "${asString(previousParams.runtimeSessionName, "")}" does not match the current agent/cwd/mode/runtime identity; starting fresh in "${prepared.cwd}".\n`,
       );
     }
+
+    return {
+      referencedProjectStagingFailuresField,
+      previousParams,
+      canResume,
+      resumeSessionId,
+      mcpCredentialFingerprint,
+      cached,
+      childStderrState,
+      processIdentitySink,
+      runtime,
+      createRuntimeMs,
+    };
+    })().catch(async (err) => {
+      rootSpan.end(true);
+      // buildRuntime already owns bridges, the staging lease and any managed
+      // home. Copy back/restore first, then dispose the owned staged root. A
+      // cleanup failure must never replace the original preflight exception.
+      await cleanupRemoteBridges(prepared).catch(() => {});
+      await discardStagedRuntime({ handles: stagedRuntimes, prepared }).catch(() => {});
+      throw err;
+    });
+
+    const {
+      referencedProjectStagingFailuresField,
+      previousParams,
+      canResume,
+      resumeSessionId,
+      mcpCredentialFingerprint,
+      cached,
+      childStderrState,
+      processIdentitySink,
+      runtime,
+      createRuntimeMs,
+    } = preflight;
 
     let handle = cached?.handle ?? null;
     let resumedSession = Boolean(handle ?? resumeSessionId);
@@ -3195,8 +3332,8 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         err,
         phase: "ensure_session",
       });
-      await discardStagedRuntime({ handles: stagedRuntimes, prepared });
       await cleanupRemoteBridges(prepared);
+      await discardStagedRuntime({ handles: stagedRuntimes, prepared });
       return {
         exitCode: 1,
         signal: null,
@@ -3215,8 +3352,8 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
     if (!handle) {
       // Bring-up produced no session handle — close the root span with error status.
       rootSpan.end(true);
-      await discardStagedRuntime({ handles: stagedRuntimes, prepared });
       await cleanupRemoteBridges(prepared);
+      await discardStagedRuntime({ handles: stagedRuntimes, prepared });
       return {
         exitCode: 1,
         signal: null,
@@ -3259,8 +3396,8 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         clearWarmHandleTimer(existing);
         warmHandles.delete(prepared.sessionKey);
       }
-      await discardStagedRuntime({ handles: stagedRuntimes, prepared });
       await cleanupRemoteBridges(prepared);
+      await discardStagedRuntime({ handles: stagedRuntimes, prepared });
       return {
         exitCode: 1,
         signal: null,
@@ -3409,6 +3546,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             childStderrState,
             processIdentitySink,
             fingerprint: prepared.fingerprint,
+            mcpCredentialFingerprint,
             lastUsedAt: now(),
           };
           warmHandles.set(prepared.sessionKey, entry);
@@ -3443,11 +3581,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       // next run stages fresh instead of reusing a torn-down session's staged
       // credentials. Copy-back still fires for every outcome via
       // `cleanupRemoteBridges` below (unchanged from PR 2).
-      if (terminal.status === "completed" && !timedOut) {
-        saveStagedRuntimeAfterCleanTurn({ handles: stagedRuntimes, prepared, now: now() });
-      } else {
-        await discardStagedRuntime({ handles: stagedRuntimes, prepared });
-      }
+      const keepStagedRuntime = terminal.status === "completed" && !timedOut;
 
       const errorMessage = timedOut
         ? formatAdapterExecutionTimeoutErrorMessage(prepared.timeoutResolution)
@@ -3460,6 +3594,17 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         message: errorMessage,
       });
       await cleanupRemoteBridges(prepared);
+      if (keepStagedRuntime) {
+        saveStagedRuntimeAfterCleanTurn({
+          handles: stagedRuntimes,
+          locks: stagingLocks,
+          prepared,
+          now,
+          idleMs: stagedRuntimeIdleMs,
+        });
+      } else {
+        await discardStagedRuntime({ handles: stagedRuntimes, prepared });
+      }
       flushChildStderr(childStderrState);
       return withProviderQuotaClassification({
         exitCode: terminal.status === "completed" ? 0 : 1,
@@ -3510,7 +3655,6 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         clearWarmHandleTimer(existing);
         warmHandles.delete(prepared.sessionKey);
       }
-      await discardStagedRuntime({ handles: stagedRuntimes, prepared });
       const { classified, message } = await emitAcpxFailure({
         ctx,
         prepared,
@@ -3519,6 +3663,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         messageOverride,
       });
       await cleanupRemoteBridges(prepared);
+      await discardStagedRuntime({ handles: stagedRuntimes, prepared });
       flushChildStderr(childStderrState);
       const providerQuota = !timedOut
         ? classifyProviderQuotaFailure(message)

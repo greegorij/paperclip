@@ -66,15 +66,13 @@ describe("preparePiRuntimeConfig", () => {
     await expect(fs.access(agentConfigDir)).rejects.toThrow();
   });
 
-  it("reads PAPERCLIP_PI_PROVIDERS from process.env when absent from the run env", async () => {
+  it("does not read PAPERCLIP_PI_PROVIDERS from process.env", async () => {
     const providers = { tensorix: { baseUrl: "http://gw/anthropic", api: "anthropic-messages", models: [] } };
     process.env.PAPERCLIP_PI_PROVIDERS = JSON.stringify(providers);
     try {
       const prepared = await preparePiRuntimeConfig({ env: {} });
       const agentConfigDir = prepared.env.PI_CODING_AGENT_DIR;
-      expect(agentConfigDir).toBeTruthy();
-      cleanupPaths.add(agentConfigDir);
-      expect(await readModelsJson(agentConfigDir)).toEqual({ providers });
+      expect(agentConfigDir).toBeUndefined();
       await prepared.cleanup();
     } finally {
       delete process.env.PAPERCLIP_PI_PROVIDERS;
@@ -100,7 +98,7 @@ describe("preparePiRuntimeConfig", () => {
     await prepared.cleanup();
   });
 
-  it("expands {env:VAR} placeholders from process.env when absent from the run env", async () => {
+  it("does not expand placeholders from process.env", async () => {
     const providers = {
       tensorix: { baseUrl: "http://gw/anthropic", apiKey: "{env:PAPERCLIP_PI_TEST_KEY}", api: "anthropic-messages", models: [] },
     };
@@ -114,7 +112,7 @@ describe("preparePiRuntimeConfig", () => {
       const modelsJson = (await readModelsJson(agentConfigDir)) as {
         providers: { tensorix: { apiKey: string } };
       };
-      expect(modelsJson.providers.tensorix.apiKey).toBe("sk-from-process-env");
+      expect(modelsJson.providers.tensorix.apiKey).toBe("{env:PAPERCLIP_PI_TEST_KEY}");
       await prepared.cleanup();
     } finally {
       delete process.env.PAPERCLIP_PI_TEST_KEY;

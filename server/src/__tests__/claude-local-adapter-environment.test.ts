@@ -99,7 +99,7 @@ function createLocalSandboxRunner() {
 }
 
 describe("claude_local environment diagnostics", () => {
-  it("returns a warning (not an error) when ANTHROPIC_API_KEY is set in host environment", async () => {
+  it("does not treat an inherited host ANTHROPIC_API_KEY as agent credentials", async () => {
     delete process.env.CLAUDE_CODE_USE_BEDROCK;
     delete process.env.ANTHROPIC_BEDROCK_BASE_URL;
     process.env.ANTHROPIC_API_KEY = "sk-test-host";
@@ -114,14 +114,14 @@ describe("claude_local environment diagnostics", () => {
       },
     });
 
-    expect(result.status).toBe("warn");
+    expect(result.status).toBe("pass");
     expect(
       result.checks.some(
         (check) =>
           check.code === "claude_anthropic_api_key_overrides_subscription" &&
           check.level === "warn",
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(result.checks.some((check) => check.level === "error")).toBe(false);
   });
 
@@ -154,7 +154,7 @@ describe("claude_local environment diagnostics", () => {
     expect(result.checks.some((check) => check.level === "error")).toBe(false);
   });
 
-  it("returns bedrock auth info when CLAUDE_CODE_USE_BEDROCK is set in host environment", async () => {
+  it("does not treat inherited host Bedrock flags as agent credentials", async () => {
     delete process.env.ANTHROPIC_API_KEY;
     process.env.CLAUDE_CODE_USE_BEDROCK = "1";
 
@@ -173,12 +173,12 @@ describe("claude_local environment diagnostics", () => {
         (check) =>
           check.code === "claude_bedrock_auth" && check.level === "info",
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       result.checks.some(
         (check) => check.code === "claude_subscription_mode_possible",
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(result.checks.some((check) => check.level === "error")).toBe(false);
   });
 
@@ -213,7 +213,7 @@ describe("claude_local environment diagnostics", () => {
     expect(result.checks.some((check) => check.level === "error")).toBe(false);
   });
 
-  it("bedrock auth takes precedence over missing ANTHROPIC_API_KEY", async () => {
+  it("explicit Bedrock auth takes precedence over missing ANTHROPIC_API_KEY", async () => {
     delete process.env.ANTHROPIC_API_KEY;
     process.env.CLAUDE_CODE_USE_BEDROCK = "1";
 
@@ -224,6 +224,7 @@ describe("claude_local environment diagnostics", () => {
         engine: "cli",
         command: process.execPath,
         cwd: process.cwd(),
+        env: { CLAUDE_CODE_USE_BEDROCK: "1" },
       },
     });
 
@@ -388,7 +389,7 @@ function fail(message) {
   process.stderr.write(message + "\\n");
   process.exit(2);
 }
-if (!configDir.includes(".paperclip-runtime/claude/config")) {
+if (!configDir.includes(".paperclip-runtime/claude/runs/") || !configDir.endsWith("/config")) {
   fail("missing managed CLAUDE_CONFIG_DIR: " + configDir);
 }
 const settings = JSON.parse(fs.readFileSync(path.join(configDir, "settings.json"), "utf8"));

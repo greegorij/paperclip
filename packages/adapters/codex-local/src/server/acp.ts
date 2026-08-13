@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import type {
   AdapterBillingType,
   AdapterEnvironmentCheck,
@@ -40,6 +41,7 @@ import { classifyCodexAuthRefreshFailure } from "./parse.js";
 import { copyBackCodexAuth } from "./codex-auth-copyback.js";
 import { buildCodexAuthInboundProvision } from "./codex-auth-merge-scripts.js";
 import {
+  isManagedCodexHomePath,
   resolveSharedCodexHomeDir,
   stageCodexHomeForSync,
 } from "./codex-home.js";
@@ -192,8 +194,18 @@ async function prepareCodexRemoteManagedHome(
     // workspace with no home asset, identical to the no-seam fallback.
     return { stagedRuntime: await input.stage([]) };
   }
+  const copyBackHostHome = isManagedCodexHomePath(
+    process.env,
+    input.companyId,
+    effectiveCodexHome,
+  )
+    ? resolveSharedCodexHomeDir(process.env)
+    : effectiveCodexHome;
   // Curated allowlist temp dir (auth/config/skills only); caller owns cleanup.
-  const stagedCodexHomeDir = await stageCodexHomeForSync(effectiveCodexHome, { runId });
+  const stagedCodexHomeDir = await stageCodexHomeForSync(effectiveCodexHome, {
+    runId,
+    persistentSessionsDir: path.join(effectiveCodexHome, "sessions"),
+  });
   let stagedRuntime;
   try {
     stagedRuntime = await input.stage([
@@ -201,9 +213,17 @@ async function prepareCodexRemoteManagedHome(
         key: "home",
         localDir: stagedCodexHomeDir,
         followSymlinks: true,
+        exclude: [".paperclip-codex-staged-home"],
         // Inbound (host→sandbox) auth-merge: keeps whichever credential is newer
         // when the sandbox image already carries a Codex auth.json.
-        provision: buildCodexAuthInboundProvision(),
+        provision: buildCodexAuthInboundProvision(path.posix.join(
+          input.executionTarget.kind === "remote" ? input.executionTarget.remoteCwd : "/tmp",
+          ".paperclip-runtime",
+          "codex",
+          "session-stores",
+          input.companyId,
+          createHash("sha256").update(effectiveCodexHome).digest("hex").slice(0, 16),
+        ), input.executionTarget.kind === "remote" ? input.executionTarget.remoteCwd : "/tmp"),
         // Outbound (sandbox→host) copy-back at teardown, under the same
         // direction-agnostic decision predicate + directory merge-lock +
         // atomic-rename + 0600 guard. Target is the SHARED host auth.json
@@ -211,7 +231,7 @@ async function prepareCodexRemoteManagedHome(
         restore: async ({ assetDir, readFile }) =>
           void (await copyBackCodexAuth({
             readSandboxAuth: () => readFile(path.posix.join(assetDir, "auth.json")),
-            hostAuthPath: path.join(resolveSharedCodexHomeDir(process.env), "auth.json"),
+            hostAuthPath: path.join(copyBackHostHome, "auth.json"),
             log: (line) => onLog("stdout", `${line}\n`),
           })),
       },
@@ -309,21 +329,15 @@ function withCodexAuthRefreshFailureClassification(result: AdapterExecutionResul
 /**
  * Classify billing the same way the Codex CLI lane does so ACP runs land in
  * the cost ledger with a real provider/billingType instead of acpx/unknown.
- * Host env only counts for local execution targets; remote targets see just
- * the adapter-config env.
+ * Only the explicitly resolved adapter env counts. Host provider credentials
+ * are outside the child-process boundary for both local and remote runs.
  */
 export function resolveCodexAcpBillingIdentity(
   ctx: Pick<AdapterExecutionContext, "config"> &
     Partial<Pick<AdapterExecutionContext, "executionTarget" | "executionTransport">>,
 ): { provider: string; biller: string; billingType: AdapterBillingType } {
   const envConfig = parseObject(parseObject(ctx.config).env);
-  const target = readAdapterExecutionTarget({
-    executionTarget: ctx.executionTarget,
-    legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
-  });
-  const considerHostEnv = target?.kind !== "remote";
   const mergedEnv: NodeJS.ProcessEnv = {
-    ...(considerHostEnv ? process.env : {}),
     ...Object.fromEntries(
       Object.entries(envConfig).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
     ),
@@ -573,16 +587,13 @@ export async function testCodexAcpEnvironment(
   });
 
   const envConfig = parseObject(config.env);
-  const considerHostEnv = !targetIsRemote;
   const configApiKey = envConfig.OPENAI_API_KEY;
-  const hostApiKey = considerHostEnv ? process.env.OPENAI_API_KEY : undefined;
-  if (isNonEmpty(configApiKey) || isNonEmpty(hostApiKey)) {
-    const source = isNonEmpty(configApiKey) ? "adapter config env" : "server environment";
+  if (isNonEmpty(configApiKey)) {
     checks.push({
       code: "codex_acp_openai_api_key_detected",
       level: "info",
       message: "OPENAI_API_KEY is set for Codex ACP authentication.",
-      detail: `Detected in ${source}.`,
+      detail: "Detected in adapter config env.",
     });
   } else if (!targetIsRemote) {
     const codexHome = isNonEmpty(envConfig.CODEX_HOME)

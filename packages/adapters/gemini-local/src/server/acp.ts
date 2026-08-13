@@ -184,6 +184,7 @@ async function prepareGeminiRemoteManagedHome(
   // Copy the shipped skills into $HOME/.gemini/skills so the CLI finds them under
   // the managed home.
   const remoteSkillsAssetDir = stagedRuntime.assetDirs.skills;
+  try {
   if (remoteSkillsAssetDir) {
     const remoteSkillsDir = path.posix.join(managedRemoteHomeDir, ".gemini", "skills");
     await runAdapterExecutionTargetShellCommand(
@@ -223,6 +224,12 @@ async function prepareGeminiRemoteManagedHome(
   }
 
   return { stagedRuntime };
+  } catch (error) {
+    await stagedRuntime.disposeRuntime().catch(async (cleanupError) => {
+      await onLog("stderr", `[paperclip] Gemini ACP cleanup also failed after materialization failure: ${String(cleanupError)}\n`);
+    });
+    throw error;
+  }
 }
 
 function withGeminiAcpDefaults(options: GeminiAcpExecutorOptions): AcpxEngineExecutorOptions {
@@ -439,24 +446,17 @@ export async function testGeminiAcpEnvironment(
   });
 
   const envConfig = parseObject(config.env);
-  const considerHostEnv = !targetIsRemote;
-  const hasGca = envConfig.GOOGLE_GENAI_USE_GCA === "true" || (considerHostEnv && process.env.GOOGLE_GENAI_USE_GCA === "true");
+  const hasGca = envConfig.GOOGLE_GENAI_USE_GCA === "true";
   const configGeminiApiKey = envConfig.GEMINI_API_KEY;
-  const hostGeminiApiKey = considerHostEnv ? process.env.GEMINI_API_KEY : undefined;
   const configGoogleApiKey = envConfig.GOOGLE_API_KEY;
-  const hostGoogleApiKey = considerHostEnv ? process.env.GOOGLE_API_KEY : undefined;
   if (
     isNonEmpty(configGeminiApiKey) ||
-    isNonEmpty(hostGeminiApiKey) ||
     isNonEmpty(configGoogleApiKey) ||
-    isNonEmpty(hostGoogleApiKey) ||
     hasGca
   ) {
     const source = hasGca
       ? "Google account login (GCA)"
-      : isNonEmpty(configGeminiApiKey) || isNonEmpty(configGoogleApiKey)
-        ? "adapter config env"
-        : "server environment";
+      : "adapter config env";
     checks.push({
       code: "gemini_acp_credentials_detected",
       level: "info",

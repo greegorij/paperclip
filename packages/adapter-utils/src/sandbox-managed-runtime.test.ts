@@ -157,6 +157,24 @@ async function listTarMembers(rootDir: string, name: string, bytes: Buffer): Pro
 }
 
 describe("sandbox managed runtime", () => {
+  it.each(["../escape", "/absolute", "nested/name"])(
+    "rejects unsafe adapterKey %s before sandbox mutation",
+    async (adapterKey) => {
+      const client = {
+        makeDir: vi.fn(), writeFile: vi.fn(), readFile: vi.fn(), listFiles: vi.fn(),
+        remove: vi.fn(), run: vi.fn(),
+      } as unknown as SandboxManagedRuntimeClient;
+      await expect(prepareSandboxManagedRuntime({
+        spec: { transport: "sandbox", provider: "test", sandboxId: "one", remoteCwd: "/app", timeoutMs: 1000, apiKey: null },
+        runId: "run-safe",
+        adapterKey,
+        client,
+        workspaceLocalDir: "/tmp/workspace",
+      })).rejects.toThrow(/adapterKey must be a safe path segment/);
+      expect(client.makeDir).not.toHaveBeenCalled();
+      expect(client.run).not.toHaveBeenCalled();
+    },
+  );
   const cleanupDirs: string[] = [];
 
   afterEach(async () => {

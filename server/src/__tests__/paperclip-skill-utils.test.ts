@@ -15,8 +15,10 @@ async function makeTempDir(prefix: string): Promise<string> {
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
 /** Keep the mandatory hot-path skill short enough that agents can finish reading it before first work. */
-const MAX_SKILL_MD_LINES = 220;
-const MAX_SKILL_MD_BYTES = 18_000;
+// Includes the mandatory control-plane/auth contract; still bounded so the
+// hot-path skill cannot grow without an explicit review of this budget.
+const MAX_SKILL_MD_LINES = 260;
+const MAX_SKILL_MD_BYTES = 22_000;
 
 describe("paperclip skill utils", () => {
   const cleanupDirs = new Set<string>();

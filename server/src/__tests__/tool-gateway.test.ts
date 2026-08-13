@@ -3570,6 +3570,16 @@ rl.on("line", (line) => {
       })
       .expect(200);
 
+    await db
+      .update(toolMcpGatewayTokens)
+      .set({ expiresAt: new Date(Date.now() - 1_000) })
+      .where(eq(toolMcpGatewayTokens.id, token.id));
+    await request(app)
+      .post(`/api/tool-gateway/gateways/${namedGateway.id}/mcp`)
+      .set("authorization", `Bearer ${token.token}`)
+      .send({ jsonrpc: "2.0", id: 22, method: "tools/list" })
+      .expect(200);
+
     const [invocation] = await db
       .select()
       .from(toolInvocations)

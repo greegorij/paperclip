@@ -1000,6 +1000,36 @@ describe("sandbox adapter execution targets", () => {
     }
   });
 
+  it("removes a partially-created bridge directory when startup fails", async () => {
+    const executed: Array<{ args?: string[] }> = [];
+    const target: AdapterSandboxExecutionTarget = {
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "failing-provider",
+      remoteCwd: "/workspace",
+      runner: {
+        execute: async (input) => {
+          executed.push(input);
+          if (input.args?.join(" ").includes("rm -rf --")) {
+            return { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "", pid: null, startedAt: new Date().toISOString() };
+          }
+          throw new Error("bridge worker startup failed");
+        },
+      },
+    };
+
+    await expect(startAdapterExecutionTargetPaperclipBridge({
+      runId: "failed-run",
+      target,
+      runtimeRootDir: null,
+      adapterKey: "codex",
+      hostApiToken: "run-token",
+    })).rejects.toThrow("bridge worker startup failed");
+    expect(executed.some((call) => call.args?.join(" ").includes(
+      "rm -rf -- '/workspace/.paperclip-runtime/codex/runs/failed-run/paperclip-bridge'",
+    ))).toBe(true);
+  });
+
   it("creates a sandbox run log tail factory when bridge streaming is enabled", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-execution-target-bridge-stream-"));
     cleanupDirs.push(rootDir);

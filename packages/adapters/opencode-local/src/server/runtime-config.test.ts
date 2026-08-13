@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { prepareOpenCodeRuntimeConfig } from "./runtime-config.js";
+import { prepareOpenCodeRuntimeConfig, sweepAbandonedOpenCodeRuntimeConfigs } from "./runtime-config.js";
 
 const cleanupPaths = new Set<string>();
 
@@ -31,6 +31,29 @@ async function makeConfigHome(initialConfig?: Record<string, unknown>) {
 }
 
 describe("prepareOpenCodeRuntimeConfig", () => {
+  it("sweeps abandoned owned configs but preserves live, foreign, and symlink entries", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-sweep-test-"));
+    cleanupPaths.add(root);
+    const make = async (name: string, marker: unknown) => {
+      const dir = path.join(root, `paperclip-opencode-config-${name}`);
+      await fs.mkdir(dir);
+      await fs.writeFile(path.join(dir, ".paperclip-opencode-runtime"), JSON.stringify(marker));
+      return dir;
+    };
+    const stale = await make("stale", { owner: "paperclip-opencode-runtime", pid: 99999999 });
+    const live = await make("live", { owner: "paperclip-opencode-runtime", pid: process.pid });
+    const foreign = await make("foreign", { owner: "foreign", pid: 99999999 });
+    const target = await fs.mkdtemp(path.join(root, "target-"));
+    const linked = path.join(root, "paperclip-opencode-config-linked");
+    await fs.symlink(target, linked);
+
+    await sweepAbandonedOpenCodeRuntimeConfigs({ tmpDir: root });
+    await expect(fs.access(stale)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.access(live)).resolves.toBeUndefined();
+    await expect(fs.access(foreign)).resolves.toBeUndefined();
+    expect((await fs.lstat(linked)).isSymbolicLink()).toBe(true);
+  });
+
   it("injects an external_directory allow rule by default", async () => {
     const configHome = await makeConfigHome({
       permission: {
@@ -91,6 +114,8 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     const runtimeConfig = JSON.parse(
       await fs.readFile(path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
     ) as Record<string, unknown>;
+    expect((await fs.stat(path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json"))).mode & 0o777)
+      .toBe(0o600);
     expect(runtimeConfig).toMatchObject({
       permission: { read: "allow", external_directory: "allow" },
       provider: providers,
@@ -99,7 +124,7 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     await prepared.cleanup();
   });
 
-  it("reads PAPERCLIP_OPENCODE_PROVIDERS from process.env when absent from the run env", async () => {
+  it("does not read provider config from process.env when absent from the explicit run env", async () => {
     const configHome = await makeConfigHome({ permission: { read: "allow" } });
     const providers = { bifrost: { npm: "@ai-sdk/openai-compatible", models: { "example/model-a": {} } } };
     process.env.PAPERCLIP_OPENCODE_PROVIDERS = JSON.stringify(providers);
@@ -112,7 +137,7 @@ describe("prepareOpenCodeRuntimeConfig", () => {
       const runtimeConfig = JSON.parse(
         await fs.readFile(path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
       ) as Record<string, unknown>;
-      expect(runtimeConfig).toMatchObject({ provider: providers });
+      expect(runtimeConfig).not.toHaveProperty("provider.bifrost");
       await prepared.cleanup();
     } finally {
       delete process.env.PAPERCLIP_OPENCODE_PROVIDERS;
@@ -319,6 +344,43 @@ describe("prepareOpenCodeRuntimeConfig", () => {
 
     expect(prepared.env).toEqual({ XDG_CONFIG_HOME: configHome });
     expect(prepared.notes).toEqual([]);
+    await prepared.cleanup();
+  });
+
+  it("renders authenticated runtime MCP even when permission overrides are disabled", async () => {
+    const configHome = await makeConfigHome({
+      theme: "system",
+      mcp: {
+        Existing: { type: "remote", url: "https://existing.test/mcp" },
+        Paperclip: { type: "remote", url: "https://stale.test/mcp" },
+      },
+    });
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome },
+      config: { dangerouslySkipPermissions: false },
+      runtimeMcpServers: [{
+        name: "Paperclip",
+        url: "http://127.0.0.1:3100/api/mcp",
+        token: "run-scoped-agent-token",
+        connectionId: "paperclip-control-plane",
+      }],
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+    const runtimeConfig = JSON.parse(
+      await fs.readFile(path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(runtimeConfig).toMatchObject({
+      theme: "system",
+      mcp: {
+        Existing: { type: "remote", url: "https://existing.test/mcp" },
+        Paperclip: {
+          type: "remote",
+          url: "http://127.0.0.1:3100/api/mcp",
+          headers: { Authorization: "Bearer run-scoped-agent-token" },
+        },
+      },
+    });
+    expect(runtimeConfig.permission).toBeUndefined();
     await prepared.cleanup();
   });
 });

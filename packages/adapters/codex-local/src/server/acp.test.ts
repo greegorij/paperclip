@@ -488,6 +488,7 @@ describe("codex_local ACP lane", () => {
     await fs.mkdir(path.dirname(commandPath), { recursive: true });
     await fs.writeFile(commandPath, "#!/usr/bin/env sh\n", "utf8");
     setNodeVersion("v22.13.0");
+    process.env.OPENAI_API_KEY = "host-canary-must-not-count";
 
     const result = await testCodexAcpEnvironment({
       adapterType: "codex_local",
@@ -705,7 +706,7 @@ describe("codex_local ACP lane", () => {
     expect(Object.keys(meta[0]?.env ?? {}).filter((key) => key.startsWith("XDG_"))).toEqual([]);
   });
 
-  it("copies a strictly-newer sandbox Codex auth back to the shared host on teardown", async () => {
+  it("copies sandbox Codex auth back to an explicit external CODEX_HOME", async () => {
     const root = await makeTempRoot("paperclip-codex-acp-copyback-newer-");
     const localCwd = path.join(root, "worktree");
     const remoteCwd = path.join(root, "remote-workspace");
@@ -759,13 +760,13 @@ describe("codex_local ACP lane", () => {
     );
 
     expect(result.exitCode).toBe(0);
-    // C5 — copy-back fired on teardown and installed the strictly-newer sandbox
-    // credential onto the shared host under the merge-lock / monotonic guard.
-    const hostAuth = JSON.parse(await fs.readFile(path.join(sharedHostHome, "auth.json"), "utf8"));
+    // Explicit external homes own their credentials; copy-back must target that
+    // same home rather than Paperclip's shared managed source.
+    const hostAuth = JSON.parse(await fs.readFile(path.join(sourceHome, "auth.json"), "utf8"));
     expect(hostAuth.last_refresh).toBe(NEWER_REFRESH);
     expect(hostAuth.tokens.refresh_token).toBe("ref-sandbox-newer");
     // Mode preserved at 0600 by the atomic same-directory rename.
-    const mode = (await fs.stat(path.join(sharedHostHome, "auth.json"))).mode & 0o777;
+    const mode = (await fs.stat(path.join(sourceHome, "auth.json"))).mode & 0o777;
     expect(mode).toBe(0o600);
   });
 
@@ -1087,13 +1088,13 @@ describe("resolveCodexAcpBillingIdentity", () => {
     ).toEqual({ provider: "openai", biller: "openrouter", billingType: "api" });
   });
 
-  it("ignores host env for remote execution targets", () => {
+  it("ignores host provider env even for local execution", () => {
     process.env.OPENAI_API_KEY = "sk-host-only";
-    expect(
-      resolveCodexAcpBillingIdentity({
-        config: {},
-        executionTarget: { kind: "remote", transport: "sandbox", remoteCwd: "/work" },
-      } as never).billingType,
-    ).toBe("subscription");
+    process.env.OPENROUTER_API_KEY = "or-host-only";
+    expect(resolveCodexAcpBillingIdentity({ config: {} })).toEqual({
+      provider: "openai",
+      biller: "chatgpt",
+      billingType: "subscription",
+    });
   });
 });

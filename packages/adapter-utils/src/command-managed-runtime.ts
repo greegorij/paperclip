@@ -461,6 +461,7 @@ export function createCommandManagedRuntimeClient(input: {
 export async function prepareCommandManagedRuntime(input: {
   runner: CommandManagedRuntimeRunner;
   spec: CommandManagedRuntimeSpec;
+  runId?: string;
   adapterKey: string;
   workspaceLocalDir: string;
   workspaceRemoteDir?: string;
@@ -517,6 +518,7 @@ export async function prepareCommandManagedRuntime(input: {
       if (!probe.timedOut && (probe.exitCode ?? 1) === 0) {
         return await prepareSandboxManagedRuntime({
           spec: runtimeSpec,
+          runId: input.runId,
           client,
           adapterKey: input.adapterKey,
           workspaceLocalDir: input.workspaceLocalDir,
@@ -555,6 +557,7 @@ export async function prepareCommandManagedRuntime(input: {
 
   return await prepareSandboxManagedRuntime({
     spec: runtimeSpec,
+    runId: input.runId,
     client,
     adapterKey: input.adapterKey,
     workspaceLocalDir: input.workspaceLocalDir,

@@ -202,6 +202,7 @@ const claudeLocalAdapter: ServerAdapterModule = {
   listModels: listClaudeModels,
   refreshModels: refreshClaudeModels,
   supportsLocalAgentJwt: true,
+  supportsRuntimeMcp: true,
   supportsInstructionsBundle: true,
   instructionsPathKey: "instructionsFilePath",
   requiresMaterializedRuntimeSkills: false,
@@ -275,6 +276,7 @@ const codexLocalAdapter: ServerAdapterModule = {
   listModels: listCodexModels,
   refreshModels: refreshCodexModels,
   supportsLocalAgentJwt: true,
+  supportsRuntimeMcp: true,
   supportsInstructionsBundle: true,
   instructionsPathKey: "instructionsFilePath",
   requiresMaterializedRuntimeSkills: false,
@@ -337,6 +339,7 @@ const geminiLocalAdapter: ServerAdapterModule = {
   models: geminiModels,
   modelProfiles: geminiModelProfiles,
   supportsLocalAgentJwt: true,
+  supportsRuntimeMcp: true,
   supportsInstructionsBundle: true,
   instructionsPathKey: "instructionsFilePath",
   requiresMaterializedRuntimeSkills: true,
@@ -394,6 +397,7 @@ const openCodeLocalAdapter: ServerAdapterModule = {
   sessionManagement: getAdapterSessionManagement("opencode_local") ?? undefined,
   listModels: listOpenCodeModels,
   supportsLocalAgentJwt: true,
+  supportsRuntimeMcp: true,
   supportsInstructionsBundle: true,
   instructionsPathKey: "instructionsFilePath",
   requiresMaterializedRuntimeSkills: true,
@@ -489,6 +493,9 @@ function getDisabledAdapterTypesFromStore(): string[] {
 export function resolveExternalAdapterRegistration(
   externalAdapter: ServerAdapterModule,
 ): ServerAdapterModule {
+  if (externalAdapter.supportsRuntimeMcp && !externalAdapter.supportsLocalAgentJwt) {
+    throw new Error(`Adapter ${externalAdapter.type} cannot support runtime MCP without local agent JWT support`);
+  }
   return {
     ...externalAdapter,
     sessionManagement:
@@ -540,6 +547,9 @@ export function waitForExternalAdapters(): Promise<void> {
 }
 
 export function registerServerAdapter(adapter: ServerAdapterModule): void {
+  if (adapter.supportsRuntimeMcp && !adapter.supportsLocalAgentJwt) {
+    throw new Error(`Adapter ${adapter.type} cannot support runtime MCP without local agent JWT support`);
+  }
   if (BUILTIN_ADAPTER_TYPES.has(adapter.type) && !builtinFallbacks.has(adapter.type)) {
     const existing = adaptersByType.get(adapter.type);
     if (existing) {

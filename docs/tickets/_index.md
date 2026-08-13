@@ -22,6 +22,8 @@ Engineering tickets for this fork (not Paperclip issues). First ticket: **T-2026
 | [T-202608-007](./T-202608-007.md) | Anulowanie stale queued run po reassign nie budzi nowego ownera | OPEN (locally corrected) | 2026-08-02 |
 | [T-202608-008](./T-202608-008.md) | Nowy stan blokady serwera nie miał kompletnego odwzorowania w interfejsie | CORRECTED LOCALLY | 2026-08-04 |
 | [T-202608-009](./T-202608-009.md) | Kontrole wydania zawierały dwa nieaktualne kontrakty testowe | CORRECTED LOCALLY | 2026-08-04 |
+| [T-202608-010](./T-202608-010.md) | Control-plane tools fail after a fleet adapter switch | IMPLEMENTED LOCALLY — production verification pending | 2026-08-13 |
+| [T-202608-011](./T-202608-011.md) | Server database credentials leak into agent processes and run artifacts | IMPLEMENTED LOCALLY — production verification and credential rotation pending | 2026-08-13 |
 
 ## Naming
 

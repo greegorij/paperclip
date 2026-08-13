@@ -89,6 +89,17 @@ describe("redaction", () => {
     expect(result).not.toContain(jwt);
   });
 
+  it("redacts PostgreSQL credentials from free text", () => {
+    const postgres = "postgresql://db-user:db-password@db.internal:5432/paperclip?sslmode=require";
+    const legacy = "postgres://legacy-user:legacy-password@db.internal/paperclip";
+    const result = redactSensitiveText(`primary=${postgres}\nlegacy=${legacy}\nsafe=https://example.test`);
+
+    expect(result).not.toContain("db-password");
+    expect(result).not.toContain("legacy-password");
+    expect(result.match(new RegExp(REDACTED_EVENT_VALUE.replace(/\*/g, "\\*"), "g"))).toHaveLength(2);
+    expect(result).toContain("safe=https://example.test");
+  });
+
   it("redacts inline secrets from command metadata without hiding safe command text", () => {
     const input = {
       command: "custom-acp --token ghp_example_secret env OPENAI_API_KEY=sk-live-example custom-acp",

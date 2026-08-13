@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
 
@@ -9,15 +10,20 @@ const COPIED_SHARED_FILES = ["config.json", "config.toml", "instructions.md"] as
 const SYMLINKED_SHARED_FILES = ["auth.json"] as const;
 const MANAGED_MCP_BLOCK_START = "# BEGIN PAPERCLIP MANAGED MCP";
 const MANAGED_MCP_BLOCK_END = "# END PAPERCLIP MANAGED MCP";
+const CODEX_STAGED_HOME_PREFIX = "paperclip-codex-home-sync-";
+const CODEX_STAGED_HOME_OWNER = ".paperclip-codex-staged-home";
+const CODEX_STAGED_HOME_SWEEP_LIMIT = 128;
+let codexStagedHomeSweepCursor = 0;
 
 /**
  * The allowlist of managed `CODEX_HOME` entries that the codex-local adapter
  * stages into the sandbox `home` asset (see {@link stageCodexHomeForSync}).
  * Derived from the seeding constants so it can never drift from what the adapter
  * actually writes into the home: the copied static config files, the symlinked
- * credential file, and the injected `skills/` directory. Everything else the
+ * credential file, and the injected `skills/` directory. `sessions/` is linked
+ * separately to a durable per-agent store after this allowlist is copied. Everything else the
  * stock upstream `codex` binary writes at runtime (`*.sqlite`, `*-wal`,
- * `plugins/`, `cache/`, `sessions/`, `shell_snapshots/`, …) is intentionally
+ * `plugins/`, `cache/`, `shell_snapshots/`, …) is intentionally
  * excluded — it is large host-local runtime state the sandbox run never needs.
  */
 export const CODEX_SYNC_ALLOWLIST = [
@@ -30,7 +36,13 @@ export type ManagedCodexMcpGateway = {
   name: string;
   endpointPath: string;
   bearerToken: string;
+  bearerTokenEnvVar?: string;
 };
+
+export function codexMcpBearerEnvVar(gateway: Pick<ManagedCodexMcpGateway, "name" | "endpointPath">): string {
+  const digest = createHash("sha256").update(`${gateway.name}\0${gateway.endpointPath}`).digest("hex").slice(0, 16).toUpperCase();
+  return `PAPERCLIP_CODEX_MCP_BEARER_TOKEN_${digest}`;
+}
 
 export function mergeManagedCodexMcpGateways(
   primary: ManagedCodexMcpGateway[],
@@ -347,10 +359,10 @@ function buildManagedMcpBlock(input: {
       "",
       `[mcp_servers.${tomlString(managedName)}]`,
       `url = ${tomlString(url)}`,
-      // Codex ignores the legacy inline `headers` key; `http_headers` is the
-      // supported field for static Authorization (alongside bearer_token_env_var /
-      // env_http_headers). Keep the bearer literal in the 0600-staged config.
-      `http_headers = { Authorization = ${tomlString(`Bearer ${gateway.bearerToken}`)} }`,
+      // Keep the short-lived bearer out of config.toml entirely. The deterministic
+      // variable name is safe to persist in this per-run overlay; execute.ts puts
+      // the value only in the child process environment.
+      `bearer_token_env_var = ${tomlString(gateway.bearerTokenEnvVar ?? codexMcpBearerEnvVar(gateway))}`,
     );
   });
   lines.push(MANAGED_MCP_BLOCK_END);
@@ -405,6 +417,60 @@ export async function writeApiKeyAuthJson(home: string, apiKey: string): Promise
 export interface StageCodexHomeForSyncOptions {
   /** Run id, used only to make the staged temp-dir name traceable in logs. */
   runId?: string;
+  /** Durable per-agent Codex session store linked into the private run home. */
+  persistentSessionsDir?: string;
+  /** Shadow runs intentionally receive no durable session history. */
+  includePersistentSessions?: boolean;
+}
+
+function processIsAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Best-effort crash recovery for private Codex staging homes owned by Paperclip. */
+export async function sweepAbandonedCodexStagedHomes(input: {
+  tmpDir?: string;
+  onWarning?: (message: string) => void;
+} = {}): Promise<void> {
+  const tmpDir = input.tmpDir ?? os.tmpdir();
+  let names: string[];
+  try {
+    names = (await fs.readdir(tmpDir)).filter((name) => name.startsWith(CODEX_STAGED_HOME_PREFIX)).sort();
+  } catch (error) {
+    input.onWarning?.(`Could not scan abandoned Codex staged homes: ${String(error)}`);
+    return;
+  }
+  if (names.length === 0) return;
+  const start = codexStagedHomeSweepCursor % names.length;
+  const batch = Array.from(
+    { length: Math.min(names.length, CODEX_STAGED_HOME_SWEEP_LIMIT) },
+    (_, index) => names[(start + index) % names.length]!,
+  );
+  codexStagedHomeSweepCursor = (start + batch.length) % names.length;
+  for (const name of batch) {
+    const dir = path.join(tmpDir, name);
+    try {
+      const stat = await fs.lstat(dir);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
+      const markerStat = await fs.lstat(path.join(dir, CODEX_STAGED_HOME_OWNER));
+      if (!markerStat.isFile() || markerStat.isSymbolicLink()) continue;
+      const marker = JSON.parse(await fs.readFile(path.join(dir, CODEX_STAGED_HOME_OWNER), "utf8")) as {
+        owner?: unknown; pid?: unknown;
+      };
+      if (marker.owner !== "paperclip-codex-staged-home" || typeof marker.pid !== "number") continue;
+      if (processIsAlive(marker.pid)) continue;
+      await fs.rm(dir, { recursive: true, force: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      input.onWarning?.(`Could not remove abandoned Codex staged home ${dir}: ${String(error)}`);
+    }
+  }
 }
 
 /**
@@ -595,7 +661,8 @@ async function stageCodexHomeEntry(
  * fresh private temp dir and returns its path, for registration as the sandbox
  * `home` asset. This replaces syncing the whole managed home + a name denylist:
  * only the files Codex actually needs are uploaded, so oversized runtime state
- * (`sessions/`, `*.sqlite`, `plugins/`, …) never reaches the sandbox.
+ * (`*.sqlite`, `plugins/`, …) never reaches the sandbox. `sessions/` is the one
+ * durable runtime subtree, linked separately so real resume survives run cleanup.
  *
  * - **Symlinks are dereferenced to bytes** — the single-use `auth.json`
  *   credential (a symlink into the shared source home) and each `skills/` entry
@@ -615,13 +682,27 @@ export async function stageCodexHomeForSync(
   effectiveCodexHome: string,
   options: StageCodexHomeForSyncOptions = {},
 ): Promise<string> {
+  await sweepAbandonedCodexStagedHomes();
   const runIdPart = nonEmpty(options.runId ?? undefined);
   const stagedHome = await fs.mkdtemp(
-    path.join(os.tmpdir(), `paperclip-codex-home-sync-${runIdPart ? `${runIdPart}-` : ""}`),
+    path.join(os.tmpdir(), `${CODEX_STAGED_HOME_PREFIX}${runIdPart ? `${runIdPart}-` : ""}`),
   );
   try {
+    await fs.writeFile(path.join(stagedHome, CODEX_STAGED_HOME_OWNER), JSON.stringify({
+      owner: "paperclip-codex-staged-home",
+      pid: process.pid,
+      runId: runIdPart ?? null,
+      createdAt: new Date().toISOString(),
+    }), { mode: 0o600 });
     for (const entry of CODEX_SYNC_ALLOWLIST) {
       await stageCodexHomeEntry(effectiveCodexHome, stagedHome, entry);
+    }
+    if (options.includePersistentSessions !== false) {
+      const persistentSessionsDir = path.resolve(
+        options.persistentSessionsDir ?? path.join(effectiveCodexHome, "sessions"),
+      );
+      await fs.mkdir(persistentSessionsDir, { recursive: true, mode: 0o700 });
+      await fs.symlink(persistentSessionsDir, path.join(stagedHome, "sessions"), "dir");
     }
     return stagedHome;
   } catch (error) {
