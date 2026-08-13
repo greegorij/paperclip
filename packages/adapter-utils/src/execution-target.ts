@@ -1500,6 +1500,39 @@ async function readRemoteJsonFiles(input: {
   return out;
 }
 
+type ProcessSessionRemoteEvent = {
+  type?: string;
+  stream?: "stdout" | "stderr";
+  data?: string;
+  code?: number | null;
+  signal?: string | null;
+  message?: string;
+};
+
+export function createSequencedProcessSessionEventDrain(
+  deliver: (event: ProcessSessionRemoteEvent) => void,
+) {
+  const buffered = new Map<number, ProcessSessionRemoteEvent>();
+  let nextSeq = 1;
+
+  return (events: Array<{ name: string; body: string }>): boolean => {
+    for (const event of events) {
+      const parsed = JSON.parse(event.body) as ProcessSessionRemoteEvent;
+      const seq = Number.parseInt(event.name.slice(0, event.name.indexOf(".")), 10);
+      if (!Number.isSafeInteger(seq) || seq < nextSeq) continue;
+      buffered.set(seq, parsed);
+    }
+    while (buffered.has(nextSeq)) {
+      const parsed = buffered.get(nextSeq)!;
+      buffered.delete(nextSeq);
+      nextSeq += 1;
+      deliver(parsed);
+      if (parsed.type === "exit" || parsed.type === "error") return true;
+    }
+    return false;
+  };
+}
+
 async function waitForLocalServerListen(server: net.Server): Promise<number> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -1609,14 +1642,7 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
   let stopping = false;
   let stdinSeq = 0;
   let pollTimer: NodeJS.Timeout | null = null;
-  const pendingRemoteEvents: Array<{
-    type?: string;
-    stream?: "stdout" | "stderr";
-    data?: string;
-    code?: number | null;
-    signal?: string | null;
-    message?: string;
-  }> = [];
+  const pendingRemoteEvents: ProcessSessionRemoteEvent[] = [];
   const token = createSandboxCallbackBridgeToken(18);
   const proxyDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-proxy-"));
 
@@ -1651,6 +1677,8 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
       if (event) writeRemoteEventToSocket(event);
     }
   };
+
+  const drainRemoteEvents = createSequencedProcessSessionEventDrain(deliverRemoteEvent);
 
   const liveSockets = new Set<net.Socket>();
   const server = net.createServer((nextSocket) => {
@@ -1718,18 +1746,7 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
     if (stopping) return;
     try {
       const events = await readRemoteJsonFiles({ client, dir: eventsDir });
-      for (const event of events) {
-        const parsed = JSON.parse(event.body) as {
-          type?: string;
-          stream?: "stdout" | "stderr";
-          data?: string;
-          code?: number | null;
-          signal?: string | null;
-          message?: string;
-        };
-        deliverRemoteEvent(parsed);
-        if (parsed.type === "exit" || parsed.type === "error") return;
-      }
+      if (drainRemoteEvents(events)) return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await onLog("stderr", `[paperclip] ACP process session bridge poll failed: ${message}\n`);

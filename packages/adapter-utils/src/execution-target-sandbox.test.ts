@@ -22,6 +22,7 @@ import {
   runAdapterExecutionTargetShellCommand,
   startAdapterExecutionTargetProcessSessionBridge,
   startAdapterExecutionTargetPaperclipBridge,
+  createSequencedProcessSessionEventDrain,
   type AdapterSandboxExecutionTarget,
 } from "./execution-target.js";
 import { createSandboxRunLogTailFactory } from "./sandbox-run-log-stream.js";
@@ -386,6 +387,27 @@ describe("sandbox adapter execution targets", () => {
     } finally {
       await bridge?.stop();
     }
+  });
+
+  it("holds an out-of-order exit until every earlier process-session event is visible", () => {
+    const delivered: Array<{ type?: string; data?: string }> = [];
+    const drain = createSequencedProcessSessionEventDrain((event) => delivered.push(event));
+
+    expect(drain([{
+      name: "000000000003.json",
+      body: JSON.stringify({ type: "exit", code: 0 }),
+    }])).toBe(false);
+    expect(delivered).toEqual([]);
+
+    expect(drain([
+      { name: "000000000002.json", body: JSON.stringify({ type: "data", data: "second" }) },
+      { name: "000000000001.json", body: JSON.stringify({ type: "data", data: "first" }) },
+    ])).toBe(true);
+    expect(delivered).toEqual([
+      { type: "data", data: "first" },
+      { type: "data", data: "second" },
+      { type: "exit", code: 0 },
+    ]);
   });
 
   it("ignores unauthenticated connections to the process session bridge", async () => {
