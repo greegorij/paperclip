@@ -1026,7 +1026,7 @@ describe("sandbox adapter execution targets", () => {
       hostApiToken: "run-token",
     })).rejects.toThrow("bridge worker startup failed");
     expect(executed.some((call) => call.args?.join(" ").includes(
-      "rm -rf -- '/workspace/.paperclip-runtime/codex/runs/failed-run/paperclip-bridge'",
+      "rm -rf -- '/workspace/.paperclip-runtime/codex/runs/failed-run'",
     ))).toBe(true);
   });
 
