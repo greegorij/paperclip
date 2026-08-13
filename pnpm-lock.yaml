@@ -363,9 +363,6 @@ importers:
 
   packages/google-sheets-mcp-server:
     dependencies:
-      '@modelcontextprotocol/sdk':
-        specifier: ^1.29.0
-        version: 1.29.0(zod@3.25.76)
       googleapis:
         specifier: ^164.1.0
         version: 164.1.0
@@ -767,9 +764,6 @@ importers:
       '@paperclipai/hermes-paperclip-adapter':
         specifier: workspace:*
         version: link:../packages/adapters/hermes
-      '@paperclipai/mcp-server':
-        specifier: workspace:*
-        version: link:../packages/mcp-server
       '@paperclipai/plugin-sdk':
         specifier: workspace:*
         version: link:../packages/plugins/sdk
