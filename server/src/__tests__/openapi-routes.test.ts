@@ -43,6 +43,7 @@ const apiPrefixes: Record<string, string> = {
   "issue-tree-control.ts": "/api",
   "llms.ts": "/api",
   "openapi.ts": "/api",
+  "paperclip-mcp.ts": "/api",
   "plugin-ui-static.ts": "/api",
   "plugins.ts": "/api",
   "projects.ts": "/api",
@@ -239,6 +240,28 @@ describe("openapi routes", () => {
     const { spec } = loadSpecRoutes();
 
     expect(spec.paths["/api/openapi.json"].get.security).toEqual([]);
+    expect(spec.paths["/api/mcp"].post.security).toEqual([{ AgentBearerAuth: [] }]);
+    expect(spec.paths["/api/mcp"].post["x-paperclip-authorization"]).toEqual({
+      actor: "run_scoped_agent_jwt",
+      activeRun: true,
+    });
+    expect(spec.paths["/api/mcp"].post.parameters).toContainEqual(expect.objectContaining({
+      name: "Accept",
+      in: "header",
+      required: true,
+      schema: { type: "string", example: "application/json, text/event-stream" },
+    }));
+    expect(spec.paths["/api/mcp"].post.requestBody.content["application/json"].schema.oneOf).toHaveLength(2);
+    expect(spec.paths["/api/mcp"].post.responses["200"].content["application/json"].schema.oneOf).toHaveLength(2);
+    expect(spec.paths["/api/mcp"].post.responses["200"].content["text/event-stream"]).toBeDefined();
+    expect(spec.paths["/api/mcp"].post.responses).toEqual(expect.objectContaining({
+      "200": expect.any(Object),
+      "202": expect.any(Object),
+      "400": expect.any(Object),
+      "401": expect.any(Object),
+      "406": expect.any(Object),
+      "415": expect.any(Object),
+    }));
     expect(spec.paths["/api/plugins/install"].post.security).toEqual([
       { BoardSessionAuth: [] },
       { BoardApiKeyAuth: [] },

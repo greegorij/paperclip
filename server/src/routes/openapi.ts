@@ -1038,6 +1038,27 @@ function applyDocumentFixups(document: any): any {
               ? { actor: "board_or_agent" }
               : { actor: "public" };
 
+      if (method.toLowerCase() === "post" && path === "/api/mcp") {
+        operation.security = [securityRequirement(AGENT_BEARER_AUTH_SCHEME)];
+        operation["x-paperclip-authorization"] = {
+          actor: "run_scoped_agent_jwt",
+          activeRun: true,
+        };
+        operation.parameters = [
+          ...((operation.parameters as unknown[]) ?? []),
+          {
+            name: "Accept",
+            in: "header",
+            required: true,
+            description: "MCP Streamable HTTP requires both JSON and server-sent event responses.",
+            schema: {
+              type: "string",
+              example: "application/json, text/event-stream",
+            },
+          },
+        ];
+      }
+
       const key = operationKey(method, path);
       if (authLevel !== "public") {
         const responses = (operation.responses ??= {}) as Record<string, unknown>;
@@ -1167,6 +1188,32 @@ registry.registerPath({
   tags: ["health"],
   summary: "Get the generated OpenAPI document",
   responses: { 200: r.ok() },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/mcp",
+  tags: ["agents"],
+  summary: "Call the run-scoped Paperclip MCP endpoint",
+  request: {
+    body: jsonBody(z.union([z.record(z.unknown()), z.array(z.record(z.unknown())).min(1)])),
+  },
+  responses: {
+    200: {
+      description: "JSON-RPC response as JSON or a server-sent event stream",
+      content: {
+        "application/json": {
+          schema: z.union([z.record(z.unknown()), z.array(z.record(z.unknown())).min(1)]),
+        },
+        "text/event-stream": { schema: z.string() },
+      },
+    },
+    202: { description: "JSON-RPC notification accepted" },
+    400: r.badRequest,
+    401: r.unauthorized,
+    406: { description: "Required MCP response media types were not accepted" },
+    415: { description: "Request Content-Type must be application/json" },
+  },
 });
 
 // ─── Companies ───────────────────────────────────────────────────────────────
