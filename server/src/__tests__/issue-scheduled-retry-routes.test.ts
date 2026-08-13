@@ -7,7 +7,9 @@ import {
   activityLog,
   agents,
   agentWakeupRequests,
+  budgetPolicies,
   companies,
+  costEvents,
   createDb,
   heartbeatRunEvents,
   heartbeatRuns,
@@ -52,6 +54,8 @@ describeEmbeddedPostgres("issue scheduled retry routes", () => {
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
+    await db.delete(costEvents);
+    await db.delete(budgetPolicies);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -360,6 +364,28 @@ describeEmbeddedPostgres("issue scheduled retry routes", () => {
 
   it("suppresses retry-now when the issue is under a budget hard-stop", async () => {
     const { companyId, agentId, issueId, retryRunId } = await seedIssueWithRetry();
+    await db.insert(budgetPolicies).values({
+      companyId,
+      scopeType: "agent",
+      scopeId: agentId,
+      windowKind: "calendar_month_utc",
+      metric: "billed_cents",
+      amount: 1,
+      hardStopEnabled: true,
+      isActive: true,
+    });
+    await db.insert(costEvents).values({
+      companyId,
+      agentId,
+      provider: "test",
+      biller: "test",
+      billingType: "metered_api",
+      model: "budget-gate-fixture",
+      inputTokens: 1,
+      outputTokens: 0,
+      costCents: 1,
+      occurredAt: new Date(),
+    });
     await db
       .update(agents)
       .set({ status: "paused", pauseReason: "budget" })

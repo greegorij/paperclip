@@ -290,14 +290,7 @@ const plugin = definePlugin({
   },
 
   async onEnvironmentAcquireLease(
-    // `adapterType` is an optional per-run hint the server may pass once the
-    // SDK lease params grow that field (companion server-integration PR). The
-    // plugin works without it: absent means "use the environment's configured
-    // default adapter", so it stays compatible with the current SDK.
-    params: PluginEnvironmentAcquireLeaseParams & {
-      adapterType?: string;
-      executionWorkspaceSettings?: Record<string, unknown> | null;
-    },
+    params: PluginEnvironmentAcquireLeaseParams,
   ): Promise<PluginEnvironmentLease> {
     const config = kubernetesProviderConfigSchema.parse(params.config);
     const namespace = deriveTenantNamespace(config, params.companyId);

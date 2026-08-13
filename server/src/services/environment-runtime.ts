@@ -116,6 +116,8 @@ export interface EnvironmentDriverAcquireInput {
   environment: Environment;
   issueId: string | null;
   agentId: string | null;
+  /** Explicit run environment after host-side binding and secret resolution. */
+  env?: Record<string, string>;
   /**
    * UUID of the owning heartbeat run, or null for ad-hoc invocations
    * (e.g. operator-initiated `Test` probes) that are not tied to a run.
@@ -1611,6 +1613,7 @@ function createPluginEnvironmentDriver(
         executionWorkspaceId: input.executionWorkspaceId ?? undefined,
         adapterType: input.adapterType ?? undefined,
         executionWorkspaceSettings: input.executionWorkspaceSettings,
+        ...(input.env ? { env: input.env } : {}),
       } as PluginEnvironmentAcquireLeaseParams);
 
       return await environmentsSvc.acquireLease({
@@ -1833,6 +1836,8 @@ export function environmentRuntimeService(
       executionWorkspaceSettings?: IssueExecutionWorkspaceSettings | null;
       /** The agent's adapter type for this run (mixed-harness environments). */
       adapterType?: string | null;
+      /** Explicit run environment after host-side binding and secret resolution. */
+      env?: Record<string, string>;
       /**
        * Force applying the active custom-image template even for ad-hoc (no
        * issue/run) invocations. Operator `Test` probes set this so the runtime
@@ -1858,6 +1863,7 @@ export function environmentRuntimeService(
         executionWorkspaceMode: leaseContext.executionWorkspaceMode,
         executionWorkspaceSettings: input.executionWorkspaceSettings ?? null,
         adapterType: input.adapterType ?? null,
+        env: input.env,
         applyCustomImageTemplate: input.applyCustomImageTemplate ?? false,
       });
 

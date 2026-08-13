@@ -602,6 +602,8 @@ export interface PluginEnvironmentLease {
 
 export interface PluginEnvironmentAcquireLeaseParams extends PluginEnvironmentDriverBaseParams {
   runId: string;
+  /** Explicit run environment resolved by the host; never implicit worker process.env. */
+  env?: Record<string, string>;
   workspaceMode?: string;
   requestedCwd?: string;
   agentId?: string;

@@ -2323,6 +2323,7 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
         id: executionWorkspaceId,
         mode: "shared_workspace",
       },
+      env: { OPENROUTER_API_KEY: "explicit-run-key" },
     });
 
     expect(acquired.lease.providerLeaseId).toBe("fresh-agent-lease");
@@ -2330,6 +2331,7 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
     expect(workerManager.call).toHaveBeenCalledWith(pluginId, "environmentAcquireLease", expect.objectContaining({
       agentId: otherAgentId,
       executionWorkspaceId,
+      env: { OPENROUTER_API_KEY: "explicit-run-key" },
     }));
   });
 

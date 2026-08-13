@@ -14315,6 +14315,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       agentId: agent.id,
       persistedExecutionWorkspace,
       executionWorkspaceSettings: environmentExecutionWorkspaceSettings,
+      env: Object.fromEntries(
+        Object.entries(parseObject(resolvedConfig.env)).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string",
+        ),
+      ),
     });
     const selectedEnvironment = acquiredEnvironment.environment;
     // Defense-in-depth: re-check the actually-acquired environment against the
